@@ -62,6 +62,29 @@ Work happens in the user's checkout, on the current branch. Before any phase tha
 writes, make sure the tree is clean or committed, so a bad phase is one
 `git checkout .` away.
 
+## Review and QA criteria
+
+Phases 2 and 3 brief the worker against a criteria document. Never hardcode a
+path to one — the worker runs on someone else's machine, and a brief pointing at
+a file that is not there makes agy improvise silently. Resolve it instead:
+
+```
+scripts/resolve-criteria.sh code-review --dir <repo>
+scripts/resolve-criteria.sh qa --dir <repo>
+```
+
+It prints one absolute path, taking the first that exists:
+
+| # | source | for |
+|---|---|---|
+| 1 | `<repo>/.claude/criteria/<name>.md` | a project that wants its own bar |
+| 2 | `~/.claude/skills/code-review/SKILL.md`, `~/.claude/skills/e2e-qa-tester/SKILL.md` | the user's own Claude skills, if installed |
+| 3 | `criteria/<name>.md` in this skill | vendored fallback — always present |
+
+Because the fallback ships here, resolution never fails. Run it, then paste the
+**resolved absolute path** into the brief; the worker reads a real file either
+way.
+
 ---
 
 ## Phases
@@ -141,9 +164,12 @@ workers.
 
 ### Phase 2 — Code review (tier `high`)
 
-Brief: *"Read and follow `~/.claude/skills/code-review/SKILL.md`. Review the
-working-tree diff. Write findings to `.tmp/REVIEW_FEEDBACK.md`, severity-ordered.
-Do not fix anything. End with `STATUS: PASSED` or
+Resolve the criteria first — `scripts/resolve-criteria.sh code-review --dir <repo>`
+— and put the path it prints into the brief verbatim.
+
+Brief: *"Read and follow `<resolved criteria path>`. Review the working-tree
+diff. Write findings to `.tmp/REVIEW_FEEDBACK.md`, severity-ordered. Do not fix
+anything. End with `STATUS: PASSED` or
 `STATUS: FAILED | File: .tmp/REVIEW_FEEDBACK.md`."*
 
 **Orchestrator gate — do not skip.** Independently of the worker's verdict, run
@@ -159,9 +185,12 @@ over yourself and say so in the final report.
 
 ### Phase 3 — QA (tier `medium`, `--mode full --sandbox`)
 
-Brief: *"Read and follow `~/.claude/skills/e2e-qa-tester/SKILL.md`. Simulate the
-user flows for <feature> using the run/test commands in `.tmp/DISCOVERY.md`.
-Write findings to `.tmp/QA_REPORT.md`. End with `STATUS: PASSED` or
+Resolve the criteria first — `scripts/resolve-criteria.sh qa --dir <repo>` — and
+put the path it prints into the brief verbatim.
+
+Brief: *"Read and follow `<resolved criteria path>`. Simulate the user flows for
+<feature> using the run/test commands in `.tmp/DISCOVERY.md`. Write findings to
+`.tmp/QA_REPORT.md`. Do not modify source. End with `STATUS: PASSED` or
 `STATUS: FAILED | File: .tmp/QA_REPORT.md`."*
 
 This is the only phase that runs commands, so it needs `--mode full`, which turns
