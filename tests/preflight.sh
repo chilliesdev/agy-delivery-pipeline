@@ -30,6 +30,10 @@ cat > "$STUB" <<'STUB_EOF'
 set -uo pipefail
 if [ "${1:-}" = "models" ]; then
   printf 'Fetching available models...\n' >&2
+  # Real agy drains stdin before it answers, so an inherited stdin that never
+  # reaches EOF hangs it forever. Reproduce that here: with the redirect in
+  # place this read sees EOF at once, without it this blocks.
+  [ -n "${STUB_READS_STDIN:-}" ] && cat >/dev/null
   [ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP" | cat
   [ -n "${STUB_MODELS:-}" ] && printf '%b' "$STUB_MODELS"
   exit "${STUB_RC:-0}"
@@ -142,6 +146,21 @@ check timeout-env "$CODE" 7 "AGY_PREFLIGHT_TIMEOUT bounds the fetch too"
 sleep 1
 LEFT="$(pgrep -f 'sleep 4793' 2>/dev/null | grep -c .)"
 check timeout-env-no-orphan "${LEFT:-0}" "0" "and kills the group just the same"
+
+# 12. The fetch must not inherit stdin. Real agy drains stdin before answering
+# `models`, so when phase.sh dispatched — a script calling a script, stdin still
+# connected — the fetch never returned and every dispatch died on the watchdog at
+# exactly the bound. Standalone runs looked fine only because this harness and an
+# interactive shell hand it an stdin that is already at EOF. The stub reproduces
+# the drain; the pipe below is an stdin that never closes.
+# The exit code is the whole signal: with the redirect the fetch answers and
+# preflight exits 0, without it the fetch blocks on a pipe that never closes and
+# preflight exits 7 at the bound. Elapsed time is not asserted — the upstream
+# `sleep` outlives preflight either way, so timing here measures the pipe, not
+# the fetch.
+OUT="$( { sleep 15 | STUB_MODELS="$LISTING" STUB_RC=0 STUB_READS_STDIN=1 AGY_BIN="$STUB" \
+          /bin/bash "$PREFLIGHT" --tier medium --timeout 5; } 2>&1 )"; CODE=$?
+check stdin-rc "$CODE" 0 "the fetch answers with an stdin that never reaches EOF"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

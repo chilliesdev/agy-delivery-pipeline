@@ -129,15 +129,30 @@ it with `--timeout <n>` (seconds, or `30s` / `5m`) or `AGY_PREFLIGHT_TIMEOUT`;
 `model_unavailable:<id>` or `timeout` — because the orchestrator never reads
 stderr. It is on by default: a sign-in can lapse and a model can be withdrawn
 mid-pipeline, so checking once at Phase 0 is not enough. Pass `--no-preflight`,
-or set `AGY_SKIP_PREFLIGHT=1`, to drop it from a tight retry loop. A `timeout`
-refusal is the one worth simply re-running: the hang is transient on agy's side,
-and no retry is charged for it.
+or set `AGY_SKIP_PREFLIGHT=1`, to drop it from a tight retry loop. No retry is
+charged for a `timeout` refusal.
 
-One agy behaviour the script has to work around, and so does anything else that
-reads its output: **agy hangs when its stdout is a plain file.** Read it through
-a pipe or a command substitution, never a `>` redirect — the watchdog keeps to
-that too, letting the fetch write into `cat` and giving `cat` the file. Covered
-by [tests/preflight.sh](tests/preflight.sh).
+**Two agy behaviours anything reading its output has to work around**, both found
+the hard way:
+
+- **agy hangs when its stdout is a plain file.** Read it through a pipe or a
+  command substitution, never a `>` redirect — the watchdog keeps to that too,
+  letting the fetch write into `cat` and giving `cat` the file.
+- **agy drains stdin before it answers, so it must be given `</dev/null`.** An
+  inherited stdin that never reaches EOF hangs it outright.
+
+The second one is worth dwelling on, because it looked like something else
+entirely. Every `phase.sh` dispatch died on the watchdog at *exactly* the bound
+while running `preflight.sh` by hand answered in five seconds — which reads like
+a flaky network and is nothing of the kind. A shell hands a script an stdin that
+is already at EOF; `phase.sh` hands its child the one it inherited. So the bug
+was invisible from the terminal and total in the pipeline. If every dispatch ever
+times out on the same number again, suspect something holding a handle open, not
+the network.
+
+Both are covered by [tests/preflight.sh](tests/preflight.sh) — the stdin case
+with a stub that drains stdin and a pipe that never closes, which fails if the
+redirect is ever dropped.
 
 Two agy behaviours every brief must respect:
 

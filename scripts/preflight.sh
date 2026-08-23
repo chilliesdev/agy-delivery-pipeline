@@ -19,10 +19,15 @@
 # seen missing a model a fresh fetch offered. Only parsed model ids are ever
 # printed — never the raw output, which is where an auth payload would sit.
 #
-# Two agy behaviours this depends on: the "Fetching available models..." banner
-# goes to stderr, and agy hangs when its stdout is a plain file — so the listing
-# still reaches this script down a pipe, never a `>` redirect, watchdog or no
-# watchdog. The fetch writes into `cat`; it is `cat` that owns the file.
+# Three agy behaviours this depends on. The "Fetching available models..."
+# banner goes to stderr. agy hangs when its stdout is a plain file — so the
+# listing still reaches this script down a pipe, never a `>` redirect, watchdog
+# or no watchdog; the fetch writes into `cat`, and it is `cat` that owns the
+# file. And agy drains stdin before it answers, so the fetch is given
+# </dev/null: inheriting a stdin that never reaches EOF hangs it outright. That
+# last one is why every dispatch once died on the watchdog at exactly the bound
+# while a standalone run looked fine — a shell hands this script an stdin that
+# is already at EOF, and phase.sh does not.
 #
 # The fetch is bounded because phase.sh runs this before *every* dispatch, and a
 # hang there stalls the pipeline with nothing an orchestrator can act on — no
@@ -98,7 +103,7 @@ MARKER="$FETCH_DIR/timeout"
 # agy's own stdout is the pipe, which is the behaviour it needs; `cat` is what
 # faces the file. The subshell exits with agy's code, not cat's.
 set -m
-( "$AGY" models 2>/dev/null | cat > "$RAW_FILE"; exit "${PIPESTATUS[0]}" ) &
+( "$AGY" models </dev/null 2>/dev/null | cat > "$RAW_FILE"; exit "${PIPESTATUS[0]}" ) &
 FETCH_PID=$!
 set +m
 
@@ -122,7 +127,8 @@ fi
 
 if [ -f "$MARKER" ]; then
   echo "preflight: \`agy models\` did not return within ${LIMIT}s — the fetch hung and was killed." >&2
-  echo "preflight: the hang is transient on agy's side; an immediate re-run usually answers in seconds." >&2
+  echo "preflight: agy did not answer. A re-run often works; if every dispatch times out at exactly this bound," >&2
+  echo "preflight: suspect something holding the fetch open rather than a slow network." >&2
   echo "preflight: raise the bound with --timeout, or drop preflight for this dispatch with --no-preflight." >&2
   exit 7
 fi
