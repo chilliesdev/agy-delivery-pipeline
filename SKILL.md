@@ -131,24 +131,56 @@ writes, make sure the tree is clean or committed, so a bad phase is one
 
 Phases 2 and 3 brief the worker against a criteria document. Never hardcode a
 path to one — the worker runs on someone else's machine, and a brief pointing at
-a file that is not there makes agy improvise silently. Resolve it instead:
+a file that is not there makes agy improvise silently.
+
+**The constraint that shapes all of this: in `accept-edits`, agy refuses to read
+any path outside `--add-dir`, and the refusal aborts the run.** Not a warning, not
+a degraded result — rc=1, no artifacts, nothing written:
+
+```
+Error: permission check failed for read_file "…/criteria/code-review.md":
+user denied permission for read_file(…)
+```
+
+So the criteria file has to be *inside the repo under review*. Resolving a path
+is not enough; the file has to be put where the worker is allowed to open it.
+That is what the script does:
 
 ```
 scripts/resolve-criteria.sh code-review --dir <repo>
 scripts/resolve-criteria.sh qa --dir <repo>
 ```
 
-It prints one absolute path, taking the first that exists:
+It picks a source, copies it to `<repo>/.tmp/criteria/<name>.md`, and prints
+**that copy's** path — always inside `--add-dir`, readable in every mode. Sources,
+first hit wins:
 
 | # | source | for |
 |---|---|---|
 | 1 | `<repo>/.claude/criteria/<name>.md` | a project that wants its own bar |
-| 2 | `~/.claude/skills/code-review/SKILL.md`, `~/.claude/skills/e2e-qa-tester/SKILL.md` | the user's own Claude skills, if installed |
-| 3 | `criteria/<name>.md` in this skill | vendored fallback — always present |
+| 2 | `criteria/<name>.md` in this skill | vendored default — always present |
 
-Because the fallback ships here, resolution never fails. Run it, then paste the
-**resolved absolute path** into the brief; the worker reads a real file either
-way.
+Paste the printed path into the brief. Because the vendored default ships here,
+there is always a file to install, and because it is installed rather than merely
+resolved, the worker can always read it — those are two separate guarantees and
+Phase 2 needs both.
+
+The copy is refreshed on every run, since a stale one would review this round's
+diff against a previous round's bar. `--print-source` names the tier that won
+without copying, for inspection only — a brief built from *that* path is the bug
+this design exists to prevent.
+
+Phase 3 gets the same treatment for consistency, though it would survive either
+way: `--mode full` turns the permission check off entirely, which is the only
+reason QA ever worked while Phase 2 was failing.
+
+A note on what is deliberately absent: the user's own
+`~/.claude/skills/code-review/SKILL.md` and `e2e-qa-tester/SKILL.md` are **not**
+consulted. They are written for a Claude Code session — parallel sub-agents, git
+commands, slash commands, asking the user — none of which a headless agy worker
+has, and the QA one writes its report to the repo root, against this skill's
+`.tmp/QA_REPORT.md` contract. A project that wants a different bar uses tier 1,
+which is per-project and already inside `--add-dir`.
 
 ---
 
@@ -284,8 +316,10 @@ workers.
 
 ### Phase 2 — Code review (tier `high`)
 
-Resolve the criteria first — `scripts/resolve-criteria.sh code-review --dir <repo>`
-— and put the path it prints into the brief verbatim.
+Install the criteria into the repo first —
+`scripts/resolve-criteria.sh code-review --dir <repo>` — and put the path it
+prints into the brief verbatim. It is a path inside the repo, which is the only
+kind this phase can read.
 
 Brief: *"Read and follow `<resolved criteria path>`. Review the working-tree
 diff. Write findings to `.tmp/REVIEW_FEEDBACK.md`, severity-ordered. Do not fix
@@ -336,8 +370,9 @@ verdict are still there to hand over.
 
 ### Phase 3 — QA (tier `medium`, `--mode full --sandbox`)
 
-Resolve the criteria first — `scripts/resolve-criteria.sh qa --dir <repo>` — and
-put the path it prints into the brief verbatim.
+Install the criteria into the repo first —
+`scripts/resolve-criteria.sh qa --dir <repo>` — and put the path it prints into
+the brief verbatim.
 
 Brief: *"Read and follow `<resolved criteria path>`. Simulate the user flows for
 <feature> using the run/test commands in `.tmp/DISCOVERY.md`. Write findings to
