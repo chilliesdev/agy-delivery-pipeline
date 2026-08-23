@@ -18,10 +18,17 @@ trap 'rm -rf "$ROOT"' EXIT INT TERM
 
 # The stub agy: cwd is the repo agy-run.sh cd'd into, so relative .tmp/ paths
 # land where phase.sh looks. Behaviour comes from the STUB_* environment.
+# `agy models` is answered first and on its own terms — it is preflight.sh's
+# call, not the worker's, so STUB_RC and STUB_TRANSCRIPT must not reach it.
+# tests/preflight.sh is where preflight's own failure modes are exercised.
 STUB="$ROOT/agy"
 cat > "$STUB" <<'STUB_EOF'
 #!/usr/bin/env bash
 set -uo pipefail
+if [ "${1:-}" = "models" ]; then
+  printf 'gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\ngemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n'
+  exit 0
+fi
 [ -n "${STUB_VERDICT:-}" ] && { mkdir -p .tmp; printf '%b' "$STUB_VERDICT" > ".tmp/$STUB_PHASE.verdict"; }
 [ -n "${STUB_TRANSCRIPT:-}" ] && printf '%b' "$STUB_TRANSCRIPT"
 exit "${STUB_RC:-0}"

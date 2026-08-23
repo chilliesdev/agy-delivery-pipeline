@@ -19,10 +19,16 @@ trap 'rm -rf "$ROOT"' EXIT INT TERM
 
 # The stub agy: writes the verdict phase.sh expects and dumps its own argv, one
 # argument per line, to $STUB_ARGV (absolute — agy-run.sh cd's into the repo).
+# `agy models` returns before the argv dump, so preflight.sh's call never
+# overwrites the dispatch argv these cases assert on.
 STUB="$ROOT/agy"
 cat > "$STUB" <<'STUB_EOF'
 #!/usr/bin/env bash
 set -uo pipefail
+if [ "${1:-}" = "models" ]; then
+  printf 'gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\ngemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n'
+  exit 0
+fi
 [ -n "${STUB_ARGV:-}" ] && printf '%s\n' "$@" > "$STUB_ARGV"
 mkdir -p .tmp; printf 'STATUS: DONE | File: .tmp/CHANGES.md\n' > ".tmp/$STUB_PHASE.verdict"
 exit 0

@@ -3,16 +3,19 @@
 #
 #   phase.sh --phase <NAME> --brief <file> [--tier low|medium|high]
 #            [--dir <repo>] [--mode accept-edits|plan|full] [--timeout 30m]
-#            [--sandbox]
+#            [--sandbox] [--no-preflight]
 #
 # Reads:   .tmp/<PHASE>.verdict      the verdict the worker wrote itself
 # Writes:  .tmp/logs/<PHASE>.log     full worker transcript (never read whole)
 #          .tmp/<PHASE>.status       one STATUS line for the orchestrator
 # Prints:  the STATUS line only — keeps the orchestrator context lean.
+#
+# preflight.sh runs first unless --no-preflight or AGY_SKIP_PREFLIGHT=1.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
+SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
 SANDBOX_ARGS=()   # array, so the flag is never word-split out of an unquoted scalar
 
 while [ $# -gt 0 ]; do
@@ -24,7 +27,8 @@ while [ $# -gt 0 ]; do
     --mode)    MODE="$2";    shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    --no-preflight) SKIP_PREFLIGHT=1; shift ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -78,6 +82,30 @@ trim_claim() { LC_ALL=C sed -e 's/^[[:space:]*#>_`-]*//' -e 's/[[:space:]*`]*$//
 # The same phase name is re-run by the Phase 2 review loop, so a verdict left by
 # the previous round would otherwise be read as this round's answer.
 rm -f "$VERDICT_FILE"
+
+# Missing CLI, expired sign-in or a model id this account cannot use otherwise
+# surface deep inside the phase, after the brief is written and the time is
+# spent. Check first — one live `agy models` fetch, a few seconds against a
+# phase measured in minutes — and report the refusal as a STATUS line, because
+# the orchestrator never reads stderr. On by default: a sign-in can lapse and a
+# model id can be withdrawn mid-pipeline, so Phase 0 alone is not enough.
+# AGY_SKIP_PREFLIGHT=1 or --no-preflight drops it for a tight retry loop.
+if [ -z "$SKIP_PREFLIGHT" ]; then
+  PREFLIGHT_LOG="$DIR/.tmp/logs/$PHASE.preflight.log"
+  "$HERE/preflight.sh" --model "$MODEL" --quiet >/dev/null 2>"$PREFLIGHT_LOG"
+  PRC=$?
+  if [ "$PRC" -ne 0 ]; then
+    case "$PRC" in
+      127) REASON="agy_not_found" ;;
+      3)   REASON="not_signed_in" ;;
+      4)   REASON="model_unavailable:$MODEL" ;;
+      *)   REASON="rc=$PRC" ;;
+    esac
+    printf '%s\n' "STATUS: PREFLIGHT_FAILED($REASON) | Phase: $PHASE | Log: $PREFLIGHT_LOG" \
+      | tee "$STATUS_FILE"
+    exit "$PRC"
+  fi
+fi
 
 "$HERE/agy-run.sh" --brief "$BRIEF" --dir "$DIR" --log "$LOG" \
   --model "$MODEL" --mode "$MODE" --timeout "$TIMEOUT" \

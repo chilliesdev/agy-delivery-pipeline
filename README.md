@@ -24,6 +24,13 @@ ln -s "$PWD" ~/.claude/skills/multi-agent-delivery-pipeline
 
 ## Usage
 
+Check the setup once before starting — that agy is installed, signed in, and
+offers the model the tier resolves to:
+
+```bash
+scripts/preflight.sh --tier low
+```
+
 Invoke the skill from Claude Code, or dispatch a phase directly:
 
 ```bash

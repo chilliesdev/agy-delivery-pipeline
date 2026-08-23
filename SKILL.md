@@ -73,6 +73,35 @@ the Phase 2 retry loop cannot read the previous round's answer as this round's.
 The parsing is covered by [tests/phase-status.sh](tests/phase-status.sh) — run it
 after touching `phase.sh`.
 
+## Preflight
+
+Run the preflight once before Phase 0, so a broken setup costs seconds instead of
+surfacing deep inside a phase after the brief is written:
+
+```
+scripts/preflight.sh --tier low
+```
+
+It checks three things, each with its own exit code: that `agy` is on `PATH`
+(127), that `agy models` returns a listing at all — which is the sign-in check,
+since agy has no `whoami` (3), and that the model the tier resolves to is in that
+listing (4). A missing model is reported alongside the ids the account *does*
+have, because the listing varies by account and shifts over time; it is fetched
+live every time and never cached, a cached copy having once been seen missing a
+model a fresh fetch offered.
+
+`phase.sh` also runs it before each dispatch and reports a refusal as
+`STATUS: PREFLIGHT_FAILED(<reason>)` — `agy_not_found`, `not_signed_in` or
+`model_unavailable:<id>` — because the orchestrator never reads stderr. It is on
+by default: a sign-in can lapse and a model can be withdrawn mid-pipeline, so
+checking once at Phase 0 is not enough. Pass `--no-preflight`, or set
+`AGY_SKIP_PREFLIGHT=1`, to drop it from a tight retry loop.
+
+One agy behaviour the script has to work around, and so does anything else that
+reads its output: **agy hangs when its stdout is a plain file.** Read it through
+a pipe or a command substitution, never a `>` redirect. Covered by
+[tests/preflight.sh](tests/preflight.sh).
+
 Two agy behaviours every brief must respect:
 
 - **`--add-dir` is mandatory** — the scripts pass it. Without it agy ignores cwd
