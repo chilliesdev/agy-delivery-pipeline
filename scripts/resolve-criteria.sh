@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Install the criteria file a review/QA brief should cite *inside* the target
-# repo, and print the path the brief must carry.
+# Install the criteria file a review/QA/release brief should cite *inside* the
+# target repo, and print the path the brief must carry.
 #
-#   resolve-criteria.sh <code-review|qa> [--dir <repo>] [--into <dir>]
+#   resolve-criteria.sh <code-review|qa|release> [--dir <repo>] [--into <dir>]
 #                       [--print-source]
 #
 # Precedence (first hit wins):
@@ -36,6 +36,16 @@
 # which is worker scratch that phase.sh already keeps out of git, and a stale
 # copy would review this run's diff against a previous run's bar.
 #
+# `release` rides the same mechanism as the other two rather than getting one of
+# its own. It is a procedure where they are bars, but the machinery a phase
+# needs is identical — a vendored default that is always there, a per-project
+# override, and an installed copy inside --add-dir — and the failure that
+# mechanism exists to prevent is the same failure. A second resolution path
+# would be a second thing to get wrong on the one phase that touches
+# irreversible git state. What it does *not* read is
+# <repo>/.claude/skills/git-release-flow/SKILL.md, the path the old Phase 4
+# named; see the note further down, which says so out loud on stderr.
+#
 # --dir defaults to $PWD and is the repo being worked on, not this one. --into
 # moves the copy elsewhere; the caller then owns keeping it inside --add-dir.
 # --print-source resolves and prints without copying — for inspecting which tier
@@ -58,9 +68,9 @@ while [ $# -gt 0 ]; do
 done
 
 case "$NAME" in
-  code-review|qa) ;;
-  "") echo "resolve-criteria: name required (code-review|qa)" >&2; exit 2 ;;
-  *)  echo "resolve-criteria: unknown criteria $NAME (want code-review|qa)" >&2; exit 2 ;;
+  code-review|qa|release) ;;
+  "") echo "resolve-criteria: name required (code-review|qa|release)" >&2; exit 2 ;;
+  *)  echo "resolve-criteria: unknown criteria $NAME (want code-review|qa|release)" >&2; exit 2 ;;
 esac
 
 [ -d "$DIR" ] || { echo "resolve-criteria: dir not found: $DIR" >&2; exit 2; }
@@ -84,6 +94,31 @@ for CANDIDATE in "$DIR/.claude/criteria/$NAME.md" "$HERE/../criteria/$NAME.md"; 
   fi
 done
 [ -n "$SOURCE" ] || { echo "resolve-criteria: no criteria file found for $NAME" >&2; exit 1; }
+
+# The legacy release path is not a source, and is not silently ignored either.
+#
+# SKILL.md's old Phase 4 told the orchestrator to look for — and, failing that,
+# to *write* — <repo>/.claude/skills/git-release-flow/SKILL.md. So a project may
+# have one, and dropping it without a word would be taking work away from
+# someone who did what they were told. It is still not read, for the reason the
+# ~/.claude/skills tier above was deleted, which applies harder here than it did
+# there: a SKILL.md is a Claude Code document by construction — sub-agents,
+# slash commands, asking the user — and release is the one phase where "ask the
+# user" is precisely the dead end being removed and where a worker acting on
+# git instructions is precisely the danger. Its being inside the repo answers
+# the --add-dir objection and none of that one. And nothing ever specified the
+# file's contents, so a document at that path was written against no shape at
+# all; treating it as authoritative for the irreversible phase would be trusting
+# an unspecified file to drive `git push`.
+#
+# So: a line on stderr, naming the file and where to move it. stdout stays the
+# single path every caller parses.
+if [ "$NAME" = "release" ] && [ -f "$DIR/.claude/skills/git-release-flow/SKILL.md" ]; then
+  echo "resolve-criteria: note — $DIR/.claude/skills/git-release-flow/SKILL.md exists but is not used." >&2
+  echo "resolve-criteria:        That path is from the old Phase 4 text and is a Claude Code skill, not" >&2
+  echo "resolve-criteria:        a headless worker document. To override the vendored release flow, put" >&2
+  echo "resolve-criteria:        your version at $DIR/.claude/criteria/release.md." >&2
+fi
 
 if [ -n "$PRINT_SOURCE" ]; then
   printf '%s\n' "$SOURCE"

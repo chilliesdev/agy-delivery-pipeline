@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Exercise resolve-criteria.sh: which tier wins, and the copy that puts the
 # chosen file inside --add-dir where an accept-edits worker can actually read it.
+# All three names — code-review, qa and release — plus the legacy release path
+# that is deliberately not a source and deliberately not silent about it.
 #
 #   tests/resolve-criteria.sh
 #
@@ -130,6 +132,71 @@ run "$R" code-review --into "$R/elsewhere"
 check into-dest "$OUT" "$R/elsewhere/code-review.md" "--into moves the copy"
 [ -f "$R/elsewhere/code-review.md" ] && ok into-exists "the redirected copy exists" \
                                      || bad into-exists "nothing at the --into path"
+
+# --- the release flow -----------------------------------------------------
+
+# 10. The third name resolves like the other two. Phase 4 is the phase that
+#     touches irreversible git state, so "there is always a document to install,
+#     and it is always inside --add-dir" matters there more than anywhere.
+R="$(new_repo release-vendored)"
+run "$R" release
+check release-rc "$CODE" 0 "exit 0 with only the vendored default"
+check release-dest "$OUT" "$R/.tmp/criteria/release.md" "release installs under the repo's .tmp/"
+if diff -q "$VENDORED/release.md" "$OUT" >/dev/null 2>&1; then
+  ok release-content "the copy matches the vendored release flow"
+else
+  bad release-content "the copy differs from its source"
+fi
+case "$OUT" in "$R"/*) ok release-inside "the printed path is inside the repo" ;;
+  *) bad release-inside "printed a path outside --add-dir: $OUT" ;; esac
+
+# 11. A project can override it, same as the other two.
+R="$(new_repo release-override)"
+mkdir -p "$R/.claude/criteria"
+printf '# Our release flow\nwe tag differently here\n' > "$R/.claude/criteria/release.md"
+run "$R" release
+if grep -q 'we tag differently here' "$OUT" 2>/dev/null; then
+  ok release-tier1 "the project's own release flow won"
+else
+  bad release-tier1 "the vendored default overrode the project's"
+fi
+
+# --- the legacy git-release-flow path -------------------------------------
+
+# 12. `.claude/skills/git-release-flow/SKILL.md` is the path the old Phase 4
+#     named — and it is deliberately not a source. It is a Claude Code skill by
+#     construction (sub-agents, slash commands, asking the user), nothing ever
+#     specified its contents, and this is the one phase where a worker acting on
+#     unspecified git instructions is dangerous.
+R="$(new_repo legacy-skill)"
+mkdir -p "$R/.claude/skills/git-release-flow"
+printf '# git-release-flow\nask the user, then push to origin\n' \
+  > "$R/.claude/skills/git-release-flow/SKILL.md"
+run "$R" release
+check legacy-rc "$CODE" 0 "exit 0 with a legacy skill present"
+if grep -q 'ask the user' "$OUT" 2>/dev/null; then
+  bad legacy-ignored "the legacy skill was installed as the release flow"
+else
+  ok legacy-ignored "the legacy skill is not read — the vendored flow won"
+fi
+check legacy-lines "$(printf '%s\n' "$OUT" | grep -c .)" 1 "stdout is still the single path callers parse"
+
+# 13. Not silently, though. Someone who did what the old text told them to do
+#     gets a line naming their file and where to move it — on stderr, which is
+#     the only place it can go without breaking every caller.
+NOTE="$(/bin/bash "$RESOLVE" release --dir "$R" 2>&1 >/dev/null)"
+case "$NOTE" in *"git-release-flow/SKILL.md"*) ok legacy-note "stderr names the file that was skipped" ;;
+  *) bad legacy-note "the legacy file was dropped without a word: $NOTE" ;; esac
+case "$NOTE" in *".claude/criteria/release.md"*) ok legacy-note-where "and says where to move it" ;;
+  *) bad legacy-note-where "the note does not say what to do: $NOTE" ;; esac
+
+# 14. The note is scoped: it is about the release name, and about a file that is
+#     actually there.
+NOTE="$(/bin/bash "$RESOLVE" code-review --dir "$R" 2>&1 >/dev/null)"
+check legacy-scoped "$NOTE" "" "no note on code-review, legacy file or not"
+R="$(new_repo no-legacy)"
+NOTE="$(/bin/bash "$RESOLVE" release --dir "$R" 2>&1 >/dev/null)"
+check legacy-quiet "$NOTE" "" "and none at all when there is no legacy file"
 
 # --- argument handling ----------------------------------------------------
 

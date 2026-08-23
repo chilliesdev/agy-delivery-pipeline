@@ -22,10 +22,11 @@ sequential and exactly one worker is ever running.
 >    runs, at `.tmp/REVIEW_DIFF.patch`; read it there rather than shelling out.
 > 2. **File-based state.** Workers write `.tmp/DISCOVERY.md`,
 >    `.tmp/TEST_COMMAND`, `.tmp/CHANGES.md`, `.tmp/REVIEW_FEEDBACK.md`,
->    `.tmp/QA_REPORT.md`, and their verdict to `.tmp/<PHASE>.verdict`; the
->    orchestrator receives only `STATUS: … | Log: …`. The orchestrator's own
->    scripts write into the same directory — `.tmp/criteria/`,
->    `.tmp/REVIEW_DIFF.patch` and `.tmp/REVIEW_DIFF.stat` — because a worker can
+>    `.tmp/QA_REPORT.md`, `.tmp/RELEASE_PLAN.md`, and their verdict to
+>    `.tmp/<PHASE>.verdict`; the orchestrator receives only
+>    `STATUS: … | Log: …`. The orchestrator's own scripts write into the same
+>    directory — `.tmp/criteria/`, `.tmp/REVIEW_DIFF.patch`,
+>    `.tmp/REVIEW_DIFF.stat` and `.tmp/RELEASE_FACTS.md` — because a worker can
 >    only read what is inside `--add-dir`.
 > 3. **One worker at a time.** A phase must be gated before the next dispatches.
 > 4. **`.tmp/` is never committed.** `phase.sh` adds it to the work tree root's
@@ -151,9 +152,9 @@ Work happens in the user's checkout, on the current branch. Before any phase tha
 writes, make sure the tree is clean or committed, so a bad phase is one
 `git checkout .` away.
 
-## Review and QA criteria
+## Review, QA and release criteria
 
-Phases 2 and 3 brief the worker against a criteria document. Never hardcode a
+Phases 2, 3 and 4 brief the worker against a criteria document. Never hardcode a
 path to one — the worker runs on someone else's machine, and a brief pointing at
 a file that is not there makes agy improvise silently.
 
@@ -173,6 +174,7 @@ That is what the script does:
 ```
 scripts/resolve-criteria.sh code-review --dir <repo>
 scripts/resolve-criteria.sh qa --dir <repo>
+scripts/resolve-criteria.sh release --dir <repo>
 ```
 
 It picks a source, copies it to `<repo>/.tmp/criteria/<name>.md`, and prints
@@ -197,6 +199,20 @@ this design exists to prevent.
 Phase 3 gets the same treatment for consistency, though it would survive either
 way: `--mode full` turns the permission check off entirely, which is the only
 reason QA ever worked while Phase 2 was failing.
+
+`release` is the third name, and it is a procedure rather than a bar — the flow
+the release worker follows, vendored at [criteria/release.md](criteria/release.md)
+so that a project which has never thought about releases still gets a sane,
+conservative one. It rides the same mechanism because the machinery a phase
+needs is identical, and a second resolution path would be a second thing to get
+wrong on the one phase that touches irreversible git state. What tier 1 does
+**not** cover is `.claude/skills/git-release-flow/SKILL.md`, the path the old
+Phase 4 text named: a SKILL.md is a Claude Code document by construction —
+sub-agents, slash commands, asking the user — and nothing ever specified what
+one at that path should contain, so it is exactly the wrong kind of file to put
+in front of a headless worker on the release phase. A file sitting there is not
+read, and `resolve-criteria.sh` says so on stderr and names
+`.claude/criteria/release.md` as the place to move it.
 
 **The same constraint applies to every input a phase needs**, not just criteria
 files. Phase 2 has to read the diff, and a worker forbidden shell commands cannot
@@ -236,8 +252,14 @@ flowchart TD
     G -- No --> H[Fix brief from .tmp/REVIEW_FEEDBACK.md — agy medium]
     H --> X
     G -- Yes --> I[Phase 3: QA — agy medium, mode full + sandbox]
-    I --> J[Phase 4: Docs + Release — agy low/high]
-    J --> K[Done]
+    I --> J[Phase 4a: Docs — agy low]
+    J --> L[check-release.sh writes .tmp/RELEASE_FACTS.md]
+    L -- RELEASE_BLOCKED --> M[Stop and report what a person must decide]
+    L -- READY or LOCAL_ONLY --> N[Phase 4b: Release prep — agy high]
+    N --> O[Orchestrator shows .tmp/RELEASE_PLAN.md to the user]
+    O --> P{User runs the commit, tag, merge, push?}
+    P -- Yes, by hand --> K[Done]
+    P -- No --> M
 ```
 
 ### Phase 0 — Discovery (tier `low`)
@@ -509,20 +531,106 @@ limits the damage of a bad run. Orchestrator reads only `.tmp/QA_REPORT.md`.
 
 ### Phase 4 — Docs and release (tier `low`, then `high`)
 
-1. Docs update, tier `low`.
-2. Release: if `.claude/skills/git-release-flow/SKILL.md` exists in the project,
-   brief the worker to follow it at tier `high`. If it does not, **ask the user**
-   for their branch strategy, tag format, changelog and build triggers, then
-   write that skill before running the phase.
-3. **The orchestrator performs the irreversible git steps** — tag, merge, push —
-   after showing the user what will run. Workers never push, never touch
-   credentials, never publish.
+**4a. Docs update, tier `low`.** One brief, built from `.tmp/CHANGES.md`, against
+the docs the change actually invalidates. The docs worker writes
+`STATUS: DONE | File: <doc path>` to `.tmp/DOCS.verdict` and prints it as its
+last output line, and does not write `.tmp/DOCS.status`.
 
-Both dispatches carry the same closing instruction as every other phase, against
-their own phase name — the docs worker writes `STATUS: DONE | File: <doc path>`
-to `.tmp/DOCS.verdict` and prints it as its last output line, the release worker
-writes its verdict to `.tmp/RELEASE.verdict` and prints it likewise. Neither
-writes `.tmp/DOCS.status` or `.tmp/RELEASE.status`.
+**4b. Release.** This is the only phase that ends in something no
+`git checkout .` undoes, and the whole design of it follows from one line:
+
+> [!IMPORTANT]
+> **Nothing in this pipeline ever runs `git push`, creates a tag, or merges.**
+> Not a script, not a worker, not behind a flag, not as a default.
+> `check-release.sh` only reads. The release worker only writes files. The
+> orchestrator prints the commands and stops. **A person runs them**, having
+> read them first. Any future change here that makes an irreversible git command
+> reachable from an unattended run is a defect, whatever it is called.
+
+Three steps, and it is worth being blunt about which is which:
+
+| step | who | irreversible? |
+|---|---|---|
+| inspect the repo — `check-release.sh` | script, automated | no — reads only |
+| prepare the release — agy worker at tier `high` | worker, automated | no — edits files in the work tree |
+| commit, merge, tag, push | **a human, by hand** | **yes** |
+
+**Step 1 — inspect, and get a machine-readable answer.** The worker cannot run
+shell commands, so it cannot look at git at all; the same rule that puts the
+Phase 2 diff on disk applies here. Run:
+
+```
+scripts/check-release.sh --dir <repo>
+```
+
+It reads the repository — remote, branch, tree, tags, tag format, changelog —
+writes every fact to `.tmp/RELEASE_FACTS.md` where the worker can read it, and
+answers on one line:
+
+| STATUS | exit | what it found | what you do |
+|---|---|---|---|
+| `RELEASE_READY` | 0 | a release can be prepared, and pushed afterwards | dispatch 4b |
+| `RELEASE_LOCAL_ONLY` | 0 | the same, but there is no remote | dispatch 4b — the plan will simply have no push step |
+| `RELEASE_BLOCKED(<reason>)` | 3 | a person has to decide something first | **do not dispatch** — see below |
+| `RELEASE_FAILED` | 4 | git refused | read the reason in the line |
+
+`RELEASE_BLOCKED` is the refusal the phase never had. It names the reason —
+`no_commits`, `detached_head`, `dirty_tree`, `tag_format_unknown` — and the note
+says exactly what is missing, so an unattended run stops legibly instead of
+hanging on a question nobody is there to answer. Report the reason to the user
+and stop; do not work around it, because each of those four is a judgement about
+intent that a default would get wrong in the one place being wrong is expensive.
+`--allow-dirty` overrides the tree check deliberately, when you know the
+uncommitted paths belong in the release.
+
+The three cases the old text had no branch for are **not** blockers:
+
+- **No remote.** An ordinary local repository. The release ends at a commit and
+  a tag, the plan drops the push commands entirely rather than leaving them
+  commented out, and the status says so in its own word.
+- **No tags.** A first release has no predecessor to increment from, so
+  `--first-version` (default `v0.1.0`) is proposed as a starting point.
+- **Already on the release branch.** The merge step is a no-op; the plan drops
+  the checkout and merge lines and tags where it stands.
+
+Version proposal: the highest `M.N.P` tag, incremented by `--bump`
+(default `minor`), keeping the existing prefix exactly — `v1.2.3` begets
+`v1.3.0`, `1.2.3` begets `1.3.0`. The alternatives ride along on the line,
+because bump size is a judgement about what the change means and the script
+cannot make it. Covered by [tests/check-release.sh](tests/check-release.sh),
+which asserts among other things that `HEAD`, `git tag -l` and
+`git for-each-ref` are byte-identical before and after a run.
+
+**Step 2 — prepare, tier `high`.** Install the flow into the repo first —
+`scripts/resolve-criteria.sh release --dir <repo>` — and put the path it prints
+into the brief verbatim.
+
+Brief: *"Read and follow `<resolved criteria path>`. The repository's git state
+is in `.tmp/RELEASE_FACTS.md` — you cannot run git, so that file is your only
+account of it. Prepare the release: settle the version, draft the changelog
+entry, update any version-bearing file that already exists. You do not commit,
+tag, merge or push, and your plan must not claim you did. Write
+`.tmp/RELEASE_PLAN.md`: what you prepared, then the exact commands a human will
+run, unrun. Write your one-line verdict —
+`STATUS: PREPARED | File: .tmp/RELEASE_PLAN.md` or
+`STATUS: BLOCKED | File: .tmp/RELEASE_PLAN.md` — to `.tmp/RELEASE.verdict`, and
+print that same line as the last line of your output. Do not write
+`.tmp/RELEASE.status`."*
+
+`PREPARED` means prepared. It is not a claim that anything was released, and
+`--verify` is the wrong tool for checking it — read `.tmp/RELEASE_PLAN.md`
+yourself, and read the changelog diff, which is small.
+
+**Step 3 — the irreversible part, which is the user's.** Show them
+`.tmp/RELEASE_PLAN.md` and the command block in it, unedited, and say plainly
+that nothing in it has been run. They run it. The orchestrator does not run it
+for them, does not run "just the safe part" of it, and does not offer to.
+Workers never push, never touch credentials, never publish — and neither does
+the orchestrator on this phase.
+
+The gate before all of it is the same one every phase has: a release proposed
+over a red suite or a `FAILED` QA report is a release that should not be
+proposed. Say so at the top of what you hand the user.
 
 ---
 
