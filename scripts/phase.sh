@@ -12,7 +12,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"; SANDBOX=""
+PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
+SANDBOX_ARGS=()   # array, so the flag is never word-split out of an unquoted scalar
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -22,7 +23,7 @@ while [ $# -gt 0 ]; do
     --dir)     DIR="$2";     shift 2 ;;
     --mode)    MODE="$2";    shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
-    --sandbox) SANDBOX="--sandbox"; shift ;;
+    --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
     -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -37,6 +38,28 @@ esac
 
 DIR="$(cd "$DIR" && pwd)"
 mkdir -p "$DIR/.tmp/logs"
+
+# .tmp/ is worker scratch and must never reach the user's history — one `git add
+# -A` in a later phase is all it would take. Add the ignore once, in the work
+# tree root's .gitignore, and only if git does not already ignore .tmp (which
+# also covers a global or parent-level rule). Silent on success: stdout belongs
+# to the STATUS line alone. Must stay *after* the mkdir above: a directory-only
+# rule like `.tmp/` only matches a path git can see is a directory, so checking
+# first would re-add an entry that is already there.
+if GITROOT="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null)" \
+   && [ "$(git -C "$DIR" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] \
+   && [ -n "$GITROOT" ] \
+   && ! git -C "$DIR" check-ignore -q .tmp 2>/dev/null; then
+  GITIGNORE="$GITROOT/.gitignore"
+  # An existing file that lacks a trailing newline would otherwise absorb the
+  # new entry into its last line.
+  if [ -s "$GITIGNORE" ] && [ -n "$(tail -c 1 "$GITIGNORE" 2>/dev/null)" ]; then
+    printf '\n' >> "$GITIGNORE" 2>/dev/null
+  fi
+  printf '.tmp/\n' >> "$GITIGNORE" 2>/dev/null \
+    || echo "phase.sh: could not add .tmp/ to $GITIGNORE" >&2
+fi
+
 LOG="$DIR/.tmp/logs/$PHASE.log"
 STATUS_FILE="$DIR/.tmp/$PHASE.status"
 VERDICT_FILE="$DIR/.tmp/$PHASE.verdict"
@@ -57,7 +80,8 @@ trim_claim() { LC_ALL=C sed -e 's/^[[:space:]*#>_`-]*//' -e 's/[[:space:]*`]*$//
 rm -f "$VERDICT_FILE"
 
 "$HERE/agy-run.sh" --brief "$BRIEF" --dir "$DIR" --log "$LOG" \
-  --model "$MODEL" --mode "$MODE" --timeout "$TIMEOUT" $SANDBOX >/dev/null 2>&1
+  --model "$MODEL" --mode "$MODE" --timeout "$TIMEOUT" \
+  ${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"} >/dev/null 2>&1
 RC=$?
 
 # Primary: the verdict the worker wrote to .tmp/<PHASE>.verdict — first non-empty
