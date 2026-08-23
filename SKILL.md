@@ -16,7 +16,9 @@ sequential and exactly one worker is ever running.
 > [!IMPORTANT]
 > **Orchestration rules**
 > 1. **Zero direct coding.** The orchestrator does not edit code or read large
->    outputs. It reads status lines, small state files, and `git diff --stat`.
+>    outputs. It reads status lines, small state files, and `git diff --stat` —
+>    plus the working-tree diff itself at the Phase 2 gate, which is the one
+>    reading `--stat` cannot stand in for.
 > 2. **File-based state.** Workers write `.tmp/DISCOVERY.md`,
 >    `.tmp/TEST_COMMAND`, `.tmp/CHANGES.md`, `.tmp/REVIEW_FEEDBACK.md`,
 >    `.tmp/QA_REPORT.md`, and their verdict to `.tmp/<PHASE>.verdict`; the
@@ -308,11 +310,17 @@ a failing one comes back `STATUS: VERIFY_FAILED(rc=N)` with the overridden claim
 attached, whatever the worker asserted. Output goes to
 `.tmp/logs/<PHASE>.verify.log`, never to stdout.
 
-**The other half is still yours, and no flag replaces it.** Read
-`git diff --stat` and look for what a green suite does not catch: stubbed
-functions with TODOs, invented APIs, tests weakened or skipped into passing,
-files written outside the workspace. `--verify` proves a command exited zero. It
-cannot tell you the tests were not gutted to make it do so.
+**The other half is still yours, and no flag replaces it.** Start with
+`git diff --stat` to see the shape of the change and catch files touched outside
+the workspace. That is as far as `--stat` gets you: it shows names and line
+counts, so the failures that matter most are invisible in it. For those, read the
+diff itself — stubbed functions with TODOs, invented APIs, tests weakened or
+skipped into passing. `--verify` proves a command exited zero. It cannot tell you
+the tests were not gutted to make it do so.
+
+This is the one place the orchestrator reads a real diff rather than a summary,
+and rule 1 is narrowed accordingly: keep it to the working-tree diff for this
+gate, not to browsing the codebase.
 
 On failure, write a fix brief naming exactly what was wrong (citing
 `.tmp/REVIEW_FEEDBACK.md`), dispatch at tier `medium`, and loop.
