@@ -17,9 +17,10 @@ sequential and exactly one worker is ever running.
 > **Orchestration rules**
 > 1. **Zero direct coding.** The orchestrator does not edit code or read large
 >    outputs. It reads status lines, small state files, and `git diff --stat`.
-> 2. **File-based state.** Workers write `.tmp/DISCOVERY.md`, `.tmp/CHANGES.md`,
->    `.tmp/REVIEW_FEEDBACK.md`, `.tmp/QA_REPORT.md`, and their verdict to
->    `.tmp/<PHASE>.verdict`; the orchestrator receives only `STATUS: … | Log: …`.
+> 2. **File-based state.** Workers write `.tmp/DISCOVERY.md`,
+>    `.tmp/TEST_COMMAND`, `.tmp/CHANGES.md`, `.tmp/REVIEW_FEEDBACK.md`,
+>    `.tmp/QA_REPORT.md`, and their verdict to `.tmp/<PHASE>.verdict`; the
+>    orchestrator receives only `STATUS: … | Log: …`.
 > 3. **One worker at a time.** A phase must be gated before the next dispatches.
 > 4. **`.tmp/` is never committed.** `phase.sh` adds it to the work tree root's
 >    `.gitignore` on first dispatch if git does not ignore it already.
@@ -157,7 +158,10 @@ flowchart TD
     B --> C{Everything needed available?}
     C -- No --> D[Ask user for the gaps in .tmp/DISCOVERY.md]
     D --> C
-    C -- Yes --> E[Phase 1: Implementation — agy medium]
+    C -- Yes --> V[check-test-command.sh]
+    V -- wrong command --> W[Correct it into .tmp/TEST_COMMAND]
+    W --> V
+    V -- runs, pass or red --> E[Phase 1: Implementation — agy medium]
     E --> F[Phase 2: Code Review — agy high]
     F --> G{Gate: review clean AND tests pass?}
     G -- No --> H[Fix brief from .tmp/REVIEW_FEEDBACK.md — agy medium]
@@ -190,7 +194,14 @@ command, do not execute it."** Left to itself the worker will try to run the
 suite to confirm it, and in any mode but `full` that denial aborts the run. Plan
 mode does not prevent the attempt, only the execution.
 
-Writes `.tmp/DISCOVERY.md`. Closing instruction: *"Write your one-line verdict —
+Since the worker may not run the command, the brief must at least make the
+command it *reports* cheap to check for whoever can: **"write the bare test
+command — one line, nothing else, no prose, no backticks, no fence — to
+`.tmp/TEST_COMMAND`."** The report itself is prose, and the orchestrator should
+not have to read prose to find the one string the rest of the pipeline hangs off.
+
+Writes `.tmp/DISCOVERY.md` and `.tmp/TEST_COMMAND`. Closing instruction:
+*"Write your one-line verdict —
 `STATUS: READY | File: .tmp/DISCOVERY.md` or
 `STATUS: BLOCKED | File: .tmp/DISCOVERY.md` — to `.tmp/DISCOVERY.verdict`, and
 print that same line as the last line of your output. Do not write
@@ -199,16 +210,52 @@ print that same line as the last line of your output. Do not write
 Run it in the default `accept-edits`, **not** `--mode plan`: plan is fully
 read-only and denies the worker writing its own report, which aborts the run.
 Read-only-ness comes from the brief instead — *"the only files you write are
-`.tmp/DISCOVERY.md` and `.tmp/DISCOVERY.verdict`; do not create or modify
-anything else."*
+`.tmp/DISCOVERY.md`, `.tmp/TEST_COMMAND` and `.tmp/DISCOVERY.verdict`; do not
+create or modify anything else."*
 
 Orchestrator: `phase.sh` has already put `.tmp/` in `.gitignore` for you, so go
 straight to reading `.tmp/DISCOVERY.md` — it is small and it is the one file you
-should read in full, because every later brief is built from it. Confirm the
-test command actually runs before proceeding; a discovery report that names a
-test command nothing has verified is a guess. On
-`BLOCKED`, ask the user for the gaps. Never invent credentials, and never let a
-worker handle secret values.
+should read in full, because every later brief is built from it. On `BLOCKED`,
+ask the user for the gaps. Never invent credentials, and never let a worker
+handle secret values.
+
+**The test-command gate.** A discovery report that names a test command nothing
+has run is a guess — the worker read it out of `package.json` or a CI file and
+was forbidden from trying it. Every later brief is built from that report, so the
+guess propagates into implementation, review and QA, and the command is also what
+Phase 2 hands to `phase.sh --verify`: an unverified string there does not gate
+anything, it just fails in a way that looks like the new work's fault. So this is
+not a thing to remember between phases — it is a step, and it has a script:
+
+```
+scripts/check-test-command.sh --dir <repo>
+```
+
+It reads `.tmp/TEST_COMMAND`, runs it in the repo through a shell, keeps the
+output in `.tmp/logs/TEST_COMMAND.log` and answers in one line — the same shape
+`phase.sh --verify` uses, because it is the same job done one phase earlier:
+
+| STATUS | exit | what it found | what you do |
+|---|---|---|---|
+| `TEST_COMMAND_OK` | 0 | it ran and passed | build Phase 1's brief |
+| `TEST_COMMAND_NOT_RUNNABLE(rc=N)` | 3 | nothing ran — no such command, or the runner refused it | correct the command |
+| `TEST_COMMAND_FAILED(rc=N)` | 4 | the command is right and the suite is red | record the red state, then proceed |
+| `TEST_COMMAND_TIMEOUT(Ns)` | 5 | it never returned | correct the command — usually a watch mode |
+
+**Wrong command.** Fix it, prove the fix with `--command '<corrected>'`, and
+**write the corrected command back to `.tmp/TEST_COMMAND` before you build
+Phase 1's brief** — the file, not your scrollback, is what the next reader gets.
+Prefer asking the user over guessing a second time: discovery already guessed
+once from exactly the files you would be guessing from, and the user knows which
+invocation their project actually uses.
+
+**Merely red.** Failing tests at Phase 0 are information, not a blocker — the
+command is proven, which is what this gate is for. Record *which* tests were
+already failing, in the Phase 1 brief and in your own notes, so that a
+`VERIFY_FAILED` two phases later is weighed against a known-red baseline instead
+of being misattributed to the implementation.
+
+Covered by [tests/check-test-command.sh](tests/check-test-command.sh).
 
 ### Phase 1 — Implementation (tier `medium`)
 

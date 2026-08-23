@@ -49,7 +49,7 @@ Everything else — the full worker transcript — stays on disk in `.tmp/logs/`
 
 | # | Phase | Tier | Produces |
 |---|---|---|---|
-| 0 | Discovery — what's needed to build *and test* the task | low | `.tmp/DISCOVERY.md` |
+| 0 | Discovery — what's needed to build *and test* the task | low | `.tmp/DISCOVERY.md`, `.tmp/TEST_COMMAND` |
 | 1 | Implementation | medium | `.tmp/CHANGES.md` |
 | 2 | Code review, with a capped retry loop | high | `.tmp/REVIEW_FEEDBACK.md` |
 | 3 | QA (`--mode full --sandbox`) | medium | `.tmp/QA_REPORT.md` |
