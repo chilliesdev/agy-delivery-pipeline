@@ -3,12 +3,25 @@
 #
 #   phase.sh --phase <NAME> --brief <file> [--tier low|medium|high]
 #            [--dir <repo>] [--mode accept-edits|plan|full] [--timeout 30m]
-#            [--sandbox] [--no-preflight]
+#            [--sandbox] [--no-preflight] [--verify '<command>']
+#            [--retry-cap <n>] [--reset-retries]
 #
 # Reads:   .tmp/<PHASE>.verdict      the verdict the worker wrote itself
+#          .tmp/<PHASE>.retries      retries this phase's cycle has spent
 # Writes:  .tmp/logs/<PHASE>.log     full worker transcript (never read whole)
+#          .tmp/logs/<PHASE>.verify.log   --verify output, never stdout
 #          .tmp/<PHASE>.status       one STATUS line for the orchestrator
 # Prints:  the STATUS line only — keeps the orchestrator context lean.
+#
+# --verify runs the given check in <repo> after the worker returns and folds the
+# result into that one line. It overrides the worker: a PASSED claim whose check
+# exits non-zero comes back as STATUS: VERIFY_FAILED(rc=N), exit 5 — distinct
+# from WORKER_FAILED, which is the worker itself dying.
+#
+# The retry counter is mechanical: each dispatch beyond the first bumps
+# .tmp/<PHASE>.retries, and past --retry-cap (default 2, matching SKILL.md)
+# phase.sh refuses to dispatch at all, returning STATUS: RETRY_CAP_REACHED(n=N),
+# exit 6. A clean round clears the counter, as does --reset-retries.
 #
 # preflight.sh runs first unless --no-preflight or AGY_SKIP_PREFLIGHT=1.
 set -uo pipefail
@@ -16,6 +29,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
+VERIFY=""; RESET_RETRIES=""
+RETRY_CAP="${AGY_RETRY_CAP:-2}"
 SANDBOX_ARGS=()   # array, so the flag is never word-split out of an unquoted scalar
 
 while [ $# -gt 0 ]; do
@@ -26,14 +41,20 @@ while [ $# -gt 0 ]; do
     --dir)     DIR="$2";     shift 2 ;;
     --mode)    MODE="$2";    shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
+    --verify)  VERIFY="$2";  shift 2 ;;
+    --retry-cap) RETRY_CAP="$2"; shift 2 ;;
+    --reset-retries) RESET_RETRIES=1; shift ;;
     --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
     --no-preflight) SKIP_PREFLIGHT=1; shift ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
 done
 [ -n "$PHASE" ] || { echo "phase.sh: --phase required" >&2; exit 2; }
 [ -f "$BRIEF" ] || { echo "phase.sh: brief not found: $BRIEF" >&2; exit 2; }
+case "$RETRY_CAP" in
+  ''|*[!0-9]*) echo "phase.sh: --retry-cap wants a whole number, got '$RETRY_CAP'" >&2; exit 2 ;;
+esac
 
 case "$TIER" in
   low|medium|high) MODEL="gemini-3.7-flash-$TIER" ;;
@@ -65,8 +86,10 @@ if GITROOT="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null)" \
 fi
 
 LOG="$DIR/.tmp/logs/$PHASE.log"
+VERIFY_LOG="$DIR/.tmp/logs/$PHASE.verify.log"
 STATUS_FILE="$DIR/.tmp/$PHASE.status"
 VERDICT_FILE="$DIR/.tmp/$PHASE.verdict"
+RETRY_FILE="$DIR/.tmp/$PHASE.retries"
 
 ESC="$(printf '\033')"
 CR="$(printf '\r')"
@@ -78,6 +101,30 @@ strip_ansi() { LC_ALL=C sed -e "s/${ESC}\[[0-9;?]*[a-zA-Z]//g" -e "s/${CR}//g"; 
 # Trim markdown decoration and surrounding whitespace from one claim line. Never
 # stops at a quote — a verdict naming "src/my file.ts" must survive whole.
 trim_claim() { LC_ALL=C sed -e 's/^[[:space:]*#>_`-]*//' -e 's/[[:space:]*`]*$//'; }
+
+# The retry cap SKILL.md asks for, made mechanical. .tmp/<PHASE>.retries holds
+# how many *retries* — dispatches beyond the first — this cycle has spent; the
+# file being absent means the cycle has not dispatched at all yet. Unlike the
+# verdict file below it is deliberately *not* cleared before each dispatch, or
+# it could never accumulate; it is cleared by a clean round or --reset-retries.
+[ -n "$RESET_RETRIES" ] && rm -f "$RETRY_FILE"
+if [ -f "$RETRY_FILE" ]; then
+  # tr -cd is the sanitiser: a hand-edited or truncated counter reads as 0
+  # rather than aborting the dispatch on a string comparison.
+  SPENT="$(tr -cd '0-9' < "$RETRY_FILE" 2>/dev/null)"; SPENT="${SPENT:-0}"
+  NEXT=$((SPENT + 1))
+else
+  SPENT=0; NEXT=0
+fi
+
+# At the cap, refuse before anything is spent — no preflight fetch, no worker,
+# no cleared verdict, so .tmp/REVIEW_FEEDBACK.md and the last verdict survive for
+# the orchestrator, which SKILL.md tells to take the work over itself from here.
+if [ "$SPENT" -ge "$RETRY_CAP" ]; then
+  printf '%s\n' "STATUS: RETRY_CAP_REACHED(n=$SPENT, cap=$RETRY_CAP) | Phase: $PHASE | Note: the retry budget for this phase is spent — take the work over yourself, or pass --reset-retries to start a fresh cycle | Log: $LOG" \
+    | tee "$STATUS_FILE"
+  exit 6
+fi
 
 # The same phase name is re-run by the Phase 2 review loop, so a verdict left by
 # the previous round would otherwise be read as this round's answer.
@@ -107,6 +154,11 @@ if [ -z "$SKIP_PREFLIGHT" ]; then
   fi
 fi
 
+# Count the dispatch the moment it is committed to, not once it comes back: a
+# round killed halfway still spent a retry, and only a counter written up front
+# survives to say so.
+printf '%s\n' "$NEXT" > "$RETRY_FILE" 2>/dev/null
+
 "$HERE/agy-run.sh" --brief "$BRIEF" --dir "$DIR" --log "$LOG" \
   --model "$MODEL" --mode "$MODE" --timeout "$TIMEOUT" \
   ${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"} >/dev/null 2>&1
@@ -128,15 +180,55 @@ case "$CLAIM" in
   *) CLAIM="STATUS: $CLAIM" ;;   # a verdict file that omitted the marker
 esac
 
+# The gate SKILL.md asks the orchestrator to run by hand, run here instead. It
+# is a claim the worker cannot make good on by asserting it: the check runs in
+# $DIR, through a shell so `&&` and pipelines work, and its own exit code — not
+# the verdict — decides. Skipped when the worker itself failed or preflight
+# refused: there is no work to check. Output goes to its own log and never to
+# stdout, which belongs to the STATUS line alone.
+VRC=0
+if [ -n "$VERIFY" ] && [ "$RC" -eq 0 ]; then
+  printf -- '--- phase.sh: verify %s ---\n$ %s\n' "$PHASE" "$VERIFY" > "$VERIFY_LOG" 2>/dev/null
+  # No pipe here on purpose: $? is the check's own code, not a tee's.
+  ( cd "$DIR" && /bin/bash -c "$VERIFY" ) >> "$VERIFY_LOG" 2>&1
+  VRC=$?
+  printf -- '--- phase.sh: verify rc=%s ---\n' "$VRC" >> "$VERIFY_LOG" 2>/dev/null
+fi
+
 # Trust the claim only as a claim — the orchestrator still verifies the artifacts
 # on disk. rc=0 with no claim at all is not a failure and not a pass; say so.
 if [ "$RC" -ne 0 ]; then
   LINE="STATUS: WORKER_FAILED(rc=$RC) | Phase: $PHASE | Log: $LOG"
+elif [ -n "$VERIFY" ] && [ "$VRC" -ne 0 ]; then
+  LINE="STATUS: VERIFY_FAILED(rc=$VRC) | Phase: $PHASE | Claimed: ${CLAIM:-none} | Log: $LOG | VerifyLog: $VERIFY_LOG"
 elif [ -n "$CLAIM" ]; then
   LINE="$CLAIM | Phase: $PHASE | Log: $LOG"
 else
   LINE="STATUS: NO_STATUS_REPORTED | Phase: $PHASE | Note: worker exited 0 without a verdict — the phase may have succeeded anyway; verify the artifact on disk before advancing or retrying | Log: $LOG"
 fi
+# Appended, never spliced: every existing caller matches on the head of this
+# line, so a passing check adds to it and shifts nothing.
+if [ -n "$VERIFY" ] && [ "$VRC" -eq 0 ] && [ "$RC" -eq 0 ]; then
+  LINE="$LINE | Verify: ok | VerifyLog: $VERIFY_LOG"
+fi
+
+# A round that ends clean ends the cycle, so the next one starts from zero
+# without anybody having to remember --reset-retries. Clean means the worker
+# returned, the check (if any) held, and the verdict is not one of the phrasings
+# every phase uses for "I could not". NO_STATUS_REPORTED is not clean: it is
+# unresolved, and an unresolved round is exactly what the cap is counting.
+CLEAN=0
+if [ "$RC" -eq 0 ] && [ "$VRC" -eq 0 ] && [ -n "$CLAIM" ]; then
+  WORD="$(printf '%s' "${CLAIM#STATUS: }" | awk '{print $1}' \
+    | tr -d '|' | tr '[:lower:]' '[:upper:]')"
+  case "$WORD" in
+    FAILED|BLOCKED|ERROR|REJECTED) ;;
+    *) CLEAN=1 ;;
+  esac
+fi
+[ "$CLEAN" -eq 1 ] && rm -f "$RETRY_FILE"
 
 printf '%s\n' "$LINE" | tee "$STATUS_FILE"
 [ "$RC" -eq 0 ] || exit "$RC"
+[ "$VRC" -eq 0 ] || exit 5
+exit 0
