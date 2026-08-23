@@ -18,11 +18,15 @@ sequential and exactly one worker is ever running.
 > 1. **Zero direct coding.** The orchestrator does not edit code or read large
 >    outputs. It reads status lines, small state files, and `git diff --stat` —
 >    plus the working-tree diff itself at the Phase 2 gate, which is the one
->    reading `--stat` cannot stand in for.
+>    reading `--stat` cannot stand in for. That diff is on disk before the phase
+>    runs, at `.tmp/REVIEW_DIFF.patch`; read it there rather than shelling out.
 > 2. **File-based state.** Workers write `.tmp/DISCOVERY.md`,
 >    `.tmp/TEST_COMMAND`, `.tmp/CHANGES.md`, `.tmp/REVIEW_FEEDBACK.md`,
 >    `.tmp/QA_REPORT.md`, and their verdict to `.tmp/<PHASE>.verdict`; the
->    orchestrator receives only `STATUS: … | Log: …`.
+>    orchestrator receives only `STATUS: … | Log: …`. The orchestrator's own
+>    scripts write into the same directory — `.tmp/criteria/`,
+>    `.tmp/REVIEW_DIFF.patch` and `.tmp/REVIEW_DIFF.stat` — because a worker can
+>    only read what is inside `--add-dir`.
 > 3. **One worker at a time.** A phase must be gated before the next dispatches.
 > 4. **`.tmp/` is never committed.** `phase.sh` adds it to the work tree root's
 >    `.gitignore` on first dispatch if git does not ignore it already.
@@ -84,6 +88,9 @@ Phase 2 covers them in full.
 `phase.sh` is covered by [tests/phase-status.sh](tests/phase-status.sh),
 [tests/phase-dispatch.sh](tests/phase-dispatch.sh) and
 [tests/phase-verify.sh](tests/phase-verify.sh) — run all three after touching it.
+The two Phase 2 helpers have their own suites,
+[tests/capture-diff.sh](tests/capture-diff.sh) and
+[tests/check-review.sh](tests/check-review.sh).
 
 ## Preflight
 
@@ -174,6 +181,15 @@ Phase 3 gets the same treatment for consistency, though it would survive either
 way: `--mode full` turns the permission check off entirely, which is the only
 reason QA ever worked while Phase 2 was failing.
 
+**The same constraint applies to every input a phase needs**, not just criteria
+files. Phase 2 has to read the diff, and a worker forbidden shell commands cannot
+produce one — so the diff is written into `<repo>/.tmp/` too, by
+[capture-diff.sh](scripts/capture-diff.sh), before the phase is dispatched. The
+rule generalises: *if a brief names a thing to read, something must first have
+put that thing inside `--add-dir`.* A brief that names a file which is not there
+does not fail loudly; it makes agy improvise silently, which is how Phase 2 spent
+a whole run reviewing the wrong subject.
+
 A note on what is deliberately absent: the user's own
 `~/.claude/skills/code-review/SKILL.md` and `e2e-qa-tester/SKILL.md` are **not**
 consulted. They are written for a Claude Code session — parallel sub-agents, git
@@ -196,10 +212,12 @@ flowchart TD
     V -- wrong command --> W[Correct it into .tmp/TEST_COMMAND]
     W --> V
     V -- runs, pass or red --> E[Phase 1: Implementation — agy medium]
-    E --> F[Phase 2: Code Review — agy high]
-    F --> G{Gate: review clean AND tests pass?}
+    E --> X[capture-diff.sh writes .tmp/REVIEW_DIFF.patch]
+    X --> F[Phase 2: Code Review — agy high]
+    F --> Y[check-review.sh: did the review cite anything?]
+    Y --> G{Gate: review clean AND tests pass?}
     G -- No --> H[Fix brief from .tmp/REVIEW_FEEDBACK.md — agy medium]
-    H --> F
+    H --> X
     G -- Yes --> I[Phase 3: QA — agy medium, mode full + sandbox]
     I --> J[Phase 4: Docs + Release — agy low/high]
     J --> K[Done]
@@ -316,14 +334,54 @@ workers.
 
 ### Phase 2 — Code review (tier `high`)
 
-Install the criteria into the repo first —
-`scripts/resolve-criteria.sh code-review --dir <repo>` — and put the path it
-prints into the brief verbatim. It is a path inside the repo, which is the only
-kind this phase can read.
+**Two things go into the repo before the dispatch**, because the worker can read
+neither of them otherwise.
 
-Brief: *"Read and follow `<resolved criteria path>`. Review the working-tree
-diff. Write findings to `.tmp/REVIEW_FEEDBACK.md`, severity-ordered. Do not fix
-anything. Write your one-line verdict —
+*The diff.* The brief forbids shell commands, so the worker cannot run
+`git diff`, and nothing else in the pipeline ever wrote one down. A reviewer with
+no diff does not stop — it reviews the current contents of the files and reports
+on those, which is a different job wearing the same name. Reviewing post-change
+state structurally cannot see a test that was weakened, a line that was deleted,
+or a default that changed. So write the diff out first:
+
+```
+scripts/capture-diff.sh --dir <repo>
+```
+
+It writes `.tmp/REVIEW_DIFF.patch` — the change itself — and
+`.tmp/REVIEW_DIFF.stat`, the per-file summary, which is never truncated even when
+the patch is. Untracked files are included (`git add -N` into a throwaway index,
+so the repo's own index is untouched). One STATUS line back:
+
+| STATUS | exit | what it found | what you do |
+|---|---|---|---|
+| `DIFF_CAPTURED` | 0 | there is a change and both files describe it | dispatch |
+| `DIFF_TRUNCATED(kept=n/m)` | 0 | same, capped at `--max-lines` (default 4000) | dispatch — the patch says so in its own header, and the criteria tells the worker to report it |
+| `DIFF_EMPTY` | 3 | nothing changed against the base | **do not dispatch** — see below |
+| `DIFF_FAILED` | 4 | git refused | read the reason in the line |
+
+**`DIFF_EMPTY` is the one that needs a decision.** The default base is `HEAD`,
+i.e. the working tree, which is what Phase 1 leaves behind — its brief says *"do
+not commit"*. If a phase committed anyway, `HEAD` moved with it and there is
+nothing left in the working tree to review. Re-capture against the ref the work
+started from — `--base HEAD~1`, a branch point, a tag — and check the file count
+in the new STATUS line matches the change you expect. The script deliberately
+does not guess a fallback: on a genuinely clean tree it would hand the reviewer
+whatever the last unrelated commit happened to be, and a review of the wrong
+change reads exactly like a review of the right one.
+
+*The criteria.* `scripts/resolve-criteria.sh code-review --dir <repo>` — put the
+path it prints into the brief verbatim. It is a path inside the repo, which is
+the only kind this phase can read.
+
+Brief: *"Read and follow `<resolved criteria path>`. The change you are reviewing
+is in `.tmp/REVIEW_DIFF.patch`, with a per-file summary in
+`.tmp/REVIEW_DIFF.stat` — that patch is the subject of the review, and the
+current contents of the files are context for reading a hunk, not the thing being
+reviewed. You cannot run `git diff`; those two files are the only account of the
+change you have. Write findings to `.tmp/REVIEW_FEEDBACK.md`, severity-ordered,
+every one anchored to a `file:line` with a quoted snippet, and list every file
+you examined. Do not fix anything. Write your one-line verdict —
 `STATUS: PASSED | File: .tmp/REVIEW_FEEDBACK.md` or
 `STATUS: FAILED | File: .tmp/REVIEW_FEEDBACK.md` — to `.tmp/REVIEW.verdict`, and
 print that same line as the last line of your output. Do not write
@@ -344,20 +402,56 @@ a failing one comes back `STATUS: VERIFY_FAILED(rc=N)` with the overridden claim
 attached, whatever the worker asserted. Output goes to
 `.tmp/logs/<PHASE>.verify.log`, never to stdout.
 
-**The other half is still yours, and no flag replaces it.** Start with
-`git diff --stat` to see the shape of the change and catch files touched outside
-the workspace. That is as far as `--stat` gets you: it shows names and line
-counts, so the failures that matter most are invisible in it. For those, read the
-diff itself — stubbed functions with TODOs, invented APIs, tests weakened or
-skipped into passing. `--verify` proves a command exited zero. It cannot tell you
-the tests were not gutted to make it do so.
+**Then ask whether the review is a review.** A worker can return `PASSED` over an
+artifact that is the criteria document's output shape with nothing in it — four
+zero counts and "No violations found." twice, no file, no line, no snippet. Every
+gate here is structural, so correctly-shaped emptiness passes all of them; only
+reading the file reveals it says nothing, and the retry loop, the `--verify`
+override and the retry cap all assume a review that finds things. So:
+
+```
+scripts/check-review.sh --dir <repo>
+```
+
+It counts **anchors** — `file.ext:123` references, and paths the diff actually
+touched that the report cites — in `.tmp/REVIEW_FEEDBACK.md`:
+
+| STATUS | exit | means |
+|---|---|---|
+| `REVIEW_EVIDENCED` | 0 | the report points at something concrete, or the diff was under `--trivial` (10) changed lines |
+| `REVIEW_THIN(anchors=0…)` | 3 | it cites no line and no changed file — **suspicion, not failure** |
+| `REVIEW_ABSENT` | 4 | no artifact, or an empty one; the claim rests on nothing |
+| — | 2 | bad arguments |
+
+It counts evidence, never findings. Zero findings is a real and defensible
+outcome, and a check that punished it would make a legitimately clean review
+impossible to report; the criteria therefore asks every review, clean or not, for
+an `## Examined` list naming each file in the stat, and a filled-in list clears
+this check by itself. `REVIEW_THIN` does not fail the phase and is deliberately
+not wired into `--verify` — a `--verify` non-zero *overrides* the worker's
+verdict, and this is not certain enough to do that. It hands you a reason to read
+four hundred words yourself, which is the only thing that can actually settle it.
+
+**The last half is still yours, and no flag replaces it.** Start with
+`git diff --stat`, or `.tmp/REVIEW_DIFF.stat` which is the same thing already on
+disk, to see the shape of the change and catch files touched outside the
+workspace. That is as far as `--stat` gets you: it shows names and line counts,
+so the failures that matter most are invisible in it. For those, read
+`.tmp/REVIEW_DIFF.patch` — stubbed functions with TODOs, invented APIs, tests
+weakened or skipped into passing. `--verify` proves a command exited zero. It
+cannot tell you the tests were not gutted to make it do so, and
+`check-review.sh` can only tell you whether the reviewer cited anything, not
+whether what it cited was right.
 
 This is the one place the orchestrator reads a real diff rather than a summary,
-and rule 1 is narrowed accordingly: keep it to the working-tree diff for this
+and rule 1 is narrowed accordingly: keep it to `.tmp/REVIEW_DIFF.patch` for this
 gate, not to browsing the codebase.
 
 On failure, write a fix brief naming exactly what was wrong (citing
-`.tmp/REVIEW_FEEDBACK.md`), dispatch at tier `medium`, and loop.
+`.tmp/REVIEW_FEEDBACK.md`), dispatch at tier `medium`, and loop — **re-running
+`capture-diff.sh` before each new review round**, since the fix changed the diff
+and a reviewer handed the previous round's patch is reviewing work that no longer
+exists.
 **The two-retry cap is mechanical** — `phase.sh` counts dispatches per phase in
 `.tmp/<PHASE>.retries` and, once the budget is spent, refuses to dispatch at all
 and returns `STATUS: RETRY_CAP_REACHED(n=2, cap=2)`. A third round rarely

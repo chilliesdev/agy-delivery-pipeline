@@ -80,5 +80,12 @@ before advancing. Workers never push, never handle secrets, never publish.
 
 ## Status
 
-Phase 0 and Phase 1 are verified end to end against a real repo. Phases 2–4 are
-specified but not yet exercised — see the open issues.
+Phases 0 through 3 and the docs half of Phase 4 have been run end to end against
+a real repo, and the pipeline produced working code. **The release step has never
+run** — it is the one phase with no script, and it is not implementable as
+written; see the open issues.
+
+What that run taught, now fixed: a criteria file outside the repo aborts a phase
+outright, and Phase 2 was reviewing file contents rather than the change, which
+is why it returned a confidently empty report. Both are closed. The remaining
+open issues are the rest of what it found.
