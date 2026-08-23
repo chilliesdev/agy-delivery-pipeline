@@ -21,9 +21,16 @@
 # The retry counter is mechanical: each dispatch beyond the first bumps
 # .tmp/<PHASE>.retries, and past --retry-cap (default 2, matching SKILL.md)
 # phase.sh refuses to dispatch at all, returning STATUS: RETRY_CAP_REACHED(n=N),
-# exit 6. A clean round clears the counter, as does --reset-retries.
+# exit 6. A clean round clears the counter, as does --reset-retries. A round
+# that ends WORKER_FAILED or PREFLIGHT_FAILED is refunded: neither is a worker
+# failing to converge, which is the only thing the cap is there to catch.
 #
 # preflight.sh runs first unless --no-preflight or AGY_SKIP_PREFLIGHT=1.
+#
+# If this dispatch had to put .tmp/ in the work tree's .gitignore, the STATUS
+# line carries a trailing `| Gitignore: …` field saying so — a file the tooling
+# authored is one wholesale `git add` from the task's own commit. It is never
+# committed here.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,7 +53,7 @@ while [ $# -gt 0 ]; do
     --reset-retries) RESET_RETRIES=1; shift ;;
     --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
     --no-preflight) SKIP_PREFLIGHT=1; shift ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -67,22 +74,43 @@ mkdir -p "$DIR/.tmp/logs"
 # .tmp/ is worker scratch and must never reach the user's history — one `git add
 # -A` in a later phase is all it would take. Add the ignore once, in the work
 # tree root's .gitignore, and only if git does not already ignore .tmp (which
-# also covers a global or parent-level rule). Silent on success: stdout belongs
-# to the STATUS line alone. Must stay *after* the mkdir above: a directory-only
-# rule like `.tmp/` only matches a path git can see is a directory, so checking
-# first would re-add an entry that is already there.
+# also covers a global or parent-level rule). Must stay *after* the mkdir above:
+# a directory-only rule like `.tmp/` only matches a path git can see is a
+# directory, so checking first would re-add an entry that is already there.
+#
+# The edit is not silent, because it is the tooling authoring a file in someone
+# else's repo: a .gitignore this created is itself untracked, and the wholesale
+# `git add -A` a release phase reaches for would sweep it into the task's commit
+# — which is how it turned up in a delivered diffstat as a change nobody asked
+# for. It is reported rather than committed: committing writes to the user's
+# history as a side effect of a dispatch, which nothing here is licensed to do,
+# and would need a clean index, an identity, and no hooks to be safe. The report
+# rides the STATUS line, appended as a field so the head of the line never
+# shifts, because the orchestrator reads that line and nothing else — stderr
+# carries the same sentence for whoever is running phase.sh by hand.
+GITIGNORE_FIELD=""
 if GITROOT="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null)" \
    && [ "$(git -C "$DIR" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] \
    && [ -n "$GITROOT" ] \
    && ! git -C "$DIR" check-ignore -q .tmp 2>/dev/null; then
   GITIGNORE="$GITROOT/.gitignore"
+  [ -e "$GITIGNORE" ] && GI_EXISTED=1 || GI_EXISTED=""
   # An existing file that lacks a trailing newline would otherwise absorb the
   # new entry into its last line.
   if [ -s "$GITIGNORE" ] && [ -n "$(tail -c 1 "$GITIGNORE" 2>/dev/null)" ]; then
     printf '\n' >> "$GITIGNORE" 2>/dev/null
   fi
-  printf '.tmp/\n' >> "$GITIGNORE" 2>/dev/null \
-    || echo "phase.sh: could not add .tmp/ to $GITIGNORE" >&2
+  if printf '.tmp/\n' >> "$GITIGNORE" 2>/dev/null; then
+    if [ -n "$GI_EXISTED" ]; then
+      GITIGNORE_NOTE="Gitignore: added .tmp/ to $GITIGNORE — the tooling's edit, not the task's; keep it out of the task's commit"
+    else
+      GITIGNORE_NOTE="Gitignore: created $GITIGNORE holding .tmp/ — untracked and not the task's; keep it out of the task's commit"
+    fi
+    GITIGNORE_FIELD=" | $GITIGNORE_NOTE"
+    echo "phase.sh: $GITIGNORE_NOTE" >&2
+  else
+    echo "phase.sh: could not add .tmp/ to $GITIGNORE" >&2
+  fi
 fi
 
 LOG="$DIR/.tmp/logs/$PHASE.log"
@@ -113,15 +141,19 @@ if [ -f "$RETRY_FILE" ]; then
   # rather than aborting the dispatch on a string comparison.
   SPENT="$(tr -cd '0-9' < "$RETRY_FILE" 2>/dev/null)"; SPENT="${SPENT:-0}"
   NEXT=$((SPENT + 1))
+  HAD_COUNTER=1
 else
   SPENT=0; NEXT=0
+  # No file at all is its own state — "this cycle has not dispatched yet" — and
+  # a refund below has to be able to put it back, not settle for writing 0.
+  HAD_COUNTER=""
 fi
 
 # At the cap, refuse before anything is spent — no preflight fetch, no worker,
 # no cleared verdict, so .tmp/REVIEW_FEEDBACK.md and the last verdict survive for
 # the orchestrator, which SKILL.md tells to take the work over itself from here.
 if [ "$SPENT" -ge "$RETRY_CAP" ]; then
-  printf '%s\n' "STATUS: RETRY_CAP_REACHED(n=$SPENT, cap=$RETRY_CAP) | Phase: $PHASE | Note: the retry budget for this phase is spent — take the work over yourself, or pass --reset-retries to start a fresh cycle | Log: $LOG" \
+  printf '%s\n' "STATUS: RETRY_CAP_REACHED(n=$SPENT, cap=$RETRY_CAP) | Phase: $PHASE | Note: the retry budget for this phase is spent — take the work over yourself, or pass --reset-retries to start a fresh cycle | Log: $LOG$GITIGNORE_FIELD" \
     | tee "$STATUS_FILE"
   exit 6
 fi
@@ -146,9 +178,10 @@ if [ -z "$SKIP_PREFLIGHT" ]; then
       127) REASON="agy_not_found" ;;
       3)   REASON="not_signed_in" ;;
       4)   REASON="model_unavailable:$MODEL" ;;
+      7)   REASON="timeout" ;;
       *)   REASON="rc=$PRC" ;;
     esac
-    printf '%s\n' "STATUS: PREFLIGHT_FAILED($REASON) | Phase: $PHASE | Log: $PREFLIGHT_LOG" \
+    printf '%s\n' "STATUS: PREFLIGHT_FAILED($REASON) | Phase: $PHASE | Log: $PREFLIGHT_LOG$GITIGNORE_FIELD" \
       | tee "$STATUS_FILE"
     exit "$PRC"
   fi
@@ -211,6 +244,7 @@ fi
 if [ -n "$VERIFY" ] && [ "$VRC" -eq 0 ] && [ "$RC" -eq 0 ]; then
   LINE="$LINE | Verify: ok | VerifyLog: $VERIFY_LOG"
 fi
+LINE="$LINE$GITIGNORE_FIELD"
 
 # A round that ends clean ends the cycle, so the next one starts from zero
 # without anybody having to remember --reset-retries. Clean means the worker
@@ -227,6 +261,29 @@ if [ "$RC" -eq 0 ] && [ "$VRC" -eq 0 ] && [ -n "$CLAIM" ]; then
   esac
 fi
 [ "$CLEAN" -eq 1 ] && rm -f "$RETRY_FILE"
+
+# The refund. The cap exists to stop a review-fix loop that is not converging,
+# so it should only be spent by a worker that tried and did not converge. A
+# WORKER_FAILED round is not that: agy died on its own configuration — an
+# unreadable criteria path, a brief it could not open — in seconds, before any
+# reasoning happened, and it leaves no feedback file for the next round to work
+# from either. Two of those in a row would have retired a review phase that had
+# never reviewed anything. So the counter goes back exactly as it was, an absent
+# file included. FAILED, VERIFY_FAILED and NO_STATUS_REPORTED all keep spending:
+# each of them is a worker that ran and left the round unresolved.
+#
+# This deliberately does not run from a trap, and that is the whole answer to
+# the case writing the counter up front protects — a round killed halfway. A
+# user's ^C reaches phase.sh with the worker, phase.sh dies here and never
+# reaches this line, so the retry it wrote before dispatching stands. Only a
+# worker that returned a non-zero code to a phase.sh still running is refunded.
+if [ "$RC" -ne 0 ]; then
+  if [ -n "$HAD_COUNTER" ]; then
+    printf '%s\n' "$SPENT" > "$RETRY_FILE" 2>/dev/null
+  else
+    rm -f "$RETRY_FILE"
+  fi
+fi
 
 printf '%s\n' "$LINE" | tee "$STATUS_FILE"
 [ "$RC" -eq 0 ] || exit "$RC"

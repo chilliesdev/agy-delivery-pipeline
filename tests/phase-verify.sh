@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Exercise the two gates phase.sh makes mechanical: --verify, which overrides a
-# worker's claim, and the retry counter that caps the review loop.
+# worker's claim, and the retry counter that caps the review loop — including
+# which rounds that counter charges for and which it hands back.
 #
 #   tests/phase-verify.sh
 #
@@ -19,14 +20,17 @@ trap 'rm -rf "$ROOT"' EXIT INT TERM
 
 # The stub agy: answers `models` for preflight, otherwise writes the verdict
 # named by STUB_VERDICT, touches $STUB_RAN so a refused dispatch is provable,
-# and exits STUB_RC.
+# and exits STUB_RC. The `models` answer has its own knobs — STUB_MODELS_RC to
+# fail the fetch and STUB_MODELS_SLEEP to hang it — because a preflight that
+# refuses is one of the rounds the retry counter must not charge for.
 STUB="$ROOT/agy"
 cat > "$STUB" <<'STUB_EOF'
 #!/usr/bin/env bash
 set -uo pipefail
 if [ "${1:-}" = "models" ]; then
-  printf 'gemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\n'
-  exit 0
+  [ -n "${STUB_MODELS_SLEEP:-}" ] && sleep "$STUB_MODELS_SLEEP"
+  [ "${STUB_MODELS_RC:-0}" = "0" ] && printf 'gemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\n'
+  exit "${STUB_MODELS_RC:-0}"
 fi
 [ -n "${STUB_RAN:-}" ] && printf 'ran\n' >> "$STUB_RAN"
 mkdir -p .tmp
@@ -174,6 +178,78 @@ R="$(new_repo retry-junk)"
 mkdir -p "$R/.tmp"; printf 'not a number\n' > "$R/.tmp/TEST.retries"
 run "$R"
 check retry-junk "$CODE" 0 "a corrupt counter reads as zero"
+
+# --- the refund -----------------------------------------------------------
+
+# 13. a round the worker died in is refunded whole. It spent the counter at
+# dispatch, as every round does, and gets it back because a worker that fell
+# over on its own configuration never tried to converge on anything.
+R="$(new_repo retry-worker-failed)"; RAN="$R/ran.txt"
+STUB_RC=7 STUB_RAN="$RAN" run "$R"
+case "$(head_of "$OUT")" in WORKER_FAILED*) ok refund-verdict "the round is WORKER_FAILED" ;;
+  *) bad refund-verdict "unexpected verdict: $OUT" ;; esac
+check refund-dispatched "$(grep -c . "$RAN" 2>/dev/null)" "1" \
+  "the worker really was dispatched, so the counter really was spent"
+[ -f "$R/.tmp/TEST.retries" ] \
+  && bad refund-opening "a dead worker left the opening round on the counter" \
+  || ok refund-opening "an opening round the worker died in leaves no counter"
+
+# 13b. refunded, not cleared: what earlier rounds spent stays spent.
+R="$(new_repo retry-refund-restores)"
+STUB_VERDICT='STATUS: FAILED | File: x' run "$R"
+STUB_VERDICT='STATUS: FAILED | File: x' run "$R"
+check refund-before "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "1" "two failing rounds, one retry spent"
+STUB_RC=4 run "$R"
+check refund-restores "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "1" \
+  "the dead round is given back, the earlier retry is not"
+STUB_VERDICT='STATUS: FAILED | File: x' run "$R"
+check refund-resumes "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "2" \
+  "the next real round picks the count up where it was"
+
+# 14. a round preflight refuses spends nothing — it never dispatched at all.
+R="$(new_repo retry-preflight-first)"
+STUB_MODELS_RC=1 run "$R"
+check preflight-rc "$CODE" 3 "phase.sh exits with preflight's own code"
+case "$(head_of "$OUT")" in PREFLIGHT_FAILED*) ok preflight-verdict "reported as PREFLIGHT_FAILED" ;;
+  *) bad preflight-verdict "unexpected verdict: $OUT" ;; esac
+[ -f "$R/.tmp/TEST.retries" ] \
+  && bad preflight-no-spend "a refused preflight wrote the counter" \
+  || ok preflight-no-spend "a refused preflight spends no retry"
+
+# 14b. and does not disturb what a real round spent before it.
+R="$(new_repo retry-preflight-after)"
+STUB_VERDICT='STATUS: FAILED | File: x' run "$R"
+STUB_MODELS_RC=1 run "$R"
+check preflight-keeps "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "0" \
+  "the earlier round's count is left exactly as it was"
+
+# 14c. a preflight that hangs is the same class, under its own reason — the
+# STATUS line is where the orchestrator learns which one it hit.
+R="$(new_repo retry-preflight-timeout)"
+STUB_MODELS_SLEEP=45 AGY_PREFLIGHT_TIMEOUT=1 run "$R"
+check preflight-timeout-rc "$CODE" 7 "exit 7 when preflight times out"
+case "$OUT" in *"PREFLIGHT_FAILED(timeout)"*)
+    ok preflight-timeout-reason "the hang is named as its own reason" ;;
+  *) bad preflight-timeout-reason "unexpected line: $OUT" ;; esac
+[ -f "$R/.tmp/TEST.retries" ] \
+  && bad preflight-timeout-spend "a timed-out preflight spent a retry" \
+  || ok preflight-timeout-spend "a timed-out preflight spends no retry"
+
+# 15. the verdicts that keep spending. A failing check is a worker that ran and
+# whose work did not hold up; an empty verdict is a round left unresolved.
+R="$(new_repo retry-verify-spends)"
+run "$R" --verify 'false'
+check verify-spends "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "0" "a VERIFY_FAILED round is recorded"
+run "$R" --verify 'false'
+check verify-spends-2 "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "1" "and the next one spends a retry"
+
+R="$(new_repo retry-no-status)"
+STUB_VERDICT=' ' run "$R"
+case "$(head_of "$OUT")" in NO_STATUS_REPORTED*) ok no-status-verdict "the round is NO_STATUS_REPORTED" ;;
+  *) bad no-status-verdict "unexpected verdict: $OUT" ;; esac
+check no-status-spends "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "0" "an unresolved round is recorded"
+STUB_VERDICT=' ' run "$R"
+check no-status-spends-2 "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "1" "and the next one spends a retry"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

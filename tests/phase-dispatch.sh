@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Exercise phase.sh's dispatch side effects: the .gitignore guard it installs
-# before running a worker, and the sandbox flag it forwards to agy-run.sh.
+# before running a worker — which it reports on the STATUS line and never
+# commits — and the sandbox flag it forwards to agy-run.sh.
 #
 #   tests/phase-dispatch.sh
 #
@@ -68,11 +69,34 @@ case "$OUT" in
   "STATUS: DONE | File: .tmp/CHANGES.md | Phase: TEST | Log: "*) ok a-fresh-repo-stdout "stdout is still one STATUS line" ;;
   *) bad a-fresh-repo-stdout "stdout was: $OUT" ;;
 esac
+check a-fresh-repo-oneline "$(printf '%s\n' "$OUT" | grep -c .)" "1" \
+  "the report did not cost a second line"
 
-# b. running twice must not duplicate the entry
+# a2. the file the tooling just authored is reported, because it is untracked
+# and one `git add -A` from the task's own commit. The path in the line comes
+# from `git rev-parse --show-toplevel`, which is physical — $TMPDIR on macOS is
+# /var/folders/…, a symlink to /private/var/folders/… — so compare against the
+# resolved path, not the one mktemp handed back.
+REPO_REAL="$(cd "$REPO" && pwd -P)"
+case "$OUT" in *"| Gitignore: created $REPO_REAL/.gitignore holding .tmp/"*)
+    ok a-fresh-repo-reported "the STATUS line names the file it created" ;;
+  *) bad a-fresh-repo-reported "no Gitignore field: $OUT" ;; esac
+check a-fresh-repo-status-file "$(sed -n '1p' "$REPO/.tmp/TEST.status")" "$OUT" \
+  ".tmp/TEST.status carries the same line"
+
+# a3. reported, not committed: phase.sh writes nothing to the user's history.
+check a-fresh-repo-no-commit "$(git -C "$REPO" rev-list --count --all 2>/dev/null)" "0" \
+  "no commit was made on the user's behalf"
+check a-fresh-repo-untracked "$(git -C "$REPO" status --porcelain -- .gitignore 2>/dev/null)" \
+  "?? .gitignore" "the file is left untracked for the orchestrator to deal with"
+
+# b. running twice must not duplicate the entry, and must not repeat the report
 run_phase "$REPO" "$REPO" >/dev/null
 check b-run-twice "$(count "$REPO/.gitignore" '^\.tmp/$')" "1" \
   "still exactly one .tmp/ entry after a second run"
+OUT="$(run_phase "$REPO" "$REPO")"
+case "$OUT" in *Gitignore:*) bad b-run-twice-quiet "the second run reported an edit it did not make" ;;
+  *) ok b-run-twice-quiet "only the dispatch that wrote it says so" ;; esac
 
 # c. a repo that already ignores .tmp is left byte-identical. `.tmp/` is
 # directory-only, so this also pins phase.sh's mkdir-before-check ordering:
@@ -80,9 +104,11 @@ check b-run-twice "$(count "$REPO/.gitignore" '^\.tmp/$')" "1" \
 REPO="$(new_repo c-already-ignored)"
 printf 'node_modules/\n.tmp/\ndist/\n' > "$REPO/.gitignore"
 BEFORE="$(cksum < "$REPO/.gitignore")"
-run_phase "$REPO" "$REPO" >/dev/null
+OUT="$(run_phase "$REPO" "$REPO")"
 check c-already-ignored "$(cksum < "$REPO/.gitignore")" "$BEFORE" \
   "existing .gitignore untouched"
+case "$OUT" in *Gitignore:*) bad c-already-ignored-quiet "reported an edit that never happened" ;;
+  *) ok c-already-ignored-quiet "nothing edited, nothing reported" ;; esac
 
 # c2. same, via a differently-spelled rule that git still honours
 REPO="$(new_repo c2-ignored-other-spelling)"
@@ -95,9 +121,19 @@ check c2-ignored-other-spelling "$(cksum < "$REPO/.gitignore")" "$BEFORE" \
 # d. a .gitignore with no trailing newline must not have its last line corrupted
 REPO="$(new_repo d-no-trailing-newline)"
 printf 'node_modules/' > "$REPO/.gitignore"
-run_phase "$REPO" "$REPO" >/dev/null
+OUT="$(run_phase "$REPO" "$REPO")"
 check d-no-trailing-newline "$(printf '%s' "$(cat "$REPO/.gitignore")" | tr '\n' '|')" \
   "node_modules/|.tmp/" "last line intact, .tmp/ on its own line"
+
+# d2. an edit to a file that was already there is still an edit the task did not
+# ask for, and is reported as one — in the other wording, since nothing was
+# created here.
+REPO_REAL="$(cd "$REPO" && pwd -P)"
+case "$OUT" in *"| Gitignore: added .tmp/ to $REPO_REAL/.gitignore"*)
+    ok d-existing-reported "an edit to an existing .gitignore is reported too" ;;
+  *) bad d-existing-reported "no Gitignore field: $OUT" ;; esac
+check d-existing-no-commit "$(git -C "$REPO" rev-list --count --all 2>/dev/null)" "0" \
+  "still nothing committed"
 
 # e. a plain directory that is not a git repo: no error, no .gitignore invented
 REPO="$ROOT/repos/e-not-a-repo"; mkdir -p "$REPO"

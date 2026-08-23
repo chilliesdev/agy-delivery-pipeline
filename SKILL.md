@@ -29,7 +29,11 @@ sequential and exactly one worker is ever running.
 >    only read what is inside `--add-dir`.
 > 3. **One worker at a time.** A phase must be gated before the next dispatches.
 > 4. **`.tmp/` is never committed.** `phase.sh` adds it to the work tree root's
->    `.gitignore` on first dispatch if git does not ignore it already.
+>    `.gitignore` on first dispatch if git does not ignore it already, and says
+>    so in a trailing `| Gitignore: …` field on that dispatch's status line. It
+>    never commits the file — that is the orchestrator's to place. Keep it out
+>    of the task's commit: stage the task's own paths, or commit the ignore
+>    first, on its own, and say in the final report that the tooling wrote it.
 > 5. **The orchestrator gates, the worker never self-certifies.** A worker's
 >    `STATUS: PASSED` is a claim; confirm it against the artifact on disk before
 >    advancing. `--verify` makes part of that check mechanical — reading the
@@ -109,17 +113,30 @@ have, because the listing varies by account and shifts over time; it is fetched
 live every time and never cached, a cached copy having once been seen missing a
 model a fresh fetch offered.
 
+**The fetch is bounded — 30 seconds by default, exit 7 past it.** A hang is not
+hypothetical: one `agy models` call sat for ten minutes while three immediate
+re-runs answered in three seconds, and because preflight runs before *every*
+dispatch, an unbounded fetch stalls the whole pipeline with nothing to act on —
+no status line, no worker log, no retry file. macOS ships no `timeout` binary,
+so the bound is the hand-rolled watchdog `check-test-command.sh` already uses: a
+process group of its own, `TERM` then `KILL`, nothing orphaned behind it. Move
+it with `--timeout <n>` (seconds, or `30s` / `5m`) or `AGY_PREFLIGHT_TIMEOUT`;
+`--timeout 0` removes it.
+
 `phase.sh` also runs it before each dispatch and reports a refusal as
-`STATUS: PREFLIGHT_FAILED(<reason>)` — `agy_not_found`, `not_signed_in` or
-`model_unavailable:<id>` — because the orchestrator never reads stderr. It is on
-by default: a sign-in can lapse and a model can be withdrawn mid-pipeline, so
-checking once at Phase 0 is not enough. Pass `--no-preflight`, or set
-`AGY_SKIP_PREFLIGHT=1`, to drop it from a tight retry loop.
+`STATUS: PREFLIGHT_FAILED(<reason>)` — `agy_not_found`, `not_signed_in`,
+`model_unavailable:<id>` or `timeout` — because the orchestrator never reads
+stderr. It is on by default: a sign-in can lapse and a model can be withdrawn
+mid-pipeline, so checking once at Phase 0 is not enough. Pass `--no-preflight`,
+or set `AGY_SKIP_PREFLIGHT=1`, to drop it from a tight retry loop. A `timeout`
+refusal is the one worth simply re-running: the hang is transient on agy's side,
+and no retry is charged for it.
 
 One agy behaviour the script has to work around, and so does anything else that
 reads its output: **agy hangs when its stdout is a plain file.** Read it through
-a pipe or a command substitution, never a `>` redirect. Covered by
-[tests/preflight.sh](tests/preflight.sh).
+a pipe or a command substitution, never a `>` redirect — the watchdog keeps to
+that too, letting the fetch write into `cat` and giving `cat` the file. Covered
+by [tests/preflight.sh](tests/preflight.sh).
 
 Two agy behaviours every brief must respect:
 
@@ -461,6 +478,16 @@ capped phase deliberately, pass `--reset-retries`, and `--retry-cap <n>` moves
 the budget. Nothing is spent at the cap — the refusal happens before preflight
 and before the verdict is cleared, so `.tmp/REVIEW_FEEDBACK.md` and the last
 verdict are still there to hand over.
+
+**A round that never reviewed anything is refunded.** The counter is spent at
+dispatch, so that a round killed halfway still counts, but a `WORKER_FAILED` or
+`PREFLIGHT_FAILED` round gets it back — those are agy dying on its own
+configuration in seconds, not a reviewer failing to converge, and they leave no
+`.tmp/REVIEW_FEEDBACK.md` to hand over either. Two of them in a row once came
+within one round of retiring a review phase that had never run. `FAILED`,
+`VERIFY_FAILED` and `NO_STATUS_REPORTED` all keep spending: each is a worker
+that ran and left the round unresolved, which is exactly what the cap counts.
+Fix the configuration and dispatch again — the budget is where it was.
 
 ### Phase 3 — QA (tier `medium`, `--mode full --sandbox`)
 
