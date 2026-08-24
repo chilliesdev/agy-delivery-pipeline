@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bash version
+        run: bash --version
+
+      - name: Run tests
+        run: bash scripts/run-tests.sh
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # Staging shellcheck: the scripts have never been linted, nobody knows what
+      # shellcheck says about them yet, and a red build on day one gets muted.
+      # Errors block now, while style/warnings remain advisory and visible.
+      # Issue #39 walks the warnings to zero and then raises the blocking severity
+      # to warning.
+      - name: Run shellcheck (errors - blocking)
+        run: shellcheck -S error scripts/*.sh tests/*.sh
+
+      - name: Run shellcheck (style/advisory - non-blocking)
+        continue-on-error: true
+        run: shellcheck -S style scripts/*.sh tests/*.sh || true
+
+  manifests:
+    name: manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check manifests
+        run: bash tests/manifest.sh
+
+      - name: Check doc links
+        run: bash tests/doc-links.sh

@@ -1,5 +1,7 @@
 # agy-delivery-pipeline
 
+[![CI](https://github.com/chilliesdev/agy-delivery-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/chilliesdev/agy-delivery-pipeline/actions/workflows/ci.yml)
+
 A Claude Code **plugin** that hands coding work to the
 [Antigravity CLI](https://antigravity.google/docs/cli/overview/) (`agy`) while
 Claude Code stays the orchestrator — writing briefs, running the checks, reading
@@ -143,11 +145,18 @@ decline is the right shape for a judgement call.
 ## Tests
 
 ```
-for t in tests/*.sh; do "$t" || echo "FAILED: $t"; done
+scripts/run-tests.sh
 ```
 
-Each suite builds throwaway repos under `$TMPDIR` and writes nothing inside this
-one.
+Runs all suites in sorted order and exits non-zero if any fails. Pass suite
+paths to run a subset, or `--quiet` to report only failures and the summary:
+
+```
+scripts/run-tests.sh tests/manifest.sh tests/doc-links.sh
+```
+
+CI runs the full suite on macOS (bash 3.2) and Ubuntu (bash 5). Each suite
+builds throwaway repos under `$TMPDIR` and writes nothing inside this one.
 
 ## Status
 
