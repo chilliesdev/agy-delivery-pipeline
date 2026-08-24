@@ -134,6 +134,15 @@ The two Phase 2 helpers have their own suites,
 [tests/capture-diff.sh](../../tests/capture-diff.sh) and
 [tests/check-review.sh](../../tests/check-review.sh).
 
+### The run ledger
+
+Every dispatch automatically appends one summary line to `.agy/ledger.jsonl`.
+The orchestrator does not need to read or maintain the ledger during a run — its
+context stays lean by design, and recording is a side effect handled entirely
+underneath. When questions arise between runs about pipeline behaviour, pass
+rates, retry convergence, or verification gate overrides, query the ledger with
+`${CLAUDE_PLUGIN_ROOT}/scripts/report.sh`.
+
 ## Preflight
 
 Run the preflight once before Phase 0, so a broken setup costs seconds instead of

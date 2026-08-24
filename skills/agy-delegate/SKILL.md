@@ -164,6 +164,11 @@ Read it, not the log.
 **One retry, then stop.** This is a one-shot path; a second failure means the
 task was underspecified or wants the pipeline. Take it over yourself and say so.
 
+Dispatches are recorded automatically to `.agy/ledger.jsonl` as an append-only
+ledger line. The orchestrator does nothing with this during a run; questions
+about historical performance and pass rates are answered between runs by
+`${CLAUDE_PLUGIN_ROOT}/scripts/report.sh`.
+
 ## The gate
 
 The worker's verdict is a claim. `--verify` makes part of the check mechanical;

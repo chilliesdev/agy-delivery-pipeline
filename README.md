@@ -144,6 +144,65 @@ scripts/run-dir.sh list
 scripts/run-dir.sh show [--run <id|current|last>]
 ```
 
+## The run ledger
+
+Every dispatch — pipeline phase or standalone delegation — appends one record
+to `.agy/ledger.jsonl`. It is a single append-only line per dispatch, spanning
+all runs in the repository. It is never rewritten, never truncated, and never
+sorted.
+
+Every gate in this repository was added in response to a single incident. That
+is a sound way to *find* a gate and a poor way to *keep* one. Nothing here would
+ever have told you that a rule had stopped earning its place, or that a
+paragraph added to `criteria/code-review.md` made reviews better rather than
+merely longer.
+
+`REVIEW_THIN` is the standing example: it exists because one review came back as
+empty scaffolding, and it is deliberately **not** wired into `--verify` because
+nobody could tell whether it was reliable enough to override a verdict. With a
+hundred runs recorded, whether thin reviews predict a later `VERIFY_FAILED`
+becomes a question with an answer, and the rule can be promoted or deleted on
+evidence instead of staying a maybe forever.
+
+And the number that matters most: **how often `--verify` overrides a worker's
+`PASSED`.** That figure is the entire justification for the gate, and until now
+nobody knew it.
+
+A record holds dispatch metadata, timings, exit codes, gate verdicts, retry
+counters, and diff/review summaries:
+
+```json
+{"run":"2026-08-24T09-51-03Z-a4f1","phase":"REVIEW","attempt":1,"tier":"high","model":"gemini-3.7-flash-high","backend":"agy","started":"2026-08-24T09:51:20Z","elapsed_s":42,"worker_rc":0,"verdict":"PASSED","verify_ran":true,"verify_rc":0,"status":"PASSED","retries_spent":0,"retries_refunded":0,"task_id":"b3f81e62a1c0","diff":{"files":3,"insertions":45,"deletions":12,"truncated":false},"review":{"anchors":4,"status":"REVIEW_EVIDENCED"}}
+```
+
+**The privacy stance, plainly.** The task string is recorded as a 12-character
+hash by default (`git hash-object`, requiring no extra dependencies). Setting
+`AGY_LEDGER_TASK=plain` opts into recording literal task strings. Brief bodies,
+diffs, logs, and file contents stay in the run directory and never enter the
+ledger. The intent that follows is deliberate: *the ledger should be safe to
+share; the run directory should not have to be.*
+
+A failed ledger append never fails a dispatch. Recording is a side effect, not
+the job.
+
+### Inspecting the ledger
+
+Query summary metrics across recorded runs with `scripts/report.sh`:
+
+```
+scripts/report.sh [--dir <repo>] [--since <date>] [--phase <NAME>] [--run <id>]
+```
+
+It parses the JSONL records in portable bash 3.2 (no `jq` or Python required)
+and prints:
+
+- dispatch counts and pass rates by phase
+- retry convergence distribution (rounds 1, 2, 3+, and unresolved cap hits)
+- median and max elapsed wall-clock times per phase
+- gate and verification outcomes, including `--verify` overrides and missing
+  worker statuses
+- corrupt or unparseable line counts
+
 ## Running a phase by hand
 
 The scripts are usable outside Claude Code:

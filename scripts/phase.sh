@@ -45,6 +45,9 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/run-dir.sh"
+. "$HERE/ledger.sh"
+
+STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
@@ -223,6 +226,21 @@ fi
 if [ "$SPENT" -ge "$RETRY_CAP" ]; then
   printf '%s\n' "STATUS: RETRY_CAP_REACHED(n=$SPENT, cap=$RETRY_CAP) | Phase: $PHASE | Run: $RUN_ID | Note: the retry budget for this phase is spent — take the work over yourself, or pass --reset-retries to start a fresh cycle | Log: $LOG$GITIGNORE_FIELD" \
     | tee "$STATUS_FILE"
+  TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
+  [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
+  ledger_append "$DIR" \
+    "run=$RUN_ID" \
+    "phase=$PHASE" \
+    "attempt=$((SPENT + 1))" \
+    "tier=$TIER" \
+    "model=$MODEL" \
+    "backend=agy" \
+    "started=$STARTED_TS" \
+    "status=RETRY_CAP_REACHED(n=$SPENT, cap=$RETRY_CAP)" \
+    "retries_spent=$SPENT" \
+    "retries_refunded=0" \
+    "verify_ran=false" \
+    ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
   exit 6
 fi
 
@@ -251,6 +269,21 @@ if [ -z "$SKIP_PREFLIGHT" ]; then
     esac
     printf '%s\n' "STATUS: PREFLIGHT_FAILED($REASON) | Phase: $PHASE | Run: $RUN_ID | Log: $PREFLIGHT_LOG$GITIGNORE_FIELD" \
       | tee "$STATUS_FILE"
+    TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
+    [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
+    ledger_append "$DIR" \
+      "run=$RUN_ID" \
+      "phase=$PHASE" \
+      "attempt=$((SPENT + 1))" \
+      "tier=$TIER" \
+      "model=$MODEL" \
+      "backend=agy" \
+      "started=$STARTED_TS" \
+      "status=PREFLIGHT_FAILED($REASON)" \
+      "retries_spent=$SPENT" \
+      "retries_refunded=0" \
+      "verify_ran=false" \
+      ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
     exit "$PRC"
   fi
 fi
@@ -260,10 +293,12 @@ fi
 # survives to say so.
 printf '%s\n' "$NEXT" > "$RETRY_FILE" 2>/dev/null
 
+START_EPOCH=$(date +%s)
 "$HERE/agy-run.sh" --brief "$BRIEF" --dir "$DIR" --log "$LOG" \
   --model "$MODEL" --mode "$MODE" --timeout "$TIMEOUT" \
   ${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"} >/dev/null 2>&1
 RC=$?
+ELAPSED_S=$(( $(date +%s) - START_EPOCH ))
 
 # Primary: the verdict the worker wrote to R/phases/<PHASE>/verdict — first non-empty
 # line, no transcript involved. Fallback: the last transcript line that *starts*
@@ -357,6 +392,54 @@ if [ "$RC" -ne 0 ]; then
     rm -f "$RETRY_FILE"
   fi
 fi
+
+# Record dispatch outcome to ledger
+TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
+[ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
+
+LEDGER_ARGS=(
+  "run=$RUN_ID"
+  "phase=$PHASE"
+  "attempt=$((SPENT + 1))"
+  "tier=$TIER"
+  "model=$MODEL"
+  "backend=agy"
+  "started=$STARTED_TS"
+  "elapsed_s=$ELAPSED_S"
+  "worker_rc=$RC"
+  "status=$FINAL_STATUS"
+  "retries_spent=$SPENT"
+)
+
+if [ -n "$FINAL_VERDICT" ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verdict=$FINAL_VERDICT")
+fi
+
+if [ -n "$VERIFY" ] && [ "$RC" -eq 0 ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verify_ran=true" "verify_rc=$VRC")
+else
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verify_ran=false")
+fi
+
+if [ "$RC" -ne 0 ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "retries_refunded=1")
+else
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "retries_refunded=0")
+fi
+
+if [ -n "$TASK_TO_RECORD" ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "task=$TASK_TO_RECORD")
+fi
+
+if DIFF_OBJ="$(_ledger_extract_diff "$R")"; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "diff=$DIFF_OBJ")
+fi
+
+if REV_OBJ="$(_ledger_extract_review "$DIR" "$R")"; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "review=$REV_OBJ")
+fi
+
+ledger_append "$DIR" "${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
 
 printf '%s\n' "$LINE" | tee "$STATUS_FILE"
 [ "$RC" -eq 0 ] || exit "$RC"
