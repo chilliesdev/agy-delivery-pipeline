@@ -2,11 +2,11 @@
 # Say what a release can and cannot do in this repository — without doing any
 # of it.
 #
-#   check-release.sh [--dir <repo>] [--into <dir>] [--release-branch <name>]
-#                    [--bump patch|minor|major] [--first-version <v>]
-#                    [--allow-dirty]
+#   check-release.sh [--dir <repo>] [--run <id|current|last>] [--into <dir>]
+#                    [--release-branch <name>] [--bump patch|minor|major]
+#                    [--first-version <v>] [--allow-dirty]
 #
-# Writes:  <repo>/.tmp/RELEASE_FACTS.md   the same facts, for the worker to read
+# Writes:  <run-dir>/RELEASE_FACTS.md   the same facts, for the worker to read
 # Prints:  the STATUS line only — stdout belongs to it alone, as everywhere else.
 #
 # Exit codes, one per outcome:
@@ -71,7 +71,7 @@
 # at git at all. The same rule that put the Phase 2 diff on disk applies: if a
 # brief names a thing to read, something must first have put that thing inside
 # --add-dir. So every fact on the STATUS line is also written to
-# <repo>/.tmp/RELEASE_FACTS.md, which the release criteria treats as its only
+# <run-dir>/RELEASE_FACTS.md, which the release criteria treats as its only
 # account of the repository's state. It is written on a block too, so a person
 # reading afterwards sees what was missing.
 #
@@ -86,12 +86,17 @@
 # --into moves the facts file; the caller then owns keeping it inside --add-dir.
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/run-dir.sh"
+
 DIR="$PWD"; INTO=""; RELEASE_BRANCH=""; BUMP="minor"
 FIRST_VERSION="v0.1.0"; ALLOW_DIRTY=""
+RUN_TARGET="current"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir)            DIR="$2";            shift 2 ;;
+    --run)            RUN_TARGET="$2";     shift 2 ;;
     --into)           INTO="$2";           shift 2 ;;
     --release-branch) RELEASE_BRANCH="$2"; shift 2 ;;
     --bump)           BUMP="$2";           shift 2 ;;
@@ -162,10 +167,16 @@ if [ "$REMOTES" -gt 0 ]; then
                                 END { if (!found) print first }')"
 fi
 
+if [ -n "$INTO" ]; then
+  OUT_DIR="$INTO"
+else
+  R="$(run_dir_resolve --dir "$ROOT" --run "$RUN_TARGET")" || exit $?
+  OUT_DIR="$R"
+fi
+
 # The output directory is excluded from the dirty check by pathspec rather than
 # left to .gitignore: this script writes into it, and a second run must not
 # report its own first run as uncommitted work standing in the way of a release.
-OUT_DIR="${INTO:-$ROOT/.tmp}"
 SPEC=(. )
 case "$OUT_DIR" in
   "$ROOT"/*) SPEC=(. ":(exclude)${OUT_DIR#$ROOT/}") ;;

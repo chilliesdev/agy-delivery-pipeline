@@ -110,6 +110,16 @@ ID_SPEC="$(run_dir_new --dir "$R_SPEC" --task "$SPECIAL_TASK")"
 DIR_SPEC="$R_SPEC/.agy/runs/$ID_SPEC"
 check special-task-get "$(run_dir_get "$DIR_SPEC" "task")" "$SPECIAL_TASK" "special characters survive round-trip verbatim"
 
+# Assert raw run.json contains backslash-escaped quotes for task string
+R_QUOTE="$(new_repo quote-task)"
+ID_QUOTE="$(run_dir_new --dir "$R_QUOTE" --task 'task with "quotes" here')"
+DIR_QUOTE="$R_QUOTE/.agy/runs/$ID_QUOTE"
+if grep -Fq '"task": "task with \"quotes\" here"' "$DIR_QUOTE/run.json"; then
+  ok quote-escaped-in-json "task double quote is backslash-escaped in raw run.json"
+else
+  bad quote-escaped-in-json "task double quote not backslash-escaped in raw run.json"
+fi
+
 # --- 7. newline in task is refused -----------------------------------------
 
 R_NL="$(new_repo newline-task)"

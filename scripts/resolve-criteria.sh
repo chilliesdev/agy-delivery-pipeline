@@ -2,14 +2,14 @@
 # Install the criteria file a review/QA/release brief should cite *inside* the
 # target repo, and print the path the brief must carry.
 #
-#   resolve-criteria.sh <code-review|qa|release> [--dir <repo>] [--into <dir>]
-#                       [--print-source]
+#   resolve-criteria.sh <code-review|qa|release> [--dir <repo>] [--run <id|current|last>]
+#                       [--into <dir>] [--print-source]
 #
 # Precedence (first hit wins):
 #   1. <repo>/.claude/criteria/<name>.md     the project's own bar
 #   2. <this repo>/criteria/<name>.md        vendored default, always present
 #
-# Writes:  <repo>/.tmp/criteria/<name>.md    the copy the worker actually reads
+# Writes:  <run-dir>/criteria/<name>.md      the copy the worker actually reads
 # Prints:  that copy's absolute path — one line, nothing else.
 #
 # Exit codes:
@@ -22,19 +22,19 @@
 # the denial does not degrade — it aborts the run with rc=1 and no artifacts. The
 # vendored default lives in this skill repo, which is not the repo under review,
 # so a brief citing the resolved *source* is a brief the Phase 2 worker is
-# forbidden to follow. Copying into <repo>/.tmp/ puts the file inside --add-dir,
-# where it is readable in every mode. Phase 3 survives the same brief only
-# because --mode full turns the permission check off; it gets the copy too, so
-# the two phases are briefed the same way.
+# forbidden to follow. Copying into <repo>/.agy/runs/<run-id>/ criteria puts the file
+# inside --add-dir, where it is readable in every mode. Phase 3 survives the same
+# brief only because --mode full turns the permission check off; it gets the copy
+# too, so the two phases are briefed the same way.
 #
 # A tier 1 hit is copied as well, though it is already inside the repo. Uniform
 # beats clever: every brief then cites one path shape, and the script never has
 # to decide whether some path is "inside" a repo — a question symlinks, `..` and
 # a case-insensitive filesystem all make harder than it looks.
 #
-# The copy is overwritten on every run rather than reused. It lives in .tmp/,
-# which is worker scratch that phase.sh already keeps out of git, and a stale
-# copy would review this run's diff against a previous run's bar.
+# The copy is overwritten on every run rather than reused. It lives in the run
+# directory, which is worker state that phase.sh already keeps out of git, and a
+# stale copy would review this run's diff against a previous run's bar.
 #
 # `release` rides the same mechanism as the other two rather than getting one of
 # its own. It is a procedure where they are bars, but the machinery a phase
@@ -53,11 +53,15 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/run-dir.sh"
+
 NAME=""; DIR="$PWD"; INTO=""; PRINT_SOURCE=""
+RUN_TARGET="current"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir)          DIR="$2";  shift 2 ;;
+    --run)          RUN_TARGET="$2"; shift 2 ;;
     --into)         INTO="$2"; shift 2 ;;
     --print-source) PRINT_SOURCE=1; shift ;;
     -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
@@ -76,16 +80,6 @@ esac
 [ -d "$DIR" ] || { echo "resolve-criteria: dir not found: $DIR" >&2; exit 2; }
 DIR="$(cd "$DIR" && pwd)"
 
-# The user's own ~/.claude/skills/{code-review,e2e-qa-tester}/SKILL.md used to
-# rank here, above the vendored files. It is gone rather than demoted: those
-# documents are written for a Claude Code session — parallel sub-agents, git
-# commands, slash commands, asking the user — none of which a headless agy
-# worker has, and the QA one directs its report to QA_REPORT.md at the repo
-# root, against this skill's own .tmp/QA_REPORT.md contract. Demoting it below
-# the vendored file would have been the same thing more quietly: the vendored
-# file ships here and is always present, so a lower tier could never fire. A
-# project that wants its own bar has tier 1, which is better placed anyway —
-# per-project, and already inside --add-dir.
 SOURCE=""
 for CANDIDATE in "$DIR/.claude/criteria/$NAME.md" "$HERE/../criteria/$NAME.md"; do
   if [ -f "$CANDIDATE" ]; then
@@ -95,24 +89,6 @@ for CANDIDATE in "$DIR/.claude/criteria/$NAME.md" "$HERE/../criteria/$NAME.md"; 
 done
 [ -n "$SOURCE" ] || { echo "resolve-criteria: no criteria file found for $NAME" >&2; exit 1; }
 
-# The legacy release path is not a source, and is not silently ignored either.
-#
-# SKILL.md's old Phase 4 told the orchestrator to look for — and, failing that,
-# to *write* — <repo>/.claude/skills/git-release-flow/SKILL.md. So a project may
-# have one, and dropping it without a word would be taking work away from
-# someone who did what they were told. It is still not read, for the reason the
-# ~/.claude/skills tier above was deleted, which applies harder here than it did
-# there: a SKILL.md is a Claude Code document by construction — sub-agents,
-# slash commands, asking the user — and release is the one phase where "ask the
-# user" is precisely the dead end being removed and where a worker acting on
-# git instructions is precisely the danger. Its being inside the repo answers
-# the --add-dir objection and none of that one. And nothing ever specified the
-# file's contents, so a document at that path was written against no shape at
-# all; treating it as authoritative for the irreversible phase would be trusting
-# an unspecified file to drive `git push`.
-#
-# So: a line on stderr, naming the file and where to move it. stdout stays the
-# single path every caller parses.
 if [ "$NAME" = "release" ] && [ -f "$DIR/.claude/skills/git-release-flow/SKILL.md" ]; then
   echo "resolve-criteria: note — $DIR/.claude/skills/git-release-flow/SKILL.md exists but is not used." >&2
   echo "resolve-criteria:        That path is from the old Phase 4 text and is a Claude Code skill, not" >&2
@@ -125,7 +101,13 @@ if [ -n "$PRINT_SOURCE" ]; then
   exit 0
 fi
 
-DEST_DIR="${INTO:-$DIR/.tmp/criteria}"
+if [ -n "$INTO" ]; then
+  DEST_DIR="$INTO"
+else
+  R="$(run_dir_resolve --dir "$DIR" --run "$RUN_TARGET")" || exit $?
+  DEST_DIR="$R/criteria"
+fi
+
 mkdir -p "$DEST_DIR" 2>/dev/null \
   || { echo "resolve-criteria: could not create $DEST_DIR" >&2; exit 3; }
 DEST_DIR="$(cd "$DEST_DIR" && pwd)"

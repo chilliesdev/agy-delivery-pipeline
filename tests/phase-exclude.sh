@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise phase.sh --ignore-via, the flag that decides *where* .tmp/ gets
+# Exercise phase.sh --ignore-via, the flag that decides *where* .agy/ gets
 # ignored: the tracked .gitignore (default, every pipeline phase) or
 # .git/info/exclude (the delegate path, which must not touch a tracked file).
 #
@@ -24,7 +24,14 @@ if [ "${1:-}" = "models" ]; then
   printf 'gemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\n'
   exit 0
 fi
-mkdir -p .tmp; printf 'STATUS: DONE | File: .tmp/CHANGES.md\n' > ".tmp/$STUB_PHASE.verdict"
+if [ -f .agy/current ]; then
+  CUR_RUN="$(cat .agy/current 2>/dev/null || true)"
+  if [ -n "$CUR_RUN" ]; then
+    mkdir -p ".agy/runs/$CUR_RUN/phases/$STUB_PHASE"
+    printf 'STATUS: DONE | File: CHANGES.md\n' > ".agy/runs/$CUR_RUN/phases/$STUB_PHASE/verdict"
+  fi
+fi
+printf 'STATUS: DONE | File: CHANGES.md\n'
 exit 0
 STUB_EOF
 chmod +x "$STUB"
@@ -53,16 +60,16 @@ run_phase() {
 # repo the user did not ask it to touch.
 REPO="$(new_repo a-exclude)"
 OUT="$(run_phase "$REPO" --ignore-via exclude)"
-check a-exclude-written "$(count "$REPO/.git/info/exclude" '^\.tmp/$')" "1" \
-  ".git/info/exclude gained one .tmp/ entry"
+check a-exclude-written "$(count "$REPO/.git/info/exclude" '^\.agy/$')" "1" \
+  ".git/info/exclude gained one .agy/ entry"
 check a-exclude-no-gitignore "$([ -e "$REPO/.gitignore" ] && echo yes || echo no)" "no" \
   "no .gitignore was created"
 # The brief itself is untracked in these throwaway repos, so scope the check to
 # the two paths this flag is about: the scratch dir must be ignored, and no
 # .gitignore must have appeared to be committed by accident.
-check a-exclude-clean-tree "$(git -C "$REPO" status --porcelain -- .tmp .gitignore 2>/dev/null | grep -c .)" "0" \
-  "git sees neither .tmp/ nor a new .gitignore"
-case "$OUT" in *"| Gitignore: added .tmp/ to "*"/info/exclude"*)
+check a-exclude-clean-tree "$(git -C "$REPO" status --porcelain -- .agy .gitignore 2>/dev/null | grep -c .)" "0" \
+  "git sees neither .agy/ nor a new .gitignore"
+case "$OUT" in *"| Gitignore: added .agy/ to "*"/info/exclude"*)
     ok a-exclude-reported "the STATUS line names the exclude file" ;;
   *) bad a-exclude-reported "no exclude field: $OUT" ;; esac
 check a-exclude-oneline "$(printf '%s\n' "$OUT" | grep -c .)" "1" \
@@ -71,15 +78,15 @@ check a-exclude-oneline "$(printf '%s\n' "$OUT" | grep -c .)" "1" \
 # b. the default is unchanged — the pipeline phases still get the tracked file.
 REPO="$(new_repo b-default)"
 run_phase "$REPO" >/dev/null
-check b-default-gitignore "$(count "$REPO/.gitignore" '^\.tmp/$')" "1" \
+check b-default-gitignore "$(count "$REPO/.gitignore" '^\.agy/$')" "1" \
   "without the flag, .gitignore is still what gets written"
-check b-default-no-exclude "$(count "$REPO/.git/info/exclude" '^\.tmp/$')" "0" \
+check b-default-no-exclude "$(count "$REPO/.git/info/exclude" '^\.agy/$')" "0" \
   ".git/info/exclude was left alone"
 
 # c. --ignore-via gitignore is the default spelled out, not a third behaviour.
 REPO="$(new_repo c-explicit)"
 run_phase "$REPO" --ignore-via gitignore >/dev/null
-check c-explicit "$(count "$REPO/.gitignore" '^\.tmp/$')" "1" \
+check c-explicit "$(count "$REPO/.gitignore" '^\.agy/$')" "1" \
   "the explicit default behaves like the implicit one"
 
 # d. a second dispatch adds nothing: check-ignore already sees the exclude entry,
@@ -87,7 +94,7 @@ check c-explicit "$(count "$REPO/.gitignore" '^\.tmp/$')" "1" \
 REPO="$(new_repo d-idempotent)"
 run_phase "$REPO" --ignore-via exclude >/dev/null
 OUT="$(run_phase "$REPO" --ignore-via exclude)"
-check d-idempotent "$(count "$REPO/.git/info/exclude" '^\.tmp/$')" "1" \
+check d-idempotent "$(count "$REPO/.git/info/exclude" '^\.agy/$')" "1" \
   "still exactly one entry after a second dispatch"
 case "$OUT" in *"| Gitignore: "*) bad d-idempotent-quiet "second run still reported: $OUT" ;;
   *) ok d-idempotent-quiet "the second run says nothing about ignore rules" ;; esac
@@ -97,8 +104,8 @@ case "$OUT" in *"| Gitignore: "*) bad d-idempotent-quiet "second run still repor
 REPO="$(new_repo e-no-newline)"
 printf 'build' > "$REPO/.git/info/exclude"
 run_phase "$REPO" --ignore-via exclude >/dev/null
-check e-no-newline "$(count "$REPO/.git/info/exclude" '^\.tmp/$')" "1" \
-  ".tmp/ landed on its own line"
+check e-no-newline "$(count "$REPO/.git/info/exclude" '^\.agy/$')" "1" \
+  ".agy/ landed on its own line"
 check e-no-newline-kept "$(count "$REPO/.git/info/exclude" '^build$')" "1" \
   "the existing entry survived intact"
 

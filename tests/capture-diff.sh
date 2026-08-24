@@ -11,7 +11,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CAPTURE="$HERE/../scripts/capture-diff.sh"
+RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$CAPTURE" ] || { echo "capture-diff-test: script not found next door" >&2; exit 2; }
+[ -f "$RUN_DIR_SH" ] || { echo "capture-diff-test: run-dir.sh not found next door" >&2; exit 2; }
+
+. "$RUN_DIR_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/capture-diff.XXXXXX")" && pwd)"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
@@ -26,24 +30,32 @@ check() { if [ "$2" = "$3" ]; then ok "$1" "$4"; else bad "$1" "$4 (got '$2', wa
 # touched.
 commit() { git -C "$1" -c user.email=t@t -c user.name=t commit -q "$2" "$3"; }
 
-# new_repo <name> — a throwaway repo with .tmp/ ignored (as phase.sh arranges in
-# the real pipeline) and one commit to diff against; echoes its path.
+# new_repo <name> — a throwaway repo with .agy/ ignored (as phase.sh arranges in
+# the real pipeline), a created run directory, and one commit to diff against;
+# echoes its path.
 new_repo() {
   R="$ROOT/repos/$1"; mkdir -p "$R"
   ( cd "$R" && git init -q . )
-  printf '.tmp/\n' > "$R/.gitignore"
+  printf '.agy/\n' > "$R/.gitignore"
   printf 'first\n' > "$R/kept.txt"
   printf 'doomed\n' > "$R/gone.txt"
   ( cd "$R" && git add -A ) >/dev/null 2>&1
   commit "$R" -m init
+  run_dir_new --dir "$R" --task "capture test" >/dev/null
   printf '%s' "$R"
+}
+
+pdir() {
+  local repo="$1"
+  local id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
+  [ -n "$id" ] && printf '%s/.agy/runs/%s' "$repo" "$id"
 }
 
 # run <repo> <args...> — STATUS line into $OUT, exit code into $CODE.
 run() { R="$1"; shift; OUT="$(/bin/bash "$CAPTURE" --dir "$R" "$@" 2>/dev/null)"; CODE=$?; }
 word_of() { printf '%s' "$1" | sed -n '1p' | awk '{print $2}'; }
-patch_of() { printf '%s' "$R/.tmp/REVIEW_DIFF.patch"; }
-stat_of()  { printf '%s' "$R/.tmp/REVIEW_DIFF.stat"; }
+patch_of() { printf '%s/REVIEW_DIFF.patch' "$(pdir "$R")"; }
+stat_of()  { printf '%s/REVIEW_DIFF.stat' "$(pdir "$R")"; }
 
 # --- the three kinds of change ------------------------------------------
 
@@ -205,7 +217,7 @@ case "$(word_of "$OUT")" in DIFF_CAPTURED) ok trunc-off "--max-lines 0 captures 
 R="$(new_repo self)"
 printf 'first\nsecond\n' > "$R/kept.txt"
 run "$R"; run "$R"
-if grep -q '^+++ b/.tmp/' "$(patch_of)" 2>/dev/null; then
+if grep -q '^+++ b/\.agy/' "$(patch_of)" 2>/dev/null; then
   bad self-exclude "the patch contains its own output"
 else
   ok self-exclude "a second run does not review its own first run"
@@ -214,7 +226,7 @@ R="$(new_repo self-unignored)"
 rm -f "$R/.gitignore"; ( cd "$R" && git rm -q --cached .gitignore ) >/dev/null 2>&1
 printf 'first\nsecond\n' > "$R/kept.txt"
 run "$R"; run "$R"
-if grep -q '^+++ b/.tmp/' "$(patch_of)" 2>/dev/null; then
+if grep -q '^+++ b/\.agy/' "$(patch_of)" 2>/dev/null; then
   bad self-exclude-unignored "the output leaked into the patch with no .gitignore"
 else
   ok self-exclude-unignored "excluded by pathspec, not only by .gitignore"
@@ -267,7 +279,8 @@ check not-a-repo "$CODE" 2 "exit 2 outside a git work tree"
 # 15. A repository whose first commit has not happened yet. `git diff HEAD`
 #     there is a fatal error, so the empty tree stands in for the base.
 R="$ROOT/repos/no-commits"; mkdir -p "$R"; ( cd "$R" && git init -q . )
-printf '.tmp/\n' > "$R/.gitignore"; printf 'hello\n' > "$R/first.txt"
+printf '.agy/\n' > "$R/.gitignore"; printf 'hello\n' > "$R/first.txt"
+run_dir_new --dir "$R" --task "no commits" >/dev/null
 run "$R"
 check no-commits-rc "$CODE" 0 "exit 0 in a repo with no commits"
 if grep -q '^+hello$' "$(patch_of)" 2>/dev/null; then
@@ -283,7 +296,8 @@ mkdir -p "$R/deep/er"; printf 'x\n' > "$R/deep/er/file.txt"
 printf 'first\nsecond\n' > "$R/kept.txt"
 OUT="$(/bin/bash "$CAPTURE" --dir "$R/deep/er" 2>/dev/null)"; CODE=$?
 check subdir-rc "$CODE" 0 "exit 0 from a subdirectory"
-if grep -q '^+second$' "$R/.tmp/REVIEW_DIFF.patch" 2>/dev/null; then
+RUN_ID_SUBDIR="$(cat "$R/.agy/current")"
+if grep -q '^+second$' "$R/.agy/runs/$RUN_ID_SUBDIR/REVIEW_DIFF.patch" 2>/dev/null; then
   ok subdir-whole "the whole work tree was captured, not just the subdirectory"
 else
   bad subdir-whole "a change above the given --dir was dropped"

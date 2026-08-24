@@ -13,7 +13,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PHASE_SH="$HERE/../scripts/phase.sh"
+RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$PHASE_SH" ] || { echo "phase-dispatch: phase.sh not found next door" >&2; exit 2; }
+[ -f "$RUN_DIR_SH" ] || { echo "phase-dispatch: run-dir.sh not found next door" >&2; exit 2; }
+
+. "$RUN_DIR_SH"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/phase-dispatch.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
@@ -31,8 +35,15 @@ if [ "${1:-}" = "models" ]; then
   exit 0
 fi
 [ -n "${STUB_ARGV:-}" ] && printf '%s\n' "$@" > "$STUB_ARGV"
-mkdir -p .tmp; printf 'STATUS: DONE | File: .tmp/CHANGES.md\n' > ".tmp/$STUB_PHASE.verdict"
-exit 0
+if [ -f .agy/current ]; then
+  CUR_RUN="$(cat .agy/current 2>/dev/null || true)"
+  if [ -n "$CUR_RUN" ]; then
+    mkdir -p ".agy/runs/$CUR_RUN/phases/$STUB_PHASE"
+    printf '%b\n' "${STUB_VERDICT:-STATUS: DONE | File: CHANGES.md}" > ".agy/runs/$CUR_RUN/phases/$STUB_PHASE/verdict"
+  fi
+fi
+printf '%b\n' "${STUB_VERDICT:-STATUS: DONE | File: CHANGES.md}"
+exit "${STUB_RC:-0}"
 STUB_EOF
 chmod +x "$STUB"
 
@@ -60,13 +71,13 @@ run_phase() {
 
 # --- .gitignore guard -------------------------------------------------------
 
-# a. a fresh git repo gains .tmp/ on the first run
+# a. a fresh git repo gains .agy/ on the first run
 REPO="$(new_repo a-fresh-repo)"
 OUT="$(run_phase "$REPO" "$REPO")"
-check a-fresh-repo "$(count "$REPO/.gitignore" '^\.tmp/$')" "1" \
-  ".gitignore gained one .tmp/ entry"
+check a-fresh-repo "$(count "$REPO/.gitignore" '^\.agy/$')" "1" \
+  ".gitignore gained one .agy/ entry"
 case "$OUT" in
-  "STATUS: DONE | File: .tmp/CHANGES.md | Phase: TEST | Log: "*) ok a-fresh-repo-stdout "stdout is still one STATUS line" ;;
+  "STATUS: DONE | File: CHANGES.md | Phase: TEST | Run: "*) ok a-fresh-repo-stdout "stdout is still one STATUS line" ;;
   *) bad a-fresh-repo-stdout "stdout was: $OUT" ;;
 esac
 check a-fresh-repo-oneline "$(printf '%s\n' "$OUT" | grep -c .)" "1" \
@@ -78,11 +89,13 @@ check a-fresh-repo-oneline "$(printf '%s\n' "$OUT" | grep -c .)" "1" \
 # /var/folders/…, a symlink to /private/var/folders/… — so compare against the
 # resolved path, not the one mktemp handed back.
 REPO_REAL="$(cd "$REPO" && pwd -P)"
-case "$OUT" in *"| Gitignore: created $REPO_REAL/.gitignore holding .tmp/"*)
+case "$OUT" in *"| Gitignore: created $REPO_REAL/.gitignore holding .agy/"*)
     ok a-fresh-repo-reported "the STATUS line names the file it created" ;;
   *) bad a-fresh-repo-reported "no Gitignore field: $OUT" ;; esac
-check a-fresh-repo-status-file "$(sed -n '1p' "$REPO/.tmp/TEST.status")" "$OUT" \
-  ".tmp/TEST.status carries the same line"
+
+RUN_ID_A="$(cat "$REPO/.agy/current" 2>/dev/null)"
+check a-fresh-repo-status-file "$(sed -n '1p' "$REPO/.agy/runs/$RUN_ID_A/phases/TEST/status")" "$OUT" \
+  "R/phases/TEST/status carries the same line"
 
 # a3. reported, not committed: phase.sh writes nothing to the user's history.
 check a-fresh-repo-no-commit "$(git -C "$REPO" rev-list --count --all 2>/dev/null)" "0" \
@@ -92,17 +105,17 @@ check a-fresh-repo-untracked "$(git -C "$REPO" status --porcelain -- .gitignore 
 
 # b. running twice must not duplicate the entry, and must not repeat the report
 run_phase "$REPO" "$REPO" >/dev/null
-check b-run-twice "$(count "$REPO/.gitignore" '^\.tmp/$')" "1" \
-  "still exactly one .tmp/ entry after a second run"
+check b-run-twice "$(count "$REPO/.gitignore" '^\.agy/$')" "1" \
+  "still exactly one .agy/ entry after a second run"
 OUT="$(run_phase "$REPO" "$REPO")"
 case "$OUT" in *Gitignore:*) bad b-run-twice-quiet "the second run reported an edit it did not make" ;;
   *) ok b-run-twice-quiet "only the dispatch that wrote it says so" ;; esac
 
-# c. a repo that already ignores .tmp is left byte-identical. `.tmp/` is
+# c. a repo that already ignores .agy is left byte-identical. `.agy/` is
 # directory-only, so this also pins phase.sh's mkdir-before-check ordering:
-# check-ignore cannot match it until .tmp exists as a directory.
+# check-ignore cannot match it until .agy exists as a directory.
 REPO="$(new_repo c-already-ignored)"
-printf 'node_modules/\n.tmp/\ndist/\n' > "$REPO/.gitignore"
+printf 'node_modules/\n.agy/\ndist/\n' > "$REPO/.gitignore"
 BEFORE="$(cksum < "$REPO/.gitignore")"
 OUT="$(run_phase "$REPO" "$REPO")"
 check c-already-ignored "$(cksum < "$REPO/.gitignore")" "$BEFORE" \
@@ -112,34 +125,34 @@ case "$OUT" in *Gitignore:*) bad c-already-ignored-quiet "reported an edit that 
 
 # c2. same, via a differently-spelled rule that git still honours
 REPO="$(new_repo c2-ignored-other-spelling)"
-printf '/.tmp\n' > "$REPO/.gitignore"
+printf '/.agy\n' > "$REPO/.gitignore"
 BEFORE="$(cksum < "$REPO/.gitignore")"
 run_phase "$REPO" "$REPO" >/dev/null
 check c2-ignored-other-spelling "$(cksum < "$REPO/.gitignore")" "$BEFORE" \
-  "'/.tmp' recognised as already ignoring"
+  "'/.agy' recognised as already ignoring"
 
 # d. a .gitignore with no trailing newline must not have its last line corrupted
 REPO="$(new_repo d-no-trailing-newline)"
 printf 'node_modules/' > "$REPO/.gitignore"
 OUT="$(run_phase "$REPO" "$REPO")"
 check d-no-trailing-newline "$(printf '%s' "$(cat "$REPO/.gitignore")" | tr '\n' '|')" \
-  "node_modules/|.tmp/" "last line intact, .tmp/ on its own line"
+  "node_modules/|.agy/" "last line intact, .agy/ on its own line"
 
 # d2. an edit to a file that was already there is still an edit the task did not
 # ask for, and is reported as one — in the other wording, since nothing was
 # created here.
 REPO_REAL="$(cd "$REPO" && pwd -P)"
-case "$OUT" in *"| Gitignore: added .tmp/ to $REPO_REAL/.gitignore"*)
+case "$OUT" in *"| Gitignore: added .agy/ to $REPO_REAL/.gitignore"*)
     ok d-existing-reported "an edit to an existing .gitignore is reported too" ;;
   *) bad d-existing-reported "no Gitignore field: $OUT" ;; esac
 check d-existing-no-commit "$(git -C "$REPO" rev-list --count --all 2>/dev/null)" "0" \
   "still nothing committed"
 
-# e. a plain directory that is not a git repo: no error, no .gitignore invented
+# e. a plain directory that is not a git repo: exits 4, no .gitignore invented
 REPO="$ROOT/repos/e-not-a-repo"; mkdir -p "$REPO"
 printf 'do the thing\n' > "$REPO/brief.md"
 OUT="$(run_phase "$REPO" "$REPO")"; RC=$?
-check e-not-a-repo "$RC" "0" "phase.sh exited 0 outside a git repo"
+check e-not-a-repo "$RC" "4" "phase.sh exited 4 outside a git repo"
 check e-not-a-repo-clean "$([ -e "$REPO/.gitignore" ] && echo present || echo absent)" "absent" \
   "no .gitignore created"
 
@@ -147,7 +160,7 @@ check e-not-a-repo-clean "$([ -e "$REPO/.gitignore" ] && echo present || echo ab
 REPO="$(new_repo f-subdir)"
 mkdir -p "$REPO/packages/app"
 run_phase "$REPO" "$REPO/packages/app" >/dev/null
-check f-subdir-root "$(count "$REPO/.gitignore" '^\.tmp/$')" "1" \
+check f-subdir-root "$(count "$REPO/.gitignore" '^\.agy/$')" "1" \
   "root .gitignore got the entry"
 check f-subdir-leaf "$([ -e "$REPO/packages/app/.gitignore" ] && echo present || echo absent)" \
   "absent" "subdirectory .gitignore not created"
@@ -171,6 +184,69 @@ STUB_ARGV_FILE="$ROOT/argv-sandbox"
 run_phase "$REPO" "$REPO" --sandbox >/dev/null
 check h-sandbox "$(count "$STUB_ARGV_FILE" '^--sandbox$')" "1" \
   "agy invoked with --sandbox once"
+
+# --- Run ID and isolation assertions ----------------------------------------
+
+# i. STATUS line carries Run: <id> matching the directory artifacts landed in
+REPO="$(new_repo i-run-id)"
+OUT="$(run_phase "$REPO" "$REPO")"
+RUN_ID_I="$(cat "$REPO/.agy/current" 2>/dev/null)"
+case "$OUT" in
+  *"| Run: $RUN_ID_I |"*) ok i-status-has-run-id "STATUS line carries Run: <id>" ;;
+  *) bad i-status-has-run-id "Run id missing from STATUS line: $OUT" ;;
+esac
+[ -d "$REPO/.agy/runs/$RUN_ID_I/phases/TEST" ] && ok i-run-dir-matches "artifacts landed in matching run dir" \
+  || bad i-run-dir-matches "artifacts did not land in matching run dir"
+
+# j. two runs in the same repo do not overwrite each other's artifacts
+REPO="$(new_repo j-multi-run)"
+STUB_VERDICT="STATUS: DONE | File: RUN1.md" run_phase "$REPO" "$REPO" --run new >/dev/null
+RUN1_ID="$(cat "$REPO/.agy/current")"
+RUN1_DIR="$REPO/.agy/runs/$RUN1_ID/phases/TEST"
+RUN1_STATUS="$(cat "$RUN1_DIR/status" 2>/dev/null)"
+RUN1_LOG="$(cat "$RUN1_DIR/log" 2>/dev/null)"
+RUN1_VERDICT="$(cat "$RUN1_DIR/verdict" 2>/dev/null)"
+
+STUB_VERDICT="STATUS: DONE | File: RUN2.md" run_phase "$REPO" "$REPO" --run new >/dev/null
+RUN2_ID="$(cat "$REPO/.agy/current")"
+RUN2_DIR="$REPO/.agy/runs/$RUN2_ID/phases/TEST"
+
+[ "$RUN1_ID" != "$RUN2_ID" ] && ok j-runs-distinct "runs have distinct ids" || bad j-runs-distinct "run ids collided"
+check j-run1-status-preserved "$(cat "$RUN1_DIR/status" 2>/dev/null)" "$RUN1_STATUS" "first run status preserved"
+check j-run1-log-preserved "$(cat "$RUN1_DIR/log" 2>/dev/null)" "$RUN1_LOG" "first run log preserved"
+check j-run1-verdict-preserved "$(cat "$RUN1_DIR/verdict" 2>/dev/null)" "$RUN1_VERDICT" "first run verdict preserved"
+
+# k. --run <id> with an id that does not exist exits 3 and creates nothing
+REPO="$(new_repo k-nonexistent-run)"
+OUT="$(run_phase "$REPO" "$REPO" --run "nonexistent-id-1234")"; CODE=$?
+check k-nonexistent-rc "$CODE" 3 "--run nonexistent-id exits 3"
+[ ! -e "$REPO/.agy/runs/nonexistent-id-1234" ] && ok k-nonexistent-nocreate "no directory created for missing run" \
+  || bad k-nonexistent-nocreate "created missing run directory"
+
+# --- Task recording and immutability ----------------------------------------
+
+# l. a dispatch with --task 'some task' produces a run.json whose task field holds that string verbatim
+REPO="$(new_repo l-task-verbatim)"
+run_phase "$REPO" "$REPO" --task 'some task' >/dev/null
+RUN_ID_L="$(cat "$REPO/.agy/current" 2>/dev/null)"
+TASK_L="$(run_dir_get "$REPO/.agy/runs/$RUN_ID_L" "task" 2>/dev/null || true)"
+check l-task-verbatim "$TASK_L" "some task" "task recorded verbatim in run.json"
+
+# m. a second dispatch into the same run with a different --task leaves the first task recorded, and does not fail
+STUB_VERDICT="STATUS: DONE | File: PHASE2.md" run_phase "$REPO" "$REPO" --run current --task 'different task' >/dev/null; CODE=$?
+check m-second-dispatch-rc "$CODE" 0 "second dispatch into same run does not fail"
+TASK_M="$(run_dir_get "$REPO/.agy/runs/$RUN_ID_L" "task" 2>/dev/null || true)"
+check m-task-preserved "$TASK_M" "some task" "first task preserved when different task passed"
+
+# n. a dispatch with no --task produces a run directory accepted by check-phase-range.sh --from 0
+REPO="$(new_repo n-no-task)"
+run_phase "$REPO" "$REPO" >/dev/null
+RUN_ID_N="$(cat "$REPO/.agy/current" 2>/dev/null)"
+TASK_N="$(run_dir_get "$REPO/.agy/runs/$RUN_ID_N" "task" 2>/dev/null || true)"
+[ -n "$TASK_N" ] && ok n-task-fallback-nonempty "task fallback is non-empty ($TASK_N)" || bad n-task-fallback-nonempty "task fallback was empty"
+CHECK_SH="$HERE/../scripts/check-phase-range.sh"
+CHECK_RC="$("$CHECK_SH" --dir "$REPO" --from 0 >/dev/null 2>&1; printf '%s' "$?")"
+check n-range-from-0-accepted "$CHECK_RC" 0 "check-phase-range.sh --from 0 accepts run directory created without --task"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Run the test command Phase 0 reported, and say whether it actually works.
 #
-#   check-test-command.sh [--dir <repo>] [--command '<cmd>'] [--timeout <n>]
+#   check-test-command.sh [--dir <repo>] [--run <id|current|last>]
+#                         [--command '<cmd>'] [--timeout <n>]
 #
-# Reads:   <repo>/.tmp/TEST_COMMAND   the bare command discovery wrote, one line
-# Writes:  <repo>/.tmp/logs/TEST_COMMAND.log   the command's own output
+# Reads:   <run-dir>/TEST_COMMAND       the bare command discovery wrote, one line
+# Writes:  <run-dir>/TEST_COMMAND.log   the command's own output
 # Prints:  the STATUS line only — stdout belongs to it alone, as everywhere else.
 #
 # Exit codes, one per outcome:
@@ -49,15 +50,20 @@
 # in step 4. Both mistakes are visible: the log is right there, and the STATUS
 # line names what matched.
 #
-# .tmp/ is not added to .gitignore here — phase.sh does that on its first
+# .agy/ is not added to .gitignore here — phase.sh does that on its first
 # dispatch, which is Phase 0, which is always before this runs.
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/run-dir.sh"
+
 DIR="$PWD"; COMMAND=""; COMMAND_GIVEN=""; TIMEOUT="600"
+RUN_TARGET="current"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir)     DIR="$2";     shift 2 ;;
+    --run)     RUN_TARGET="$2"; shift 2 ;;
     --command) COMMAND="$2"; COMMAND_GIVEN=1; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     -h|--help) sed -n '2,53p' "$0"; exit 0 ;;
@@ -80,7 +86,9 @@ case "$LIMIT" in
 esac
 LIMIT=$((LIMIT * MULT))
 
-CMD_FILE="$DIR/.tmp/TEST_COMMAND"
+R="$(run_dir_resolve --dir "$DIR" --run "$RUN_TARGET")" || exit $?
+
+CMD_FILE="$R/TEST_COMMAND"
 
 # Default to what Phase 0 wrote. The file is meant to hold the bare command and
 # nothing else, but discovery is a language model: take the first line with
@@ -106,8 +114,7 @@ if [ -z "$COMMAND" ]; then
   exit 2
 fi
 
-LOG="$DIR/.tmp/logs/TEST_COMMAND.log"
-mkdir -p "$DIR/.tmp/logs"
+LOG="$R/TEST_COMMAND.log"
 
 # Same header shape phase.sh writes for --verify, so the two logs read alike.
 # Exactly two lines: the classifier reads from line 3 on, and must not scan the
@@ -120,7 +127,7 @@ printf -- '--- check-test-command: %s ---\n$ %s\n' "$DIR" "$COMMAND" > "$LOG" 2>
 # here is one. `set -m` gives the job its own process group, which is what makes
 # a pipeline killable as a whole rather than leaving `sleep 30 | cat` orphaned;
 # the watchdog TERMs that group, then KILLs it, and marks that it fired.
-MARKER="$DIR/.tmp/logs/TEST_COMMAND.timeout"
+MARKER="$R/TEST_COMMAND.timeout"
 rm -f "$MARKER"
 START=$(date +%s)
 

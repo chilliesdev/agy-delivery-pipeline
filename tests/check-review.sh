@@ -11,7 +11,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK="$HERE/../scripts/check-review.sh"
+RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$CHECK" ] || { echo "check-review-test: script not found next door" >&2; exit 2; }
+[ -f "$RUN_DIR_SH" ] || { echo "check-review-test: run-dir.sh not found next door" >&2; exit 2; }
+
+. "$RUN_DIR_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/check-review.XXXXXX")" && pwd)"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
@@ -21,23 +25,29 @@ ok()  { PASS=$((PASS + 1)); printf '%-32s ok   %s\n' "$1" "$2"; }
 bad() { FAIL=$((FAIL + 1)); printf '%-32s FAIL %s\n' "$1" "$2"; }
 check() { if [ "$2" = "$3" ]; then ok "$1" "$4"; else bad "$1" "$4 (got '$2', want '$3')"; fi; }
 
-# A repo is not needed — the script reads two files — but the paths are the
-# pipeline's, so build the same shape. <n> is how many changed lines to fake in
-# the patch, which is what the --trivial threshold scales against.
+# A repo with a run directory. <n> is how many changed lines to fake in the
+# patch, which is what the --trivial threshold scales against.
 new_case() {
-  R="$ROOT/cases/$1"; mkdir -p "$R/.tmp"
+  R="$ROOT/cases/$1"; mkdir -p "$R"
+  ( cd "$R" && git init -q . )
+  RUN_ID="$(run_dir_new --dir "$R" --task "review test $1")"
+  RUN_DIR="$R/.agy/runs/$RUN_ID"
   {
     printf '# REVIEW_DIFF.patch — the change under review\n#\n# base: HEAD\n#\n'
     printf 'diff --git a/wordstat/cli.py b/wordstat/cli.py\n'
     printf 'index 1111111..2222222 100644\n--- a/wordstat/cli.py\n+++ b/wordstat/cli.py\n'
     printf '@@ -1,1 +1,%s @@\n' "$2"
     awk -v n="$2" 'BEGIN { for (i = 1; i <= n; i++) print "+    line " i }'
-  } > "$R/.tmp/REVIEW_DIFF.patch"
+  } > "$RUN_DIR/REVIEW_DIFF.patch"
   printf '%s' "$R"
 }
 
-# feedback <repo> — write .tmp/REVIEW_FEEDBACK.md from stdin.
-feedback() { cat > "$1/.tmp/REVIEW_FEEDBACK.md"; }
+# feedback <repo> — write REVIEW_FEEDBACK.md in current run directory from stdin.
+feedback() {
+  local r="$1"
+  local id="$(cat "$r/.agy/current" 2>/dev/null)"
+  cat > "$r/.agy/runs/$id/REVIEW_FEEDBACK.md"
+}
 
 # run <repo> <args...> — STATUS line into $OUT, exit code into $CODE.
 run() { R="$1"; shift; OUT="$(/bin/bash "$CHECK" --dir "$R" "$@" 2>/dev/null)"; CODE=$?; }
@@ -223,7 +233,8 @@ case "$(word_of "$OUT")" in REVIEW_ABSENT) ok absent-status "reported REVIEW_ABS
 
 # 11. A file of blank lines is the same thing as no file.
 R="$(new_case blank 40)"
-printf '\n\n   \n' > "$R/.tmp/REVIEW_FEEDBACK.md"
+RUN_ID_BLANK="$(cat "$R/.agy/current")"
+printf '\n\n   \n' > "$R/.agy/runs/$RUN_ID_BLANK/REVIEW_FEEDBACK.md"
 run "$R"
 check blank-rc "$CODE" 4 "whitespace-only counts as absent"
 
@@ -231,7 +242,9 @@ check blank-rc "$CODE" 4 "whitespace-only counts as absent"
 
 # 12. If capture-diff.sh was never run, say so rather than silently excusing the
 #     review: an unmeasurable diff is not a trivial one.
-R="$ROOT/cases/no-diff"; mkdir -p "$R/.tmp"
+R="$ROOT/cases/no-diff"; mkdir -p "$R"
+( cd "$R" && git init -q . )
+run_dir_new --dir "$R" --task "no diff" >/dev/null
 feedback "$R" <<'EOF'
 PASSED
 No violations found.
@@ -250,12 +263,14 @@ feedback "$R" <<'EOF'
 PASSED
 `wordstat/cli.py` is fine.
 EOF
-BEFORE="$(ls "$R/.tmp" | sort)"
+RUN_ID_STDOUT="$(cat "$R/.agy/current")"
+RUN_DIR_STDOUT="$R/.agy/runs/$RUN_ID_STDOUT"
+BEFORE="$(ls "$RUN_DIR_STDOUT" | sort)"
 run "$R"
 check stdout-lines "$(printf '%s\n' "$OUT" | grep -c .)" 1 "stdout is one line"
 case "$OUT" in STATUS:*) ok stdout-shape "and it starts with STATUS:" ;;
   *) bad stdout-shape "stdout is not a STATUS line: $OUT" ;; esac
-check no-writes "$(ls "$R/.tmp" | sort)" "$BEFORE" "the check writes nothing"
+check no-writes "$(ls "$RUN_DIR_STDOUT" | sort)" "$BEFORE" "the check writes nothing"
 
 # 14. --file and --diff point elsewhere.
 R="$(new_case explicit-paths 40)"

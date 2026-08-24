@@ -2,16 +2,18 @@
 # Run one pipeline phase as an agy delegation.
 #
 #   phase.sh --phase <NAME> --brief <file> [--tier low|medium|high]
-#            [--dir <repo>] [--mode accept-edits|plan|full] [--timeout 30m]
+#            [--dir <repo>] [--run <id|current|new>] [--task <string>]
+#            [--mode accept-edits|plan|full] [--timeout 30m]
 #            [--sandbox] [--no-preflight] [--verify '<command>']
 #            [--retry-cap <n>] [--reset-retries]
 #            [--ignore-via gitignore|exclude]
 #
-# Reads:   .tmp/<PHASE>.verdict      the verdict the worker wrote itself
-#          .tmp/<PHASE>.retries      retries this phase's cycle has spent
-# Writes:  .tmp/logs/<PHASE>.log     full worker transcript (never read whole)
-#          .tmp/logs/<PHASE>.verify.log   --verify output, never stdout
-#          .tmp/<PHASE>.status       one STATUS line for the orchestrator
+# Reads:   R/phases/<PHASE>/verdict      the verdict the worker wrote itself
+#          R/phases/<PHASE>/retries      retries this phase's cycle has spent
+# Writes:  R/phases/<PHASE>/log          full worker transcript (never read whole)
+#          R/phases/<PHASE>/verify.log   --verify output, never stdout
+#          R/phases/<PHASE>/status       one STATUS line for the orchestrator
+#          R/phases/<PHASE>/brief.md     copy of the brief dispatched with
 # Prints:  the STATUS line only — keeps the orchestrator context lean.
 #
 # --verify runs the given check in <repo> after the worker returns and folds the
@@ -20,7 +22,7 @@
 # from WORKER_FAILED, which is the worker itself dying.
 #
 # The retry counter is mechanical: each dispatch beyond the first bumps
-# .tmp/<PHASE>.retries, and past --retry-cap (default 2, matching SKILL.md)
+# R/phases/<PHASE>/retries, and past --retry-cap (default 2, matching SKILL.md)
 # phase.sh refuses to dispatch at all, returning STATUS: RETRY_CAP_REACHED(n=N),
 # exit 6. A clean round clears the counter, as does --reset-retries. A round
 # that ends WORKER_FAILED or PREFLIGHT_FAILED is refunded: neither is a worker
@@ -28,7 +30,7 @@
 #
 # preflight.sh runs first unless --no-preflight or AGY_SKIP_PREFLIGHT=1.
 #
-# If this dispatch had to tell git to ignore .tmp/, the STATUS line carries a
+# If this dispatch had to tell git to ignore .agy/, the STATUS line carries a
 # trailing `| Gitignore: …` field saying so — a file the tooling authored is one
 # wholesale `git add` from the task's own commit. It is never committed here.
 #
@@ -42,10 +44,14 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/run-dir.sh"
+
 PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
 VERIFY=""; RESET_RETRIES=""; IGNORE_VIA="gitignore"
 RETRY_CAP="${AGY_RETRY_CAP:-2}"
+RUN_TARGET=""
+TASK=""
 SANDBOX_ARGS=()   # array, so the flag is never word-split out of an unquoted scalar
 
 while [ $# -gt 0 ]; do
@@ -54,6 +60,8 @@ while [ $# -gt 0 ]; do
     --brief)   BRIEF="$2";   shift 2 ;;
     --tier)    TIER="$2";    shift 2 ;;
     --dir)     DIR="$2";     shift 2 ;;
+    --run)     RUN_TARGET="$2"; shift 2 ;;
+    --task)    TASK="$2";    shift 2 ;;
     --mode)    MODE="$2";    shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --verify)  VERIFY="$2";  shift 2 ;;
@@ -62,7 +70,7 @@ while [ $# -gt 0 ]; do
     --ignore-via) IGNORE_VIA="$2"; shift 2 ;;
     --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
     --no-preflight) SKIP_PREFLIGHT=1; shift ;;
-    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,43p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -82,14 +90,40 @@ case "$TIER" in
 esac
 
 DIR="$(cd "$DIR" && pwd)"
-mkdir -p "$DIR/.tmp/logs"
 
-# .tmp/ is worker scratch and must never reach the user's history — one `git add
+# Resolve the run directory R and RUN_ID.
+if [ -z "$RUN_TARGET" ]; then
+  if R="$(run_dir_resolve --dir "$DIR" --run current 2>/dev/null)"; then
+    RUN_ID="$(run_dir_get "$R" "run" 2>/dev/null || basename "$R")"
+  else
+    RUN_TASK="${TASK:-"$PHASE (no task supplied)"}"
+    RUN_ID="$(run_dir_new --dir "$DIR" --task "$RUN_TASK")" || exit $?
+    R="$DIR/.agy/runs/$RUN_ID"
+  fi
+elif [ "$RUN_TARGET" = "new" ]; then
+  RUN_TASK="${TASK:-"$PHASE (no task supplied)"}"
+  RUN_ID="$(run_dir_new --dir "$DIR" --task "$RUN_TASK")" || exit $?
+  R="$DIR/.agy/runs/$RUN_ID"
+else
+  R="$(run_dir_resolve --dir "$DIR" --run "$RUN_TARGET")" || exit $?
+  RUN_ID="$(run_dir_get "$R" "run" 2>/dev/null || basename "$R")"
+fi
+
+if [ -n "$TASK" ]; then
+  EXISTING_TASK="$(run_dir_get "$R" "task" 2>/dev/null || true)"
+  if [ -n "$EXISTING_TASK" ] && [ "$TASK" != "$EXISTING_TASK" ]; then
+    echo "phase.sh: run $RUN_ID already has task '$EXISTING_TASK' (ignoring passed task '$TASK')" >&2
+  fi
+fi
+
+PHASE_DIR="$(run_dir_phase_dir "$R" "$PHASE")" || exit $?
+
+# .agy/ is worker state and must never reach the user's history — one `git add
 # -A` in a later phase is all it would take. Add the ignore once, where
-# --ignore-via says, and only if git does not already ignore .tmp (which also
+# --ignore-via says, and only if git does not already ignore .agy (which also
 # covers a global or parent-level rule, and either of the two files below that a
-# previous dispatch may have written). Must stay *after* the mkdir above:
-# a directory-only rule like `.tmp/` only matches a path git can see is a
+# previous dispatch may have written). Must stay *after* the run dir creation
+# above: a directory-only rule like `.agy/` only matches a path git can see is a
 # directory, so checking first would re-add an entry that is already there.
 #
 # The edit is not silent, because in the default `gitignore` mode it is the
@@ -107,7 +141,7 @@ GITIGNORE_FIELD=""
 if GITROOT="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null)" \
    && [ "$(git -C "$DIR" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] \
    && [ -n "$GITROOT" ] \
-   && ! git -C "$DIR" check-ignore -q .tmp 2>/dev/null; then
+   && ! git -C "$DIR" check-ignore -q .agy 2>/dev/null; then
   # check-ignore above sees both files, so whichever one a previous dispatch
   # wrote, this is skipped on the next.
   if [ "$IGNORE_VIA" = "exclude" ]; then
@@ -115,12 +149,12 @@ if GITROOT="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null)" \
     case "$GITDIR" in /*) ;; *) GITDIR="$GITROOT/$GITDIR" ;; esac
     IGNORE_TARGET="$GITDIR/info/exclude"
     mkdir -p "$GITDIR/info" 2>/dev/null
-    WROTE_NOTE="Gitignore: added .tmp/ to $IGNORE_TARGET — local to this clone, untracked, nothing to keep out of the commit"
+    WROTE_NOTE="Gitignore: added .agy/ to $IGNORE_TARGET — local to this clone, untracked, nothing to keep out of the commit"
     CREATED_NOTE="$WROTE_NOTE"
   else
     IGNORE_TARGET="$GITROOT/.gitignore"
-    WROTE_NOTE="Gitignore: added .tmp/ to $IGNORE_TARGET — the tooling's edit, not the task's; keep it out of the task's commit"
-    CREATED_NOTE="Gitignore: created $IGNORE_TARGET holding .tmp/ — untracked and not the task's; keep it out of the task's commit"
+    WROTE_NOTE="Gitignore: added .agy/ to $IGNORE_TARGET — the tooling's edit, not the task's; keep it out of the task's commit"
+    CREATED_NOTE="Gitignore: created $IGNORE_TARGET holding .agy/ — untracked and not the task's; keep it out of the task's commit"
   fi
   [ -e "$IGNORE_TARGET" ] && GI_EXISTED=1 || GI_EXISTED=""
   # An existing file that lacks a trailing newline would otherwise absorb the
@@ -128,7 +162,7 @@ if GITROOT="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null)" \
   if [ -s "$IGNORE_TARGET" ] && [ -n "$(tail -c 1 "$IGNORE_TARGET" 2>/dev/null)" ]; then
     printf '\n' >> "$IGNORE_TARGET" 2>/dev/null
   fi
-  if printf '.tmp/\n' >> "$IGNORE_TARGET" 2>/dev/null; then
+  if printf '.agy/\n' >> "$IGNORE_TARGET" 2>/dev/null; then
     if [ -n "$GI_EXISTED" ]; then
       GITIGNORE_NOTE="$WROTE_NOTE"
     else
@@ -137,15 +171,15 @@ if GITROOT="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null)" \
     GITIGNORE_FIELD=" | $GITIGNORE_NOTE"
     echo "phase.sh: $GITIGNORE_NOTE" >&2
   else
-    echo "phase.sh: could not add .tmp/ to $IGNORE_TARGET" >&2
+    echo "phase.sh: could not add .agy/ to $IGNORE_TARGET" >&2
   fi
 fi
 
-LOG="$DIR/.tmp/logs/$PHASE.log"
-VERIFY_LOG="$DIR/.tmp/logs/$PHASE.verify.log"
-STATUS_FILE="$DIR/.tmp/$PHASE.status"
-VERDICT_FILE="$DIR/.tmp/$PHASE.verdict"
-RETRY_FILE="$DIR/.tmp/$PHASE.retries"
+LOG="$PHASE_DIR/log"
+VERIFY_LOG="$PHASE_DIR/verify.log"
+STATUS_FILE="$PHASE_DIR/status"
+VERDICT_FILE="$PHASE_DIR/verdict"
+RETRY_FILE="$PHASE_DIR/retries"
 
 ESC="$(printf '\033')"
 CR="$(printf '\r')"
@@ -158,7 +192,13 @@ strip_ansi() { LC_ALL=C sed -e "s/${ESC}\[[0-9;?]*[a-zA-Z]//g" -e "s/${CR}//g"; 
 # stops at a quote — a verdict naming "src/my file.ts" must survive whole.
 trim_claim() { LC_ALL=C sed -e 's/^[[:space:]*#>_`-]*//' -e 's/[[:space:]*`]*$//'; }
 
-# The retry cap SKILL.md asks for, made mechanical. .tmp/<PHASE>.retries holds
+# Copy the brief into R/phases/<PHASE>/brief.md before dispatch.
+cp -f "$BRIEF" "$PHASE_DIR/brief.md" 2>/dev/null || {
+  echo "phase.sh: could not copy brief to $PHASE_DIR/brief.md" >&2
+  exit 2
+}
+
+# The retry cap SKILL.md asks for, made mechanical. R/phases/<PHASE>/retries holds
 # how many *retries* — dispatches beyond the first — this cycle has spent; the
 # file being absent means the cycle has not dispatched at all yet. Unlike the
 # verdict file below it is deliberately *not* cleared before each dispatch, or
@@ -178,10 +218,10 @@ else
 fi
 
 # At the cap, refuse before anything is spent — no preflight fetch, no worker,
-# no cleared verdict, so .tmp/REVIEW_FEEDBACK.md and the last verdict survive for
+# no cleared verdict, so REVIEW_FEEDBACK.md and the last verdict survive for
 # the orchestrator, which SKILL.md tells to take the work over itself from here.
 if [ "$SPENT" -ge "$RETRY_CAP" ]; then
-  printf '%s\n' "STATUS: RETRY_CAP_REACHED(n=$SPENT, cap=$RETRY_CAP) | Phase: $PHASE | Note: the retry budget for this phase is spent — take the work over yourself, or pass --reset-retries to start a fresh cycle | Log: $LOG$GITIGNORE_FIELD" \
+  printf '%s\n' "STATUS: RETRY_CAP_REACHED(n=$SPENT, cap=$RETRY_CAP) | Phase: $PHASE | Run: $RUN_ID | Note: the retry budget for this phase is spent — take the work over yourself, or pass --reset-retries to start a fresh cycle | Log: $LOG$GITIGNORE_FIELD" \
     | tee "$STATUS_FILE"
   exit 6
 fi
@@ -198,7 +238,7 @@ rm -f "$VERDICT_FILE"
 # model id can be withdrawn mid-pipeline, so Phase 0 alone is not enough.
 # AGY_SKIP_PREFLIGHT=1 or --no-preflight drops it for a tight retry loop.
 if [ -z "$SKIP_PREFLIGHT" ]; then
-  PREFLIGHT_LOG="$DIR/.tmp/logs/$PHASE.preflight.log"
+  PREFLIGHT_LOG="$PHASE_DIR/preflight.log"
   "$HERE/preflight.sh" --model "$MODEL" --quiet >/dev/null 2>"$PREFLIGHT_LOG"
   PRC=$?
   if [ "$PRC" -ne 0 ]; then
@@ -209,7 +249,7 @@ if [ -z "$SKIP_PREFLIGHT" ]; then
       7)   REASON="timeout" ;;
       *)   REASON="rc=$PRC" ;;
     esac
-    printf '%s\n' "STATUS: PREFLIGHT_FAILED($REASON) | Phase: $PHASE | Log: $PREFLIGHT_LOG$GITIGNORE_FIELD" \
+    printf '%s\n' "STATUS: PREFLIGHT_FAILED($REASON) | Phase: $PHASE | Run: $RUN_ID | Log: $PREFLIGHT_LOG$GITIGNORE_FIELD" \
       | tee "$STATUS_FILE"
     exit "$PRC"
   fi
@@ -225,7 +265,7 @@ printf '%s\n' "$NEXT" > "$RETRY_FILE" 2>/dev/null
   ${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"} >/dev/null 2>&1
 RC=$?
 
-# Primary: the verdict the worker wrote to .tmp/<PHASE>.verdict — first non-empty
+# Primary: the verdict the worker wrote to R/phases/<PHASE>/verdict — first non-empty
 # line, no transcript involved. Fallback: the last transcript line that *starts*
 # with STATUS:, so prose like "I will end with STATUS: PASSED" cannot match.
 CLAIM=""
@@ -259,13 +299,13 @@ fi
 # Trust the claim only as a claim — the orchestrator still verifies the artifacts
 # on disk. rc=0 with no claim at all is not a failure and not a pass; say so.
 if [ "$RC" -ne 0 ]; then
-  LINE="STATUS: WORKER_FAILED(rc=$RC) | Phase: $PHASE | Log: $LOG"
+  LINE="STATUS: WORKER_FAILED(rc=$RC) | Phase: $PHASE | Run: $RUN_ID | Log: $LOG"
 elif [ -n "$VERIFY" ] && [ "$VRC" -ne 0 ]; then
-  LINE="STATUS: VERIFY_FAILED(rc=$VRC) | Phase: $PHASE | Claimed: ${CLAIM:-none} | Log: $LOG | VerifyLog: $VERIFY_LOG"
+  LINE="STATUS: VERIFY_FAILED(rc=$VRC) | Phase: $PHASE | Run: $RUN_ID | Claimed: ${CLAIM:-none} | Log: $LOG | VerifyLog: $VERIFY_LOG"
 elif [ -n "$CLAIM" ]; then
-  LINE="$CLAIM | Phase: $PHASE | Log: $LOG"
+  LINE="$CLAIM | Phase: $PHASE | Run: $RUN_ID | Log: $LOG"
 else
-  LINE="STATUS: NO_STATUS_REPORTED | Phase: $PHASE | Note: worker exited 0 without a verdict — the phase may have succeeded anyway; verify the artifact on disk before advancing or retrying | Log: $LOG"
+  LINE="STATUS: NO_STATUS_REPORTED | Phase: $PHASE | Run: $RUN_ID | Note: worker exited 0 without a verdict — the phase may have succeeded anyway; verify the artifact on disk before advancing or retrying | Log: $LOG"
 fi
 # Appended, never spliced: every existing caller matches on the head of this
 # line, so a passing check adds to it and shifts nothing.
@@ -273,6 +313,11 @@ if [ -n "$VERIFY" ] && [ "$VRC" -eq 0 ] && [ "$RC" -eq 0 ]; then
   LINE="$LINE | Verify: ok | VerifyLog: $VERIFY_LOG"
 fi
 LINE="$LINE$GITIGNORE_FIELD"
+
+# Record the phase outcome in run.json
+FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | awk '{print $1}')"
+FINAL_VERDICT="$(printf '%s' "${CLAIM#STATUS: }" | awk '{print $1}')"
+run_dir_record_phase "$R" "$PHASE" "status=$FINAL_STATUS" "verdict=${FINAL_VERDICT:-$FINAL_STATUS}" "attempts=$((SPENT + 1))"
 
 # A round that ends clean ends the cycle, so the next one starts from zero
 # without anybody having to remember --reset-retries. Clean means the worker

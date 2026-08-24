@@ -21,7 +21,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK="$HERE/../scripts/check-release.sh"
+RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$CHECK" ] || { echo "check-release-test: script not found next door" >&2; exit 2; }
+[ -f "$RUN_DIR_SH" ] || { echo "check-release-test: run-dir.sh not found next door" >&2; exit 2; }
+
+. "$RUN_DIR_SH"
 
 # Normalised through `cd`, because $TMPDIR carries a trailing slash on macOS and
 # the script prints paths that have been through the same normalisation.
@@ -40,16 +44,17 @@ hasnt() { case "$2" in *"$3"*) bad "$1" "$4 (line: $2)" ;; *) ok "$1" "$4" ;; es
 # touched.
 commit() { git -C "$1" -c user.email=t@t -c user.name=t commit -q "$2" "$3"; }
 
-# new_repo <name> — a throwaway repo with .tmp/ ignored (as phase.sh arranges in
-# the real pipeline) and one commit; echoes its path. No remote, no tags: each
-# case adds what it is about.
+# new_repo <name> — a throwaway repo with .agy/ ignored (as phase.sh arranges in
+# the real pipeline), initialized run, and one commit; echoes its path. No remote,
+# no tags: each case adds what it is about.
 new_repo() {
   R="$ROOT/repos/$1"; mkdir -p "$R"
   ( cd "$R" && git init -q -b main . )
-  printf '.tmp/\n' > "$R/.gitignore"
+  printf '.agy/\n' > "$R/.gitignore"
   printf 'first\n' > "$R/kept.txt"
   ( cd "$R" && git add -A ) >/dev/null 2>&1
   commit "$R" -m init
+  run_dir_new --dir "$R" --task "release test $1" >/dev/null
   printf '%s' "$R"
 }
 
@@ -58,10 +63,16 @@ new_repo() {
 # on disk beside the test is both sufficient and incapable of touching a network.
 add_remote() { git -C "$1" remote add origin "$ROOT/remotes/${2:-bare}.git" >/dev/null 2>&1; }
 
+pdir() {
+  local repo="$1"
+  local id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
+  [ -n "$id" ] && printf '%s/.agy/runs/%s' "$repo" "$id"
+}
+
 # run <repo> <args...> — STATUS line into $OUT, exit code into $CODE.
 run() { R="$1"; shift; OUT="$(/bin/bash "$CHECK" --dir "$R" "$@" 2>/dev/null)"; CODE=$?; }
 word_of()  { printf '%s' "$1" | sed -n '1p' | awk '{print $2}'; }
-facts_of() { printf '%s' "$R/.tmp/RELEASE_FACTS.md"; }
+facts_of() { printf '%s/RELEASE_FACTS.md' "$(pdir "$R")"; }
 
 # Everything a release could damage, in one string.
 snapshot() {
@@ -184,12 +195,13 @@ has dirty-override "$OUT" "allowed through by --allow-dirty" "and the line says 
 R="$(new_repo self-dirty)"
 rm -f "$R/.gitignore"; ( cd "$R" && git add -A ) >/dev/null 2>&1; commit "$R" -m drop-ignore
 run "$R"
-check selfdirty-first "$CODE" 0 "exit 0 on the first run, .tmp/ not ignored"
+check selfdirty-first "$CODE" 0 "exit 0 on the first run, .agy/ not ignored"
 run "$R"
 check selfdirty-second "$CODE" 0 "exit 0 on the second — a run never reports its own output as blocking work"
 
 # 10. No commits: there is nothing to cut a release from.
 R="$ROOT/repos/empty"; mkdir -p "$R"; ( cd "$R" && git init -q -b main . )
+run_dir_new --dir "$R" --task "empty" >/dev/null
 run "$R"
 check nocommits-rc "$CODE" 3 "exit 3 in a repository with no commits"
 check nocommits-status "$(word_of "$OUT")" "RELEASE_BLOCKED(no_commits)" "reported RELEASE_BLOCKED(no_commits)"
@@ -233,7 +245,8 @@ F="$(printf '%s' "$OUT" | sed -e 's/.*| Facts: //' -e 's/ | .*//')"
 RP="$(cd "$R" && pwd -P)"
 [ -f "$F" ] && ok facts-exists "the status line's Facts path really has a file at it" \
             || bad facts-exists "no facts file at $F"
-check facts-path "$F" "$RP/.tmp/RELEASE_FACTS.md" "under the repo's own .tmp/"
+RUN_ID_FACTS="$(cat "$R/.agy/current")"
+check facts-path "$F" "$RP/.agy/runs/$RUN_ID_FACTS/RELEASE_FACTS.md" "under the repo's run directory"
 case "$F" in "$RP"/*) ok facts-inside "the path is inside the repo, so inside --add-dir" ;;
   *) bad facts-inside "the worker could not read $F" ;; esac
 for KEY in "status:" "current branch:" "release branch:" "remote:" "working tree:" \
