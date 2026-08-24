@@ -5,6 +5,7 @@
 #            [--dir <repo>] [--mode accept-edits|plan|full] [--timeout 30m]
 #            [--sandbox] [--no-preflight] [--verify '<command>']
 #            [--retry-cap <n>] [--reset-retries]
+#            [--ignore-via gitignore|exclude]
 #
 # Reads:   .tmp/<PHASE>.verdict      the verdict the worker wrote itself
 #          .tmp/<PHASE>.retries      retries this phase's cycle has spent
@@ -27,16 +28,23 @@
 #
 # preflight.sh runs first unless --no-preflight or AGY_SKIP_PREFLIGHT=1.
 #
-# If this dispatch had to put .tmp/ in the work tree's .gitignore, the STATUS
-# line carries a trailing `| Gitignore: …` field saying so — a file the tooling
-# authored is one wholesale `git add` from the task's own commit. It is never
-# committed here.
+# If this dispatch had to tell git to ignore .tmp/, the STATUS line carries a
+# trailing `| Gitignore: …` field saying so — a file the tooling authored is one
+# wholesale `git add` from the task's own commit. It is never committed here.
+#
+# --ignore-via chooses where that rule goes. `gitignore` (the default, and what
+# every pipeline phase uses) appends to the work tree's tracked .gitignore and
+# reports it. `exclude` writes .git/info/exclude instead: same effect on git,
+# but the entry is local and untracked, so nothing enters the diff and there is
+# nothing to keep out of a commit. The delegate path uses `exclude`, because
+# ambient delegation would otherwise edit a tracked file in every repo it ever
+# touches, unasked, for a one-line change.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
-VERIFY=""; RESET_RETRIES=""
+VERIFY=""; RESET_RETRIES=""; IGNORE_VIA="gitignore"
 RETRY_CAP="${AGY_RETRY_CAP:-2}"
 SANDBOX_ARGS=()   # array, so the flag is never word-split out of an unquoted scalar
 
@@ -51,9 +59,10 @@ while [ $# -gt 0 ]; do
     --verify)  VERIFY="$2";  shift 2 ;;
     --retry-cap) RETRY_CAP="$2"; shift 2 ;;
     --reset-retries) RESET_RETRIES=1; shift ;;
+    --ignore-via) IGNORE_VIA="$2"; shift 2 ;;
     --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
     --no-preflight) SKIP_PREFLIGHT=1; shift ;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -61,6 +70,10 @@ done
 [ -f "$BRIEF" ] || { echo "phase.sh: brief not found: $BRIEF" >&2; exit 2; }
 case "$RETRY_CAP" in
   ''|*[!0-9]*) echo "phase.sh: --retry-cap wants a whole number, got '$RETRY_CAP'" >&2; exit 2 ;;
+esac
+case "$IGNORE_VIA" in
+  gitignore|exclude) ;;
+  *) echo "phase.sh: --ignore-via wants gitignore or exclude, got '$IGNORE_VIA'" >&2; exit 2 ;;
 esac
 
 case "$TIER" in
@@ -72,14 +85,16 @@ DIR="$(cd "$DIR" && pwd)"
 mkdir -p "$DIR/.tmp/logs"
 
 # .tmp/ is worker scratch and must never reach the user's history — one `git add
-# -A` in a later phase is all it would take. Add the ignore once, in the work
-# tree root's .gitignore, and only if git does not already ignore .tmp (which
-# also covers a global or parent-level rule). Must stay *after* the mkdir above:
+# -A` in a later phase is all it would take. Add the ignore once, where
+# --ignore-via says, and only if git does not already ignore .tmp (which also
+# covers a global or parent-level rule, and either of the two files below that a
+# previous dispatch may have written). Must stay *after* the mkdir above:
 # a directory-only rule like `.tmp/` only matches a path git can see is a
 # directory, so checking first would re-add an entry that is already there.
 #
-# The edit is not silent, because it is the tooling authoring a file in someone
-# else's repo: a .gitignore this created is itself untracked, and the wholesale
+# The edit is not silent, because in the default `gitignore` mode it is the
+# tooling authoring a *tracked* file in someone else's repo: a .gitignore this
+# created is itself untracked, and the wholesale
 # `git add -A` a release phase reaches for would sweep it into the task's commit
 # — which is how it turned up in a delivered diffstat as a change nobody asked
 # for. It is reported rather than committed: committing writes to the user's
@@ -93,23 +108,36 @@ if GITROOT="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null)" \
    && [ "$(git -C "$DIR" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] \
    && [ -n "$GITROOT" ] \
    && ! git -C "$DIR" check-ignore -q .tmp 2>/dev/null; then
-  GITIGNORE="$GITROOT/.gitignore"
-  [ -e "$GITIGNORE" ] && GI_EXISTED=1 || GI_EXISTED=""
+  # check-ignore above sees both files, so whichever one a previous dispatch
+  # wrote, this is skipped on the next.
+  if [ "$IGNORE_VIA" = "exclude" ]; then
+    GITDIR="$(git -C "$DIR" rev-parse --git-dir 2>/dev/null)"
+    case "$GITDIR" in /*) ;; *) GITDIR="$GITROOT/$GITDIR" ;; esac
+    IGNORE_TARGET="$GITDIR/info/exclude"
+    mkdir -p "$GITDIR/info" 2>/dev/null
+    WROTE_NOTE="Gitignore: added .tmp/ to $IGNORE_TARGET — local to this clone, untracked, nothing to keep out of the commit"
+    CREATED_NOTE="$WROTE_NOTE"
+  else
+    IGNORE_TARGET="$GITROOT/.gitignore"
+    WROTE_NOTE="Gitignore: added .tmp/ to $IGNORE_TARGET — the tooling's edit, not the task's; keep it out of the task's commit"
+    CREATED_NOTE="Gitignore: created $IGNORE_TARGET holding .tmp/ — untracked and not the task's; keep it out of the task's commit"
+  fi
+  [ -e "$IGNORE_TARGET" ] && GI_EXISTED=1 || GI_EXISTED=""
   # An existing file that lacks a trailing newline would otherwise absorb the
   # new entry into its last line.
-  if [ -s "$GITIGNORE" ] && [ -n "$(tail -c 1 "$GITIGNORE" 2>/dev/null)" ]; then
-    printf '\n' >> "$GITIGNORE" 2>/dev/null
+  if [ -s "$IGNORE_TARGET" ] && [ -n "$(tail -c 1 "$IGNORE_TARGET" 2>/dev/null)" ]; then
+    printf '\n' >> "$IGNORE_TARGET" 2>/dev/null
   fi
-  if printf '.tmp/\n' >> "$GITIGNORE" 2>/dev/null; then
+  if printf '.tmp/\n' >> "$IGNORE_TARGET" 2>/dev/null; then
     if [ -n "$GI_EXISTED" ]; then
-      GITIGNORE_NOTE="Gitignore: added .tmp/ to $GITIGNORE — the tooling's edit, not the task's; keep it out of the task's commit"
+      GITIGNORE_NOTE="$WROTE_NOTE"
     else
-      GITIGNORE_NOTE="Gitignore: created $GITIGNORE holding .tmp/ — untracked and not the task's; keep it out of the task's commit"
+      GITIGNORE_NOTE="$CREATED_NOTE"
     fi
     GITIGNORE_FIELD=" | $GITIGNORE_NOTE"
     echo "phase.sh: $GITIGNORE_NOTE" >&2
   else
-    echo "phase.sh: could not add .tmp/ to $GITIGNORE" >&2
+    echo "phase.sh: could not add .tmp/ to $IGNORE_TARGET" >&2
   fi
 fi
 

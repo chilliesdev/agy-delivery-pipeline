@@ -1,9 +1,15 @@
 ---
-name: multi-agent-delivery-pipeline
-description: Lean single-task delivery pipeline where Claude Code orchestrates and the Antigravity CLI (agy) executes every phase as a headless worker — discovery, implementation, code-review retry loop, QA, docs and git release. Use when the user wants one task driven end to end through review and release, or wants pipeline phases delegated to antigravity/agy instead of sub-agents.
+name: agy-pipeline
+description: The five-phase agy delivery pipeline — discovery, implementation, code-review retry loop, QA, docs and release preparation — with Claude Code orchestrating and the Antigravity CLI (agy) executing each phase as a headless worker. Invoked explicitly by the /agy:pipeline command; it does not trigger on its own. For a single bounded change, agy-delegate is the lighter path.
 ---
 
-# Multi-Stage Delivery Pipeline (agy workers)
+# The agy delivery pipeline
+
+> [!NOTE]
+> **This skill is invoked by `/agy:pipeline`, not by description match.** The
+> ambient path — one bounded change, one worker, no phases — is
+> [agy-delegate](../agy-delegate/SKILL.md). Both run through the same
+> `phase.sh`; this one wraps it in five gated phases.
 
 Claude Code is the **orchestrator**. Every phase is executed by the **Antigravity
 CLI (`agy`)** running headlessly — there are no sub-agents. The orchestrator
@@ -57,11 +63,12 @@ something else.
 ## Dispatch
 
 ```
-scripts/phase.sh --phase IMPLEMENT --brief .tmp/briefs/implement.md --tier medium
+${CLAUDE_PLUGIN_ROOT}/scripts/phase.sh --phase IMPLEMENT --brief .tmp/briefs/implement.md --tier medium \
+  --no-preflight
 ```
 
 Prints one status line, logs to `.tmp/logs/<PHASE>.log`. Underneath sits
-[agy-run.sh](scripts/agy-run.sh), which handles the agy flags.
+[agy-run.sh](../../scripts/agy-run.sh), which handles the agy flags.
 
 **The verdict contract.** Every brief must end by telling the worker to do two
 things with the same one-line verdict:
@@ -90,12 +97,12 @@ counter refuses a dispatch once a phase has spent its budget. Both report throug
 the same single STATUS line, because that line is all the orchestrator sees.
 Phase 2 covers them in full.
 
-`phase.sh` is covered by [tests/phase-status.sh](tests/phase-status.sh),
-[tests/phase-dispatch.sh](tests/phase-dispatch.sh) and
-[tests/phase-verify.sh](tests/phase-verify.sh) — run all three after touching it.
+`phase.sh` is covered by [tests/phase-status.sh](../../tests/phase-status.sh),
+[tests/phase-dispatch.sh](../../tests/phase-dispatch.sh) and
+[tests/phase-verify.sh](../../tests/phase-verify.sh) — run all three after touching it.
 The two Phase 2 helpers have their own suites,
-[tests/capture-diff.sh](tests/capture-diff.sh) and
-[tests/check-review.sh](tests/check-review.sh).
+[tests/capture-diff.sh](../../tests/capture-diff.sh) and
+[tests/check-review.sh](../../tests/check-review.sh).
 
 ## Preflight
 
@@ -103,7 +110,7 @@ Run the preflight once before Phase 0, so a broken setup costs seconds instead o
 surfacing deep inside a phase after the brief is written:
 
 ```
-scripts/preflight.sh --tier low
+${CLAUDE_PLUGIN_ROOT}/scripts/preflight.sh --tier low
 ```
 
 It checks three things, each with its own exit code: that `agy` is on `PATH`
@@ -124,13 +131,24 @@ process group of its own, `TERM` then `KILL`, nothing orphaned behind it. Move
 it with `--timeout <n>` (seconds, or `30s` / `5m`) or `AGY_PREFLIGHT_TIMEOUT`;
 `--timeout 0` removes it.
 
-`phase.sh` also runs it before each dispatch and reports a refusal as
+`phase.sh` can run it too, and reports a refusal as
 `STATUS: PREFLIGHT_FAILED(<reason>)` — `agy_not_found`, `not_signed_in`,
 `model_unavailable:<id>` or `timeout` — because the orchestrator never reads
-stderr. It is on by default: a sign-in can lapse and a model can be withdrawn
-mid-pipeline, so checking once at Phase 0 is not enough. Pass `--no-preflight`,
-or set `AGY_SKIP_PREFLIGHT=1`, to drop it from a tight retry loop. No retry is
-charged for a `timeout` refusal.
+stderr. No retry is charged for a `timeout` refusal.
+
+**Run it once per session, not once per dispatch.** The explicit call above, at
+the top of the run, is the one that counts: it fails before a brief is written,
+which is the whole point of checking early. Every `phase.sh` dispatch after it
+therefore passes `--no-preflight`, or the pipeline pays a bounded 30-second
+network call in front of all five phases for a setup that has not changed since
+the last one.
+
+That is a trade, not a free win. `phase.sh` defaults to checking every time for a
+real reason — a sign-in can lapse and a model can be withdrawn mid-pipeline. What
+happens then is that the phase itself fails, and `/agy:preflight` is how you find
+out why. That is a worse error message once in a while, in exchange for not
+stalling every dispatch; if a run starts failing in the middle, run
+`/agy:preflight` before assuming the phase is at fault.
 
 **Two agy behaviours anything reading its output has to work around**, both found
 the hard way:
@@ -150,7 +168,7 @@ was invisible from the terminal and total in the pipeline. If every dispatch eve
 times out on the same number again, suspect something holding a handle open, not
 the network.
 
-Both are covered by [tests/preflight.sh](tests/preflight.sh) — the stdin case
+Both are covered by [tests/preflight.sh](../../tests/preflight.sh) — the stdin case
 with a stub that drains stdin and a pipe that never closes, which fails if the
 redirect is ever dropped.
 
@@ -187,9 +205,9 @@ is not enough; the file has to be put where the worker is allowed to open it.
 That is what the script does:
 
 ```
-scripts/resolve-criteria.sh code-review --dir <repo>
-scripts/resolve-criteria.sh qa --dir <repo>
-scripts/resolve-criteria.sh release --dir <repo>
+${CLAUDE_PLUGIN_ROOT}/scripts/resolve-criteria.sh code-review --dir <repo>
+${CLAUDE_PLUGIN_ROOT}/scripts/resolve-criteria.sh qa --dir <repo>
+${CLAUDE_PLUGIN_ROOT}/scripts/resolve-criteria.sh release --dir <repo>
 ```
 
 It picks a source, copies it to `<repo>/.tmp/criteria/<name>.md`, and prints
@@ -199,7 +217,7 @@ first hit wins:
 | # | source | for |
 |---|---|---|
 | 1 | `<repo>/.claude/criteria/<name>.md` | a project that wants its own bar |
-| 2 | `criteria/<name>.md` in this skill | vendored default — always present |
+| 2 | `criteria/<name>.md` in this plugin | vendored default — always present |
 
 Paste the printed path into the brief. Because the vendored default ships here,
 there is always a file to install, and because it is installed rather than merely
@@ -216,7 +234,7 @@ way: `--mode full` turns the permission check off entirely, which is the only
 reason QA ever worked while Phase 2 was failing.
 
 `release` is the third name, and it is a procedure rather than a bar — the flow
-the release worker follows, vendored at [criteria/release.md](criteria/release.md)
+the release worker follows, vendored at [criteria/release.md](../../criteria/release.md)
 so that a project which has never thought about releases still gets a sane,
 conservative one. It rides the same mechanism because the machinery a phase
 needs is identical, and a second resolution path would be a second thing to get
@@ -232,7 +250,7 @@ read, and `resolve-criteria.sh` says so on stderr and names
 **The same constraint applies to every input a phase needs**, not just criteria
 files. Phase 2 has to read the diff, and a worker forbidden shell commands cannot
 produce one — so the diff is written into `<repo>/.tmp/` too, by
-[capture-diff.sh](scripts/capture-diff.sh), before the phase is dispatched. The
+[capture-diff.sh](../../scripts/capture-diff.sh), before the phase is dispatched. The
 rule generalises: *if a brief names a thing to read, something must first have
 put that thing inside `--add-dir`.* A brief that names a file which is not there
 does not fail loudly; it makes agy improvise silently, which is how Phase 2 spent
@@ -276,6 +294,30 @@ flowchart TD
     P -- Yes, by hand --> K[Done]
     P -- No --> M
 ```
+
+### Starting mid-pipeline
+
+`/agy:pipeline --from N [--to N]` runs part of the range. Phases are numbered 0
+through 4, and each reads what the ones before it wrote, so a partial run must
+prove those artifacts are already on disk:
+
+```
+${CLAUDE_PLUGIN_ROOT}/scripts/check-phase-range.sh --from <N> --to <N> --dir <repo>
+```
+
+Exit 0 and the range is safe to run. **Exit 1 and it is refused** — the output
+names each missing file and the phase that writes it. Report that and stop.
+
+Do not back-fill the missing phases. A `--from 3` that quietly runs all five is
+not a range, and the user asked for one. Point at `--from 0` instead.
+
+The refusal exists because the failure it prevents is invisible. A phase
+dispatched without its inputs does not error: the worker improvises a plausible
+brief out of nothing, produces confident output, and the file-based state
+contract that makes each phase's input auditable has quietly stopped holding.
+Nobody notices until someone reads the diff.
+
+Covered by [tests/check-phase-range.sh](../../tests/check-phase-range.sh).
 
 ### Phase 0 — Discovery (tier `low`)
 
@@ -334,7 +376,7 @@ anything, it just fails in a way that looks like the new work's fault. So this i
 not a thing to remember between phases — it is a step, and it has a script:
 
 ```
-scripts/check-test-command.sh --dir <repo>
+${CLAUDE_PLUGIN_ROOT}/scripts/check-test-command.sh --dir <repo>
 ```
 
 It reads `.tmp/TEST_COMMAND`, runs it in the repo through a shell, keeps the
@@ -361,7 +403,7 @@ already failing, in the Phase 1 brief and in your own notes, so that a
 `VERIFY_FAILED` two phases later is weighed against a known-red baseline instead
 of being misattributed to the implementation.
 
-Covered by [tests/check-test-command.sh](tests/check-test-command.sh).
+Covered by [tests/check-test-command.sh](../../tests/check-test-command.sh).
 
 ### Phase 1 — Implementation (tier `medium`)
 
@@ -399,7 +441,7 @@ state structurally cannot see a test that was weakened, a line that was deleted,
 or a default that changed. So write the diff out first:
 
 ```
-scripts/capture-diff.sh --dir <repo>
+${CLAUDE_PLUGIN_ROOT}/scripts/capture-diff.sh --dir <repo>
 ```
 
 It writes `.tmp/REVIEW_DIFF.patch` — the change itself — and
@@ -424,7 +466,7 @@ does not guess a fallback: on a genuinely clean tree it would hand the reviewer
 whatever the last unrelated commit happened to be, and a review of the wrong
 change reads exactly like a review of the right one.
 
-*The criteria.* `scripts/resolve-criteria.sh code-review --dir <repo>` — put the
+*The criteria.* `${CLAUDE_PLUGIN_ROOT}/scripts/resolve-criteria.sh code-review --dir <repo>` — put the
 path it prints into the brief verbatim. It is a path inside the repo, which is
 the only kind this phase can read.
 
@@ -446,8 +488,8 @@ print that same line as the last line of your output. Do not write
 returns, folding the result into the same STATUS line:
 
 ```
-scripts/phase.sh --phase REVIEW --brief .tmp/briefs/review.md --tier high \
-  --verify 'npm test'
+${CLAUDE_PLUGIN_ROOT}/scripts/phase.sh --phase REVIEW --brief .tmp/briefs/review.md --tier high \
+  --no-preflight --verify 'npm test'
 ```
 
 The check outranks the claim, which is the rule *a `PASSED` claim with failing
@@ -464,7 +506,7 @@ reading the file reveals it says nothing, and the retry loop, the `--verify`
 override and the retry cap all assume a review that finds things. So:
 
 ```
-scripts/check-review.sh --dir <repo>
+${CLAUDE_PLUGIN_ROOT}/scripts/check-review.sh --dir <repo>
 ```
 
 It counts **anchors** — `file.ext:123` references, and paths the diff actually
@@ -529,7 +571,7 @@ Fix the configuration and dispatch again — the budget is where it was.
 ### Phase 3 — QA (tier `medium`, `--mode full --sandbox`)
 
 Install the criteria into the repo first —
-`scripts/resolve-criteria.sh qa --dir <repo>` — and put the path it prints into
+`${CLAUDE_PLUGIN_ROOT}/scripts/resolve-criteria.sh qa --dir <repo>` — and put the path it prints into
 the brief verbatim.
 
 Brief: *"Read and follow `<resolved criteria path>`. Simulate the user flows for
@@ -575,7 +617,7 @@ shell commands, so it cannot look at git at all; the same rule that puts the
 Phase 2 diff on disk applies here. Run:
 
 ```
-scripts/check-release.sh --dir <repo>
+${CLAUDE_PLUGIN_ROOT}/scripts/check-release.sh --dir <repo>
 ```
 
 It reads the repository — remote, branch, tree, tags, tag format, changelog —
@@ -612,12 +654,12 @@ Version proposal: the highest `M.N.P` tag, incremented by `--bump`
 (default `minor`), keeping the existing prefix exactly — `v1.2.3` begets
 `v1.3.0`, `1.2.3` begets `1.3.0`. The alternatives ride along on the line,
 because bump size is a judgement about what the change means and the script
-cannot make it. Covered by [tests/check-release.sh](tests/check-release.sh),
+cannot make it. Covered by [tests/check-release.sh](../../tests/check-release.sh),
 which asserts among other things that `HEAD`, `git tag -l` and
 `git for-each-ref` are byte-identical before and after a run.
 
 **Step 2 — prepare, tier `high`.** Install the flow into the repo first —
-`scripts/resolve-criteria.sh release --dir <repo>` — and put the path it prints
+`${CLAUDE_PLUGIN_ROOT}/scripts/resolve-criteria.sh release --dir <repo>` — and put the path it prints
 into the brief verbatim.
 
 Brief: *"Read and follow `<resolved criteria path>`. The repository's git state
@@ -654,7 +696,7 @@ proposed. Say so at the top of what you hand the user.
 A single delegation with no pipeline is Phase 1 on its own:
 
 ```
-scripts/agy-run.sh --brief .tmp/briefs/task.md --dir . --model gemini-3.7-flash-medium
+${CLAUDE_PLUGIN_ROOT}/scripts/agy-run.sh --brief .tmp/briefs/task.md --dir . --model gemini-3.7-flash-medium
 ```
 
 Verify the diff yourself before accepting it.

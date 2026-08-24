@@ -1,0 +1,16 @@
+{
+  "name": "agy-delivery-pipeline",
+  "owner": {
+    "name": "Matthew Kayode",
+    "url": "https://github.com/chilliesdev"
+  },
+  "plugins": [
+    {
+      "name": "agy",
+      "source": "./",
+      "description": "Claude Code orchestrates, the Antigravity CLI executes. Ambient delegation for bounded changes, and a five-phase pipeline for a task driven through review, QA and release preparation.",
+      "version": "0.1.0",
+      "category": "development"
+    }
+  ]
+}
