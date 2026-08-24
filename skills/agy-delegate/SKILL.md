@@ -77,8 +77,20 @@ no-op, not to a wall.
 
 ## The brief
 
-Write it to `.tmp/briefs/delegate.md`. The worker sees only this file, so
-everything it needs is in it and nothing else is.
+A brief must name the verdict path by absolute path inside `--add-dir`, and that
+path contains the run id. So **the run must be minted before the brief is
+written**:
+
+```
+RUN_ID=$(${CLAUDE_PLUGIN_ROOT}/scripts/run-dir.sh new --task "<the task>")
+```
+
+Minting the run up front gives the run an identity before any work happens under
+it, and records the task in `run.json` — an unrecorded task is a run that cannot
+answer which work it belonged to.
+
+Write the brief to `.agy/runs/$RUN_ID/phases/DELEGATE/brief.md`. The worker sees
+only this file, so everything it needs is in it and nothing else is.
 
 State: **the task**, in enough detail to act on; **the files** it should touch,
 by path, and any it must not; **the constraints** — existing patterns to follow,
@@ -90,16 +102,17 @@ Three rules the brief must carry, each earned by a failure:
    the whole headless run — a worker that tries `npm test` dies with rc=1 *after*
    doing its work correctly. The orchestrator runs the checks.
 2. **Do not touch git.** No staging, no commits, no branches.
-3. **Write nothing outside the repo**, and nothing in `.tmp/` except the two
-   verdict outputs below.
+3. **Write nothing outside the repo**, and nothing in `.agy/` except the verdict
+   file named below.
 
 Then the verdict contract, verbatim in shape:
 
-> When you are done, write one line — nothing else — to `.tmp/DELEGATE.verdict`,
-> and print that same line as the last line of your output, in the form
-> `STATUS: <verdict> | File: <path>`. Use `STATUS: DONE` if you completed the
-> task, `STATUS: BLOCKED` with the reason if you could not. Never write
-> `.tmp/DELEGATE.status` — that file belongs to the tooling.
+> When you are done, write one line — nothing else — to
+> `.agy/runs/<run-id>/phases/DELEGATE/verdict`, and print that same line as the
+> last line of your output, in the form `STATUS: <verdict> | File: <path>`. Use
+> `STATUS: DONE` if you completed the task, `STATUS: BLOCKED` with the reason
+> if you could not. Never write `.agy/runs/<run-id>/phases/DELEGATE/status` —
+> that file belongs to the tooling.
 
 Both routes, because they are not redundant: the file is authoritative and is
 read first, and the printed line is the fallback for a worker that ignored it.
@@ -107,31 +120,37 @@ read first, and the printed line is the fallback for a worker that ignored it.
 ## Dispatch
 
 ```
-${CLAUDE_PLUGIN_ROOT}/scripts/phase.sh --phase DELEGATE \
-  --brief .tmp/briefs/delegate.md --tier medium \
+${CLAUDE_PLUGIN_ROOT}/scripts/phase.sh --phase DELEGATE --run "$RUN_ID" \
+  --brief .agy/runs/$RUN_ID/phases/DELEGATE/brief.md --tier medium \
   --ignore-via exclude --no-preflight --verify '<the test command>'
 ```
 
 `--tier medium` matches the pipeline's Implementation phase, because that is what
 this is — implementation without the surrounding phases.
 
-`--ignore-via exclude` puts `.tmp/` in `.git/info/exclude` rather than the tracked
+`--ignore-via exclude` puts `.agy/` in `.git/info/exclude` rather than the tracked
 `.gitignore`. Ambient delegation runs in whatever repo the user happens to be in;
 it has no business editing a tracked file there for its own scratch directory.
 The pipeline keeps the `.gitignore` default, where the edit is reported and
 expected.
 
-**The test command for `--verify`.** Reuse `.tmp/TEST_COMMAND` if a previous
-pipeline run left one non-empty — Phase 0 wrote it and verified it runs. Otherwise
-work it out yourself while writing the brief: you are already reading the repo,
-and `package.json`, a Makefile or the CI config will say. Pass the narrowest
-command that would actually catch a break.
+**The test command for `--verify`.** Reuse `TEST_COMMAND` from the run
+directory if a previous pipeline run left one non-empty — Phase 0 wrote it and
+verified it runs. Otherwise work it out yourself while writing the brief: you
+are already reading the repo, and `package.json`, a Makefile or the CI config
+will say. Pass the narrowest command that would actually catch a break.
 
 If there is genuinely no test command, dispatch without `--verify` and say so in
 the final report. Do not invent one — a `--verify` that passes because it tested
 nothing is worse than none, because it comes back as `Verify: ok`.
 
-You get back exactly one line. Read it, not the log.
+You get back exactly one line:
+
+```
+STATUS: DONE | Phase: DELEGATE | Run: 2026-08-24T09-51-03Z-a4f1 | Log: /path/to/.agy/runs/2026-08-24T09-51-03Z-a4f1/phases/DELEGATE/log | Verify: ok | VerifyLog: /path/to/.agy/runs/2026-08-24T09-51-03Z-a4f1/phases/DELEGATE/verify.log
+```
+
+Read it, not the log.
 
 | status | means | do |
 |---|---|---|

@@ -1,8 +1,9 @@
 # Code review criteria
 
-Review **the diff in `.tmp/REVIEW_DIFF.patch`** along two separate axes. Report
-only — **you do not fix anything**, you do not edit source files, and you do not
-commit. The single file you write is `.tmp/REVIEW_FEEDBACK.md`.
+Review **the diff in `.agy/runs/<run-id>/REVIEW_DIFF.patch`** along two separate
+axes. Report only — **you do not fix anything**, you do not edit source files,
+and you do not commit. The single file you write is
+`.agy/runs/<run-id>/REVIEW_FEEDBACK.md`.
 
 - **Standards** — does the code follow how this repo says code should be written?
 - **Spec** — does the code do what the task actually asked for?
@@ -19,8 +20,8 @@ are the only account of the change you will get:
 
 | file | what it is |
 |---|---|
-| `.tmp/REVIEW_DIFF.patch` | the unified diff. **This is the subject of the review.** |
-| `.tmp/REVIEW_DIFF.stat` | every file the change touches, complete even when the patch is truncated |
+| `.agy/runs/<run-id>/REVIEW_DIFF.patch` | the unified diff. **This is the subject of the review.** |
+| `.agy/runs/<run-id>/REVIEW_DIFF.stat` | every file the change touches, complete even when the patch is truncated |
 
 **Read the patch first, and read all of it.** The current contents of a file are
 context for understanding a hunk — they are *not* the thing being reviewed. This
@@ -37,15 +38,16 @@ to a hunk in the patch.
 Both files open with `#` comment lines describing themselves; read that header,
 it tells you the base the diff was taken against and whether anything was cut.
 
-**If `.tmp/REVIEW_DIFF.patch` is missing, empty, or says no files changed**, do
-not review the file contents instead and do not infer the change from
-`.tmp/CHANGES.md`. Write `FAILED` as your verdict, say under `## Standards` that
-no diff was provided so no review was possible, and stop. An honest refusal is
-worth more than a review of the wrong subject.
+**If `.agy/runs/<run-id>/REVIEW_DIFF.patch` is missing, empty, or says no files
+changed**, do not review the file contents instead and do not infer the change
+from `.agy/runs/<run-id>/CHANGES.md`. Write `FAILED` as your verdict, say under
+`## Standards` that no diff was provided so no review was possible, and stop.
+An honest refusal is worth more than a review of the wrong subject.
 
 **If the patch header says `TRUNCATED`**, you are seeing part of the change.
-Review what is there, then say so explicitly at the top of your report and list —
-from `.tmp/REVIEW_DIFF.stat` — the files whose hunks you did not see.
+Review what is there, then say so explicitly at the top of your report and
+list — from `.agy/runs/<run-id>/REVIEW_DIFF.stat` — the files whose hunks you
+did not see.
 
 ## Axis 1 — Standards
 
@@ -88,9 +90,9 @@ a labelled judgement call — "possible Feature Envy" — never a hard violation
 
 ## Axis 2 — Spec
 
-The spec is the task description in the brief, plus `.tmp/DISCOVERY.md` and
-`.tmp/CHANGES.md` if they exist, plus any issue or spec file the brief names.
-Report:
+The spec is the task description in the brief, plus
+`.agy/runs/<run-id>/DISCOVERY.md` and `.agy/runs/<run-id>/CHANGES.md` if they
+exist, plus any issue or spec file the brief names. Report:
 
 - requirements the spec asked for that are **missing or partial** — including a
   requirement to *test* something, which is missing until a test in the patch
@@ -122,7 +124,8 @@ you conclude anything:
 
 ## Severity ordering
 
-Order every finding in `.tmp/REVIEW_FEEDBACK.md` by severity, worst first:
+Order every finding in `.agy/runs/<run-id>/REVIEW_FEEDBACK.md` by severity, worst
+first:
 
 | severity | means |
 |---|---|
@@ -131,7 +134,7 @@ Order every finding in `.tmp/REVIEW_FEEDBACK.md` by severity, worst first:
 | **Minor** | scope creep, a baseline smell worth acting on, a weak name, a missing test for a new branch |
 | **Nit** | style, wording, formatting that tooling does not already enforce |
 
-## Output — `.tmp/REVIEW_FEEDBACK.md`
+## Output — `.agy/runs/<run-id>/REVIEW_FEEDBACK.md`
 
 Write one file, in this shape:
 
@@ -144,7 +147,7 @@ Write one file, in this shape:
 
 ### `## Examined` — required, whether or not you found anything
 
-One bullet per file in `.tmp/REVIEW_DIFF.stat`, in this shape:
+One bullet per file in `.agy/runs/<run-id>/REVIEW_DIFF.stat`, in this shape:
 
 ```
 - `wordstat/cli.py` (+10 / -1) — new `--json` flag, parser wiring, the branch in
@@ -189,4 +192,4 @@ diff is not a finding.
 Reread your own report and ask: does it contain a single file path, a single line
 number, a single quoted line from the patch? If it does not, you have produced
 the shape of a review and none of its content. Go back to
-`.tmp/REVIEW_DIFF.patch` and read the hunks.
+`.agy/runs/<run-id>/REVIEW_DIFF.patch` and read the hunks.

@@ -68,7 +68,7 @@ the diff is the whole gate. Work wanting a review loop wants `/agy:pipeline`.
 **If agy is missing, signed out, or the model is unavailable, the plugin says so
 once and Claude does the work itself.** It degrades to a no-op, never to a wall.
 
-On this path `.tmp/` is ignored via `.git/info/exclude` rather than the tracked
+On this path `.agy/` is ignored via `.git/info/exclude` rather than the tracked
 `.gitignore`: ambient delegation runs in whatever repo you happen to be in, and
 has no business editing a tracked file there for its own scratch directory.
 
@@ -79,26 +79,70 @@ from competing with `agy-delegate` over the same requests.
 
 | # | Phase | Tier | Produces |
 |---|---|---|---|
-| 0 | Discovery — what's needed to build *and test* the task | low | `.tmp/DISCOVERY.md`, `.tmp/TEST_COMMAND` |
-| 1 | Implementation | medium | `.tmp/CHANGES.md` |
-| 2 | Code review, with a capped retry loop | high | `.tmp/REVIEW_FEEDBACK.md` |
-| 3 | QA (`--mode full --sandbox`) | medium | `.tmp/QA_REPORT.md` |
-| 4 | Docs, then release *preparation* | low / high | `.tmp/RELEASE_FACTS.md`, `.tmp/RELEASE_PLAN.md` |
+| 0 | Discovery — what's needed to build *and test* the task | low | `.agy/runs/<run-id>/DISCOVERY.md`, `.agy/runs/<run-id>/TEST_COMMAND` |
+| 1 | Implementation | medium | `.agy/runs/<run-id>/CHANGES.md` |
+| 2 | Code review, with a capped retry loop | high | `.agy/runs/<run-id>/REVIEW_FEEDBACK.md` |
+| 3 | QA (`--mode full --sandbox`) | medium | `.agy/runs/<run-id>/QA_REPORT.md` |
+| 4 | Docs, then release *preparation* | low / high | `.agy/runs/<run-id>/RELEASE_FACTS.md`, `.agy/runs/<run-id>/RELEASE_PLAN.md` |
 
 All phases run on Gemini 3.7 Flash; the tier sets reasoning effort.
 
 Each phase prints exactly one line back to the orchestrator:
 
 ```
-STATUS: READY | Phase: DISCOVERY | Log: .tmp/logs/DISCOVERY.log
+STATUS: READY | Phase: DISCOVERY | Run: 2026-08-24T09-51-03Z-a4f1 | Log: /path/to/.agy/runs/2026-08-24T09-51-03Z-a4f1/phases/DISCOVERY/log
 ```
 
-Everything else — the full worker transcript — stays on disk in `.tmp/logs/`.
+Everything else — the full worker transcript — stays on disk in
+`.agy/runs/<run-id>/phases/<PHASE>/log`.
 
 `--from N` refuses rather than improvising. Phases read what earlier ones wrote,
 and a phase dispatched without its inputs does not error — the worker invents a
-plausible brief from nothing. `check-phase-range.sh` names the missing files and
-the phase that writes each one, and the run stops there.
+plausible brief from nothing. `check-phase-range.sh` checks `run.json` to verify
+that earlier phases completed with a passing status and left their artifacts in
+the run directory. A filename cannot say which task it was written for, and a
+record can. If anything is missing or unrecorded, the script names the missing
+files and the phase that writes each one, and the run stops there.
+
+## The run directory
+
+Every run is scoped under `.agy/runs/<run-id>/`:
+
+```
+.agy/
+  current                  # plain file holding current run id
+  last                     # plain file holding last run id
+  runs/
+    <run-id>/
+      run.json             # machine-readable provenance: task, base commit, phase outcomes
+      DISCOVERY.md         # phase artifacts directly under the run dir
+      TEST_COMMAND
+      CHANGES.md
+      REVIEW_DIFF.patch
+      REVIEW_DIFF.stat
+      REVIEW_FEEDBACK.md
+      QA_REPORT.md
+      RELEASE_FACTS.md
+      RELEASE_PLAN.md
+      criteria/            # resolved criteria copied inside --add-dir
+      phases/
+        <PHASE>/
+          brief.md         # copy of the dispatched brief
+          verdict          # worker verdict (authoritative)
+          status           # phase.sh STATUS line
+          log              # full worker transcript
+          verify.log       # --verify output
+```
+
+`current` and `last` are plain one-line files holding a run id rather than
+symlinks (for portability across platforms and Git Bash).
+
+Inspect past runs with `run-dir.sh`:
+
+```
+scripts/run-dir.sh list
+scripts/run-dir.sh show [--run <id|current|last>]
+```
 
 ## Running a phase by hand
 
@@ -106,7 +150,8 @@ The scripts are usable outside Claude Code:
 
 ```
 scripts/preflight.sh --tier low
-scripts/phase.sh --phase DISCOVERY --brief .tmp/briefs/discovery.md --tier low
+RUN_ID=$(scripts/run-dir.sh new --task "my task")
+scripts/phase.sh --phase DISCOVERY --run "$RUN_ID" --brief .agy/runs/$RUN_ID/phases/DISCOVERY/brief.md --tier low
 ```
 
 ## agy behaviours worth knowing
