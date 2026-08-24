@@ -165,9 +165,10 @@ Read it, not the log.
 task was underspecified or wants the pipeline. Take it over yourself and say so.
 
 Dispatches are recorded automatically to `.agy/ledger.jsonl` as an append-only
-ledger line. The orchestrator does nothing with this during a run; questions
-about historical performance and pass rates are answered between runs by
-`${CLAUDE_PLUGIN_ROOT}/scripts/report.sh`.
+ledger line tracking spend and token usage. `--budget-tokens <n>` is available
+to cap spend across a run. The orchestrator does nothing with this during a run;
+questions about historical performance and token spend are answered between
+runs by `${CLAUDE_PLUGIN_ROOT}/scripts/report.sh`.
 
 ## The gate
 

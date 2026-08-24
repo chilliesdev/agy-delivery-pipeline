@@ -36,6 +36,32 @@ ledger_path() {
   return 0
 }
 
+_ledger_spent_tokens() {
+  local dir="${1:-$PWD}"
+  local run_id="${2:-}"
+  [ -d "$dir" ] || { printf '0\n'; return 0; }
+  dir="$(cd "$dir" 2>/dev/null && pwd || echo "$dir")"
+  local ledger="$dir/.agy/ledger.jsonl"
+  [ -f "$ledger" ] || { printf '0\n'; return 0; }
+  [ -n "$run_id" ] || { printf '0\n'; return 0; }
+
+  local sum=0
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *"\"run\":\"$run_id\""*)
+        local tt
+        tt="$(printf '%s\n' "$line" | sed -n 's/.*"total_tokens":\([0-9][0-9]*\).*/\1/p' 2>/dev/null || true)"
+        if [ -n "$tt" ]; then
+          sum=$((sum + tt))
+        fi
+        ;;
+    esac
+  done < "$ledger"
+  printf '%s\n' "$sum"
+  return 0
+}
+
 _ledger_extract_diff() {
   local dir="${1:-}"
   local run_target="${2:-}"
@@ -193,10 +219,11 @@ ledger_append() {
   local verdict_val="" verify_ran_val="" verify_rc_val="" status_val=""
   local retries_spent_val="" retries_refunded_val="" task_val="" task_id_val=""
   local diff_val="" review_val=""
+  local usage_val="" num_turns_val="" agy_status_val=""
 
   local has_elapsed=0 has_worker_rc=0 has_verdict=0 has_verify_rc=0
   local has_diff=0 has_review=0 has_attempt=0 has_retries_spent=0 has_retries_refunded=0
-  local has_verify_ran=0
+  local has_verify_ran=0 has_usage=0 has_num_turns=0 has_agy_status=0
 
   for pair in "$@"; do
     case "$pair" in
@@ -234,6 +261,9 @@ ledger_append() {
       task_id) task_id_val="$v" ;;
       diff) diff_val="$v"; has_diff=1 ;;
       review) review_val="$v"; has_review=1 ;;
+      usage) usage_val="$v"; has_usage=1 ;;
+      num_turns) num_turns_val="$v"; has_num_turns=1 ;;
+      agy_status) agy_status_val="$v"; has_agy_status=1 ;;
     esac
   done
 
@@ -293,6 +323,16 @@ ledger_append() {
     fields[${#fields[@]}]="\"retries_refunded\":${retries_refunded_val:-0}"
   fi
   [ -n "$task_field" ] && fields[${#fields[@]}]="$task_field"
+
+  if [ $has_usage -eq 1 ] && [ -n "$usage_val" ]; then
+    fields[${#fields[@]}]="\"usage\":$usage_val"
+  fi
+  if [ $has_num_turns -eq 1 ] && [ -n "$num_turns_val" ]; then
+    fields[${#fields[@]}]="\"num_turns\":$num_turns_val"
+  fi
+  if [ $has_agy_status -eq 1 ] && [ -n "$agy_status_val" ]; then
+    fields[${#fields[@]}]="\"agy_status\":\"$(_run_dir_escape "$agy_status_val")\""
+  fi
 
   if [ $has_diff -eq 1 ] && [ -n "$diff_val" ]; then
     fields[${#fields[@]}]="\"diff\":$diff_val"
