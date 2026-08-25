@@ -108,5 +108,34 @@ STALE="$(grep -rnE '(^|[^/{])scripts/[a-z-]+\.sh' "$ROOT/commands" "$ROOT/skills
   | grep -v 'CLAUDE_PLUGIN_ROOT' | grep -v '\.\./\.\./scripts/' | grep -c .)"
 check no-stale-paths "${STALE:-0}" "0" "no bare scripts/ paths left over from the pre-plugin layout"
 
+# --- every script has a test suite ------------------------------------------
+
+# Every script in scripts/ must have a corresponding test suite named
+# tests/<script-name>, unless explicitly listed here with rationale.
+#
+# Intentional exceptions:
+#   agy-run.sh   - thin shim over drivers/agy.sh (tested via tests/driver.sh)
+#   phase.sh     - split across tests/phase-{dispatch,exclude,status,verify}.sh
+#   run-tests.sh - test runner itself
+#   watch-run.sh - tested via tests/progress.sh
+SCRIPT_SUITE_EXCEPTIONS=" agy-run.sh phase.sh run-tests.sh watch-run.sh "
+
+MISSING_SUITES=0
+SCRIPTS_CHECKED=0
+for S in "$ROOT"/scripts/*.sh; do
+  [ -f "$S" ] || continue
+  SCRIPTS_CHECKED=$((SCRIPTS_CHECKED + 1))
+  BN="$(basename "$S")"
+  if [ -f "$ROOT/tests/$BN" ]; then
+    ok "suite-present-$BN" "tests/$BN exists"
+  elif case "$SCRIPT_SUITE_EXCEPTIONS" in *" $BN "*) true ;; *) false ;; esac; then
+    ok "suite-exempt-$BN" "tests/$BN explicitly exempted"
+  else
+    bad "suite-present-$BN" "tests/$BN does not exist"
+    MISSING_SUITES=$((MISSING_SUITES + 1))
+  fi
+done
+check scripts-have-suites "$MISSING_SUITES" "0" "all $SCRIPTS_CHECKED scripts have suites or explicit exemptions"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
