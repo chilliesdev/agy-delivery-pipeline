@@ -62,7 +62,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
+PHASE=""; BRIEF=""; TIER=""; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
 SKIP_BRIEF_LINT="${AGY_SKIP_BRIEF_LINT:-}"
 SKIP_SECRET_SCAN="${AGY_SKIP_SECRET_SCAN:-}"
@@ -116,12 +116,26 @@ case "$IGNORE_VIA" in
   *) echo "phase.sh: --ignore-via wants gitignore or exclude, got '$IGNORE_VIA'" >&2; exit 2 ;;
 esac
 
-case "$TIER" in
-  low|medium|high) MODEL="gemini-3.7-flash-$TIER" ;;
-  *) MODEL="$TIER" ;;   # allow an explicit model id (e.g. claude-opus-4-6-thinking)
-esac
-
 DIR="$(cd "$DIR" && pwd)"
+
+RESOLVE_ARGS=()
+if [ -n "$TIER" ]; then
+  RESOLVE_ARGS=("${RESOLVE_ARGS[@]+"${RESOLVE_ARGS[@]}"}" --tier "$TIER")
+fi
+if [ -n "$PHASE" ]; then
+  RESOLVE_ARGS=("${RESOLVE_ARGS[@]+"${RESOLVE_ARGS[@]}"}" --phase "$PHASE")
+fi
+RESOLVE_ARGS=("${RESOLVE_ARGS[@]+"${RESOLVE_ARGS[@]}"}" --dir "$DIR")
+
+MODEL="$("$HERE/resolve-model.sh" "${RESOLVE_ARGS[@]}")" || exit $?
+if [ -z "$TIER" ]; then
+  case "$MODEL" in
+    gemini-3.7-flash-low)    TIER="low" ;;
+    gemini-3.7-flash-medium) TIER="medium" ;;
+    gemini-3.7-flash-high)   TIER="high" ;;
+    *)                       TIER="$MODEL" ;;
+  esac
+fi
 
 # Resolve the run directory R and RUN_ID.
 if [ -z "$RUN_TARGET" ]; then
@@ -393,9 +407,13 @@ rm -f "$VERDICT_FILE"
 # the orchestrator never reads stderr. On by default: a sign-in can lapse and a
 # model id can be withdrawn mid-pipeline, so Phase 0 alone is not enough.
 # AGY_SKIP_PREFLIGHT=1 or --no-preflight drops it for a tight retry loop.
+FALLBACK_FIELD=""
 if [ -z "$SKIP_PREFLIGHT" ]; then
   PREFLIGHT_LOG="$PHASE_DIR/preflight.log"
-  "$HERE/preflight.sh" --model "$MODEL" --quiet >/dev/null 2>"$PREFLIGHT_LOG"
+  PREFLIGHT_MODEL_FILE="$PHASE_DIR/model"
+  rm -f "$PREFLIGHT_MODEL_FILE"
+  PREFLIGHT_ARGS=(--model "$MODEL" --phase "$PHASE" --dir "$DIR" --output-model "$PREFLIGHT_MODEL_FILE" --quiet)
+  "$HERE/preflight.sh" "${PREFLIGHT_ARGS[@]}" >/dev/null 2>"$PREFLIGHT_LOG"
   PRC=$?
   if [ "$PRC" -ne 0 ]; then
     case "$PRC" in
@@ -423,6 +441,14 @@ if [ -z "$SKIP_PREFLIGHT" ]; then
       "verify_ran=false" \
       ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
     exit "$PRC"
+  fi
+  if [ -f "$PREFLIGHT_MODEL_FILE" ]; then
+    RESOLVED_MODEL="$(cat "$PREFLIGHT_MODEL_FILE" 2>/dev/null || true)"
+    rm -f "$PREFLIGHT_MODEL_FILE"
+    if [ -n "$RESOLVED_MODEL" ] && [ "$RESOLVED_MODEL" != "$MODEL" ]; then
+      FALLBACK_FIELD=" | Fallback: $RESOLVED_MODEL"
+      MODEL="$RESOLVED_MODEL"
+    fi
   fi
 fi
 
@@ -500,7 +526,7 @@ fi
 if [ -n "$VERIFY" ] && [ "$VRC" -eq 0 ] && [ "$RC" -eq 0 ]; then
   LINE="$LINE | Verify: ok | VerifyLog: $VERIFY_LOG"
 fi
-LINE="$LINE$JSON_FALLBACK_FIELD$SECRETS_FIELD$GITIGNORE_FIELD"
+LINE="$LINE$FALLBACK_FIELD$JSON_FALLBACK_FIELD$SECRETS_FIELD$GITIGNORE_FIELD"
 
 # Record the phase outcome in run.json
 FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | awk '{print $1}')"

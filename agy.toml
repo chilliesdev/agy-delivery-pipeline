@@ -1,0 +1,33 @@
+# agy.toml - Antigravity delivery pipeline configuration
+#
+# RESTRICTED TOML SUBSET ONLY:
+# - [section] headers (one level only, e.g. [tiers], [limits], [phases.NAME])
+# - key = "value"
+# - key = 123
+# - key = ["a", "b"] on one line
+# No nested tables beyond one level, no multi-line arrays, and no inline trailing
+# comments after values.
+#
+# Why: There is no jq, no Python, and no TOML parser library available in
+# baseline environments. Adding dependencies is not an option (the same
+# reasoning that keeps run.json hand-written).
+#
+# Error handling: Malformed lines or unsupported syntax are NOT silently
+# ignored. The parser halts immediately, prints an error naming the file and
+# line number to stderr, and exits with code 2.
+
+[phases.REVIEW]
+tier      = "high"
+fallbacks = ["gemini-3.7-flash-high", "gemini-3.7-flash-medium"]
+
+[phases.DISCOVERY]
+tier = "low"
+
+[tiers]
+low    = "gemini-3.7-flash-low"
+medium = "gemini-3.7-flash-medium"
+high   = "gemini-3.7-flash-high"
+
+[limits]
+max_cost_tokens = 500000
+max_wall_clock  = "45m"

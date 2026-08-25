@@ -226,6 +226,120 @@ can be supplied to `scripts/report.sh` via `--price-in` and `--price-out` (USD
 per million tokens) for a derived dollar figure; without them, the report says
 nothing about money.
 
+## Configuration
+
+Model selection, tier mappings, and phase fallbacks are configured in
+`agy.toml`. Model resolution is handled by `scripts/resolve-model.sh`.
+
+### Resolution order
+
+Config files are resolved in order (first hit wins):
+
+1. `<repo>/.claude/agy.toml` — the project's own Claude Code configuration
+2. `<repo>/agy.toml` — the project root configuration
+3. `agy.toml` — the plugin's vendored default configuration
+
+This matches the same precedence order that `scripts/resolve-criteria.sh`
+uses for criteria files. If no config file exists anywhere, built-in defaults
+apply (`low` -> `gemini-3.7-flash-low`, `medium` -> `gemini-3.7-flash-medium`,
+`high` -> `gemini-3.7-flash-high`).
+
+### What can be set
+
+- **`[tiers]`:** maps abstract tier names to concrete model IDs.
+- **`[phases.<NAME>]`:** configures a phase's default `tier` and an optional
+  `fallbacks` array of model IDs.
+- **`[limits]`:** sets run constraints like `max_cost_tokens` and
+  `max_wall_clock`.
+
+```toml
+[phases.REVIEW]
+tier      = "high"
+fallbacks = ["gemini-3.7-flash-high", "gemini-3.7-flash-medium"]
+
+[phases.DISCOVERY]
+tier = "low"
+
+[tiers]
+low    = "gemini-3.7-flash-low"
+medium = "gemini-3.7-flash-medium"
+high   = "gemini-3.7-flash-high"
+
+[limits]
+max_cost_tokens = 500000
+max_wall_clock  = "45m"
+```
+
+### The tier vocabulary
+
+The tier vocabulary — `low`, `medium`, `high` — expresses what a phase is
+**worth** (its reasoning investment and weight), not what specific binary or API
+it runs on. When newer models arrive or a project rebinds tiers, the binding
+moves while the phase definitions and intent remain unchanged.
+
+### Precedence rules
+
+1. **Raw model ID beats everything:** Passing a raw model ID to `--tier` (e.g.
+   `--tier custom-model-id`) bypasses tier lookup entirely.
+2. **Explicit command-line `--tier` beats config:** Passing `--tier high`
+   forces that tier regardless of any per-phase config in `agy.toml`.
+3. **Project config beats vendored defaults:** Values in
+   `<repo>/.claude/agy.toml` or `<repo>/agy.toml` override the vendored
+   `agy.toml`.
+4. **Per-phase config applies when no `--tier` is passed:** `scripts/phase.sh`
+   passes no tier argument by default, allowing `scripts/resolve-model.sh` to
+   resolve the phase's configured tier from `agy.toml`.
+
+### Diagnostic output on stderr
+
+`scripts/resolve-model.sh` prints only the resolved model ID to stdout on a
+single line (suitable for command substitution). It reports on **stderr** which
+config file and which entry decided the resolution:
+
+```
+resolve-model: resolved 'gemini-3.7-flash-high' from /path/to/agy.toml ([phases.REVIEW].tier = high)
+```
+
+A surprising model choice is therefore immediately diagnosable rather than
+mysterious.
+
+### Format restriction
+
+The configuration parser reads a deliberately restricted subset of TOML:
+
+- Single-level section headers: `[section]` or `[section.subsection]` (e.g.
+  `[tiers]`, `[limits]`, `[phases.REVIEW]`)
+- Double-quoted strings: `key = "value"`
+- Integers: `key = 123`
+- Single-line string arrays: `key = ["a", "b"]`
+
+**Disallowed:** Nested tables beyond one level (`[a.b.c]`), multi-line arrays,
+and inline trailing comments after values (`key = "val" # comment`).
+
+**Why:** There is no `jq`, no Python, and no TOML parser library available in
+baseline environments (macOS bash 3.2). Adding dependencies is not an option —
+the same reasoning that keeps `run.json` hand-written.
+
+**Error handling:** Malformed lines or unsupported syntax are **refused with an
+error message, not silently ignored**. If `scripts/resolve-model.sh` encounters
+an unparseable line, it halts immediately, prints the filename, line number, and
+exact reason to stderr, and exits with code 2.
+
+### Fallback chains
+
+A fallback chain specifies alternative models if the primary configured model
+is unavailable in the user's `agy models` account listing.
+
+Falling back to a weaker model is **reported, not silent**: a code review run
+at `medium` reasoning when configured for `high` is a different review. When a
+fallback is taken:
+
+- `scripts/preflight.sh` reports the fallback to stderr and in its summary line
+  (`preflight: ok — agy signed in, fell back to … (… unavailable)`).
+- `scripts/phase.sh` appends ` | Fallback: <model-id>` to the STATUS line sent
+  to the orchestrator.
+- The run ledger records the actual fallback model that executed.
+
 ## Diff integrity check
 
 `scripts/check-diff-integrity.sh` mechanically inspects diffs against the brief
