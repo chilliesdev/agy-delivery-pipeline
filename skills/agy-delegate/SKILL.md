@@ -131,7 +131,10 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/phase.sh --phase DELEGATE --run "$RUN_ID" \
 ```
 
 `--tier medium` matches the pipeline's Implementation phase, because that is what
-this is — implementation without the surrounding phases.
+this is — implementation without the surrounding phases. The tier resolves to a
+concrete model through `agy.toml` configuration (`.claude/agy.toml` ->
+`agy.toml` -> vendored default). The `medium` assignment is an educated guess,
+which the ledger's recorded token and pass metrics make checkable over time.
 
 `--ignore-via exclude` puts `.agy/` in `.git/info/exclude` rather than the tracked
 `.gitignore`. Ambient delegation runs in whatever repo the user happens to be in;

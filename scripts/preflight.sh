@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Fail fast if agy cannot run the phase that is about to be dispatched.
 #
-#   preflight.sh [--model <id>] [--tier low|medium|high] [--timeout <n>]
+#   preflight.sh [--model <id>] [--tier low|medium|high|raw-id] [--phase <NAME>]
+#                [--dir <repo>] [--output-model <file>] [--timeout <n>]
 #                [--quiet]
 #
 # Checks in order, each with its own exit code:
 #   127  agy is not on PATH — honours $AGY_BIN exactly as agy-run.sh does
 #     3  `agy models` failed or came back empty: the CLI is not signed in
-#     4  the requested model is absent from that listing
+#     4  the requested model (and all fallbacks) is absent from that listing
 #     7  the listing never came back inside --timeout (default 30s)
 #     8  no writable scratch directory to catch the listing in
 #     2  bad arguments
@@ -54,16 +55,21 @@
 # verbatim, and 5 and 6 are already its own VERIFY_FAILED and RETRY_CAP_REACHED.
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGY="${AGY_BIN:-agy}"
 MODEL=""; TIER=""; QUIET=""; TIMEOUT="${AGY_PREFLIGHT_TIMEOUT:-30}"
+PHASE=""; DIR="$PWD"; OUTPUT_MODEL=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --model)    MODEL="$2"; shift 2 ;;
-    --tier)     TIER="$2";  shift 2 ;;
-    --timeout)  TIMEOUT="$2"; shift 2 ;;
-    --quiet|-q) QUIET=1;    shift ;;
-    -h|--help)  sed -n '2,37p' "$0"; exit 0 ;;
+    --model)        MODEL="$2"; shift 2 ;;
+    --tier)         TIER="$2";  shift 2 ;;
+    --phase)        PHASE="$2"; shift 2 ;;
+    --dir)          DIR="$2";   shift 2 ;;
+    --output-model) OUTPUT_MODEL="$2"; shift 2 ;;
+    --timeout)      TIMEOUT="$2"; shift 2 ;;
+    --quiet|-q)     QUIET=1;    shift ;;
+    -h|--help)      sed -n '2,37p' "$0"; exit 0 ;;
     *) echo "preflight: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -80,15 +86,23 @@ case "$LIMIT" in
 esac
 LIMIT=$((LIMIT * MULT))
 
-# --model takes a raw id and wins; --tier maps the way phase.sh maps it, raw
-# ids included. With neither, check the model agy-run.sh would have defaulted to.
-if [ -z "$MODEL" ] && [ -n "$TIER" ]; then
-  case "$TIER" in
-    low|medium|high) MODEL="gemini-3.7-flash-$TIER" ;;
-    *) MODEL="$TIER" ;;
-  esac
+# --model takes a raw id and wins; otherwise resolve via resolve-model.sh using
+# --tier and --phase. With neither, check the model agy-run.sh would have defaulted to.
+if [ -z "$MODEL" ]; then
+  if [ -n "$TIER" ] || [ -n "$PHASE" ]; then
+    RESOLVE_ARGS=()
+    [ -n "$TIER" ] && RESOLVE_ARGS=("${RESOLVE_ARGS[@]+"${RESOLVE_ARGS[@]}"}" --tier "$TIER")
+    [ -n "$PHASE" ] && RESOLVE_ARGS=("${RESOLVE_ARGS[@]+"${RESOLVE_ARGS[@]}"}" --phase "$PHASE")
+    RESOLVE_ARGS=("${RESOLVE_ARGS[@]+"${RESOLVE_ARGS[@]}"}" --dir "$DIR")
+    MODEL="$("$HERE/resolve-model.sh" "${RESOLVE_ARGS[@]}" 2>/dev/null || true)"
+  fi
 fi
 MODEL="${MODEL:-${AGY_MODEL:-gemini-3.7-flash-medium}}"
+
+FALLBACKS=""
+if [ -n "$PHASE" ]; then
+  FALLBACKS="$("$HERE/resolve-model.sh" --phase "$PHASE" --dir "$DIR" --fallbacks 2>/dev/null || true)"
+fi
 
 # 1. the CLI itself
 if ! command -v "$AGY" >/dev/null 2>&1; then
@@ -163,17 +177,42 @@ if [ "$RC" -ne 0 ] || [ -z "$AVAILABLE" ]; then
   exit 3
 fi
 
-# 3. the model this phase would ask for
-if ! printf '%s\n' "$AVAILABLE" | grep -Fxq -- "$MODEL"; then
+# 3. the model this phase would ask for, walking fallback chain if needed
+CHOSEN_MODEL=""
+FELL_BACK=0
+
+if printf '%s\n' "$AVAILABLE" | grep -Fxq -- "$MODEL"; then
+  CHOSEN_MODEL="$MODEL"
+elif [ -n "$FALLBACKS" ]; then
+  for FB in $FALLBACKS; do
+    if printf '%s\n' "$AVAILABLE" | grep -Fxq -- "$FB"; then
+      CHOSEN_MODEL="$FB"
+      FELL_BACK=1
+      break
+    fi
+  done
+fi
+
+if [ -z "$CHOSEN_MODEL" ]; then
   echo "preflight: model '$MODEL' is not available to this account right now." >&2
   echo "preflight: \`agy models\` currently offers:" >&2
   printf '%s\n' "$AVAILABLE" | sed 's/^/  /' >&2
   exit 4
 fi
 
+if [ -n "$OUTPUT_MODEL" ]; then
+  printf '%s\n' "$CHOSEN_MODEL" > "$OUTPUT_MODEL" 2>/dev/null || true
+fi
+
 # 4. all clear
-if [ -z "$QUIET" ]; then
+if [ "$FELL_BACK" -eq 1 ]; then
+  echo "preflight: model '$MODEL' is unavailable; fell back to '$CHOSEN_MODEL'" >&2
+  if [ -z "$QUIET" ]; then
+    COUNT="$(printf '%s\n' "$AVAILABLE" | grep -c .)"
+    printf 'preflight: ok — agy signed in, fell back to %s (%s unavailable, %s models listed)\n' "$CHOSEN_MODEL" "$MODEL" "$COUNT"
+  fi
+elif [ -z "$QUIET" ]; then
   COUNT="$(printf '%s\n' "$AVAILABLE" | grep -c .)"
-  printf 'preflight: ok — agy signed in, %s available (%s models listed)\n' "$MODEL" "$COUNT"
+  printf 'preflight: ok — agy signed in, %s available (%s models listed)\n' "$CHOSEN_MODEL" "$COUNT"
 fi
 exit 0
