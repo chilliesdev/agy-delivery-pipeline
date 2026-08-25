@@ -246,6 +246,7 @@ apply (`low` -> `gemini-3.7-flash-low`, `medium` -> `gemini-3.7-flash-medium`,
 
 ### What can be set
 
+- **`[driver]`:** sets the default backend driver (`name = "agy"`).
 - **`[tiers]`:** maps abstract tier names to concrete model IDs.
 - **`[phases.<NAME>]`:** configures a phase's default `tier` and an optional
   `fallbacks` array of model IDs.
@@ -253,6 +254,9 @@ apply (`low` -> `gemini-3.7-flash-low`, `medium` -> `gemini-3.7-flash-medium`,
   `max_wall_clock`.
 
 ```toml
+[driver]
+name = "agy"
+
 [phases.REVIEW]
 tier      = "high"
 fallbacks = ["gemini-3.7-flash-high", "gemini-3.7-flash-medium"]
@@ -339,6 +343,86 @@ fallback is taken:
 - `scripts/phase.sh` appends ` | Fallback: <model-id>` to the STATUS line sent
   to the orchestrator.
 - The run ledger records the actual fallback model that executed.
+
+## Worker drivers
+
+Exactly one file knows what the backend is: its driver script under
+`drivers/<name>.sh` (currently [drivers/agy.sh](drivers/agy.sh)). Everything
+above it — the orchestrator, phase sequencing, brief linting, diff integrity,
+criteria resolution, gates, and the ledger — is backend-neutral.
+
+The driver is selected through:
+
+1. CLI flag: `--driver <name>` passed to `scripts/phase.sh`
+2. Configuration: `[driver]` table in `agy.toml` (`name = "agy"`)
+3. Default: `agy`
+
+An unknown driver name is **refused**, whether passed via `--driver` or
+configured in `agy.toml`, naming the drivers that exist (exit 2). A name that
+looks applied and is not is the failure this repo distrusts most.
+
+[drivers/README.md](drivers/README.md) defines the contract for writing another
+driver. Each driver implements three functions: `driver_run`, `driver_models`,
+and `driver_capabilities`.
+
+### Capabilities: encoding backend behavior as data
+
+The repo's hardest-won knowledge used to live only in prose. It is now data
+reported by `driver_capabilities`:
+
+```
+shell=no  sandbox=yes  effort=yes  read_outside_dir=no  plan_mode_writes=no
+usage_reporting=json  stdout_must_be_pipe=yes  stdin_must_be_devnull=yes
+```
+
+Each key encodes a concrete operational characteristic of the backend:
+
+- **`shell` (`no` | `yes`):** Whether the worker is permitted to run shell
+  commands. For `agy`, `no` encodes that permission denials abort headless runs
+  in `accept-edits`.
+- **`sandbox` (`yes` | `no`):** Whether the backend supports sandboxed
+  execution (`--sandbox`).
+- **`effort` (`yes` | `no`):** Whether the backend supports reasoning effort
+  levels (`--effort`).
+- **`read_outside_dir` (`no` | `yes`):** Whether the worker can read files
+  outside `--add-dir`. For `agy`, `no` encodes that reading external paths
+  aborts the run.
+- **`plan_mode_writes` (`no` | `yes`):** Whether read-only plan mode permits
+  writing output reports. For `agy`, `no` encodes that `--mode plan` blocks the
+  worker from writing its own report and verdict.
+- **`usage_reporting` (`json` | `none` | `always`):** How token usage is
+  reported. For `agy`, `json` encodes that token metrics require
+  `--output-format json`.
+- **`stdout_must_be_pipe` (`yes` | `no`):** For `agy`, `yes` encodes that stdout
+  must be read through a pipe rather than a plain file to prevent hangs.
+- **`stdin_must_be_devnull` (`yes` | `no`):** For `agy`, `yes` encodes that
+  stdin must be redirected from `/dev/null` to prevent input drain hangs.
+
+These keys are the facts documented in
+[agy behaviours worth knowing](#agy-behaviours-worth-knowing) made
+machine-readable.
+
+This matters plainly: a different backend has a different list. One that allows
+shell commands makes the "do not run shell commands" rule unnecessary and the
+whole `scripts/check-test-command.sh` dance redundant. Capabilities cannot be a
+comment, or the second backend silently inherits the first one's workarounds.
+
+`scripts/phase.sh` is the live consumer: it inspects `shell=` from
+`driver_capabilities` and automatically passes `--allow-shell` to
+`scripts/check-brief.sh` when the driver permits shell execution.
+
+### Architectural claim
+
+The interesting thing here is not agy. It is the shape — an orchestrator that
+never writes code, workers that never gate themselves, file-based state between
+them, and every claim checked mechanically before the next dispatch. That shape
+is backend-agnostic, and the gates did not change when agy moved behind an
+interface. That they did not change is the evidence that the shape was real
+rather than a description of one CLI's quirks.
+
+Be careful not to overclaim: **no second driver exists**, and none of this is
+proven against one. A second backend is where the design gets tested, and until
+one lands this is a well-shaped hypothesis.
 
 ## Diff integrity check
 
@@ -434,28 +518,29 @@ scripts/check-diff-integrity.sh --dir .
 
 ## agy behaviours worth knowing
 
-Established by testing, not from the docs. The scripts and briefs are shaped
-around them:
+Established by testing, not from the docs. The scripts, briefs, and driver
+capabilities ([Worker drivers](#worker-drivers)) are shaped around them:
 
-- **`--add-dir` is mandatory.** Without it agy ignores the cwd and writes into
-  `~/.gemini/antigravity-cli/scratch`.
-- **A denied permission aborts the whole headless run.** In `accept-edits` a
-  worker that tries to run `npm test` dies with rc=1 *after* doing its work
-  correctly. Briefs therefore say "do not run shell commands; the orchestrator
-  runs the checks."
-- **`--mode plan` denies every write**, including the worker writing its own
-  report — so read-only phases still run in `accept-edits`, constrained by the
-  brief rather than the mode.
-- **agy hangs when its stdout is a plain file**, and **drains stdin before it
-  answers**, so anything reading it uses a pipe and `</dev/null`.
-- **agy reports token usage, but only under `--output-format json`.** The
-  default text output carries none. The JSON object also carries
-  `duration_seconds`, `num_turns`, a `conversation_id`, and agy's own `status`.
-  Two flag details worth stating because both cost time to find: `-p` takes the
-  next argument as its prompt, so the prompt must be attached as `-p='…'` with
-  `--output-format` elsewhere on the command line; and every existing
-  constraint still holds — stdout must be a pipe rather than a plain file, and
-  stdin must be `</dev/null`.
+- **`--add-dir` is mandatory** (`read_outside_dir=no`). Without it agy ignores
+  the cwd and writes into `~/.gemini/antigravity-cli/scratch`.
+- **A denied permission aborts the whole headless run** (`shell=no`). In
+  `accept-edits` a worker that tries to run `npm test` dies with rc=1 *after*
+  doing its work correctly. Briefs therefore say "do not run shell commands; the
+  orchestrator runs the checks."
+- **`--mode plan` denies every write** (`plan_mode_writes=no`), including the
+  worker writing its own report — so read-only phases still run in
+  `accept-edits`, constrained by the brief rather than the mode.
+- **agy hangs when its stdout is a plain file** (`stdout_must_be_pipe=yes`), and
+  **drains stdin before it answers** (`stdin_must_be_devnull=yes`), so anything
+  reading it uses a pipe and `</dev/null`.
+- **agy reports token usage, but only under `--output-format json`**
+  (`usage_reporting=json`). The default text output carries none. The JSON
+  object also carries `duration_seconds`, `num_turns`, a `conversation_id`, and
+  agy's own `status`. Two flag details worth stating because both cost time to
+  find: `-p` takes the next argument as its prompt, so the prompt must be
+  attached as `-p='…'` with `--output-format` elsewhere on the command line; and
+  every existing constraint still holds — stdout must be a pipe rather than a
+  plain file, and stdin must be `</dev/null`.
 
   Switching to JSON moved the worker's text inside a `response` field, so the
   **printed-line verdict route** now has to be extracted from JSON before a

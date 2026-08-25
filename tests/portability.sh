@@ -157,12 +157,12 @@ EOF
 CLEAN_OUT="$(scan_file "$CLEAN_FILE")"
 check clean-fixture "$CLEAN_OUT" "" "clean script has zero violations"
 
-# --- Repository scan: check all scripts/*.sh and tests/*.sh ------------------
+# --- Repository scan: check all scripts/*.sh, tests/*.sh, and drivers/*.sh ---
 
 REPO_VIOLATIONS=""
 TOTAL_FILES=0
 
-for SCRIPT in "$ROOT"/scripts/*.sh "$ROOT"/tests/*.sh; do
+for SCRIPT in "$ROOT"/scripts/*.sh "$ROOT"/tests/*.sh "$ROOT"/drivers/*.sh; do
   [ -f "$SCRIPT" ] || continue
   # Skip tests/portability.sh in the repository-wide scan: a scanner that contains
   # the patterns it searches for will always match itself, and the alternative —

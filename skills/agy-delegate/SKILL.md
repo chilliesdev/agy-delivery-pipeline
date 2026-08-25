@@ -9,9 +9,13 @@ Claude Code stays the **orchestrator**: it decides what to build, writes the
 brief, runs the checks, reads the diff and reports. The Antigravity CLI writes
 the code. There are no sub-agents — one `agy -p` process, once.
 
-This is the ambient half of the `agy` plugin. The five-phase pipeline, for a task
-driven through review, QA and release, is [agy-pipeline](../agy-pipeline/SKILL.md)
-via `/agy:pipeline`. Both run through the same `phase.sh`.
+This is the ambient half of the `agy` plugin. The five-phase pipeline, for a
+task driven through review, QA and release, is
+[agy-pipeline](../agy-pipeline/SKILL.md) via `/agy:pipeline`. Both run through
+the same `phase.sh`. Every dispatch runs through a driver
+([drivers/agy.sh](../../drivers/agy.sh)), defaulting to `agy` or configured via
+`--driver` and `agy.toml`. The gates and verification checks remain identical
+regardless of backend.
 
 ## When this applies
 

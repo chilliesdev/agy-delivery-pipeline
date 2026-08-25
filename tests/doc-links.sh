@@ -124,7 +124,7 @@ resolve_path() {
   esac
 
   case "$ref" in
-    scripts/*|tests/*|criteria/*|skills/*|commands/*|.claude-plugin/*)
+    scripts/*|tests/*|criteria/*|skills/*|commands/*|.claude-plugin/*|drivers/*)
       printf '%s' "$ROOT/$ref"
       return 0
       ;;
@@ -198,7 +198,7 @@ for DOC in $DOC_FILES; do
     for TOKEN in $STRIPPED_LINE; do
       CLEAN_TOK="$(clean_candidate "$TOKEN")"
       case "$CLEAN_TOK" in
-        scripts/*|tests/*|criteria/*|skills/*|commands/*|.claude-plugin/*|\$\{CLAUDE_PLUGIN_ROOT\}/*)
+        scripts/*|tests/*|criteria/*|skills/*|commands/*|.claude-plugin/*|drivers/*|\$\{CLAUDE_PLUGIN_ROOT\}/*)
           check_reference "$CLEAN_TOK" "$REL_DOC" "$DOC_DIR" "$LINE_NUM"
           ;;
       esac

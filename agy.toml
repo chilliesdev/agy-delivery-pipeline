@@ -16,6 +16,9 @@
 # ignored. The parser halts immediately, prints an error naming the file and
 # line number to stderr, and exits with code 2.
 
+[driver]
+name = "agy"
+
 [phases.REVIEW]
 tier      = "high"
 fallbacks = ["gemini-3.7-flash-high", "gemini-3.7-flash-medium"]

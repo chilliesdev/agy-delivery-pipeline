@@ -108,7 +108,10 @@ Prints one status line, logs to `.agy/runs/<run-id>/phases/<PHASE>/log`:
 STATUS: DONE | Phase: IMPLEMENT | Run: 2026-08-24T09-51-03Z-a4f1 | Log: /path/to/.agy/runs/2026-08-24T09-51-03Z-a4f1/phases/IMPLEMENT/log
 ```
 
-Underneath sits [agy-run.sh](../../scripts/agy-run.sh), which handles the agy flags.
+Underneath sits the worker driver ([drivers/agy.sh](../../drivers/agy.sh)), with
+[agy-run.sh](../../scripts/agy-run.sh) retained as a compatibility shim. Every
+phase runs through a driver; `agy` is the only one today, and the gates do not
+change when it is not (see [drivers/README.md](../../drivers/README.md)).
 
 **The verdict contract.** Every brief must end by telling the worker to do two
 things with the same one-line verdict:
