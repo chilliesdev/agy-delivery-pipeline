@@ -62,8 +62,9 @@ The first delegation in a session asks; after that it dispatches and reports.
 That consent lives in the conversation and nowhere else, so no stale marker file
 can ever answer for a session that has not agreed.
 
-One `agy -p` at tier `medium`. No review phase — `--verify` plus Claude reading
-the diff is the whole gate. Work wanting a review loop wants `/agy:pipeline`.
+One `agy -p` at tier `medium`. No review phase — `--verify`,
+`check-diff-integrity.sh`, and Claude spot-checking the diff form the gate. Work
+wanting a review loop wants `/agy:pipeline`.
 
 **If agy is missing, signed out, or the model is unavailable, the plugin says so
 once and Claude does the work itself.** It degrades to a no-op, never to a wall.
@@ -225,6 +226,26 @@ can be supplied to `scripts/report.sh` via `--price-in` and `--price-out` (USD
 per million tokens) for a derived dollar figure; without them, the report says
 nothing about money.
 
+## Diff integrity check
+
+`scripts/check-diff-integrity.sh` mechanically inspects diffs against the brief
+for the failure modes a passing test suite cannot catch:
+
+- **Weakened tests (`DIFF_TESTS_WEAKENED`):** deleted test files, added test
+  skips (`@pytest.mark.skip`, `it.only`, `t.Skip`), or assertions rewritten to
+  tautologies (`assert True`). Exits 3 to override worker claims and fail the
+  phase or gate.
+- **Suspicious changes (`DIFF_SUSPICIOUS`):** falling assertion counts,
+  modified assertion literals without source changes, and scope creep (set
+  difference between touched paths and the brief). Surfaced for human review
+  without failing automatically.
+- **Unchecked languages (`DIFF_UNCHECKED`):** if a diff touches languages with
+  no rules defined, it reports unchecked rather than claiming clean.
+
+This turns the human diff read into a **spot check rather than the load-bearing
+gate** — catching mechanical shortcuts automatically while leaving semantic
+judgement, invented APIs, and unanalysed languages to the orchestrator.
+
 ## Running a phase by hand
 
 The scripts are usable outside Claude Code:
@@ -233,6 +254,8 @@ The scripts are usable outside Claude Code:
 scripts/preflight.sh --tier low
 RUN_ID=$(scripts/run-dir.sh new --task "my task")
 scripts/phase.sh --phase DISCOVERY --run "$RUN_ID" --brief .agy/runs/$RUN_ID/phases/DISCOVERY/brief.md --tier low
+scripts/capture-diff.sh --dir .
+scripts/check-diff-integrity.sh --dir .
 ```
 
 ## agy behaviours worth knowing
@@ -269,8 +292,9 @@ around them:
 ## Design stance
 
 The orchestrator gates every dispatch. A worker's `STATUS: PASSED` is a claim,
-not evidence: the orchestrator runs the tests itself and reads the diff before
-advancing. Workers never push, never handle secrets, never publish.
+not evidence: the orchestrator runs the tests itself, checks diff integrity, and
+spot-checks the diff before advancing. Workers never push, never handle secrets,
+never publish.
 
 Nor does anything else here. **No script and no worker in this repository runs
 `git push`, creates a tag, or merges** — the release phase inspects, prepares and
@@ -292,7 +316,7 @@ Runs all suites in sorted order and exits non-zero if any fails. Pass suite
 paths to run a subset, or `--quiet` to report only failures and the summary:
 
 ```
-scripts/run-tests.sh tests/manifest.sh tests/doc-links.sh
+scripts/run-tests.sh tests/manifest.sh tests/doc-links.sh tests/check-diff-integrity.sh
 ```
 
 CI runs the full suite on macOS (bash 3.2) and Ubuntu (bash 5). Each suite
