@@ -225,5 +225,33 @@ fi
 CLI_BAD_CMD="$(/bin/bash "$RUN_DIR_SCRIPT" bogus --dir "$R_CLI" 2>/dev/null)"; CODE=$?
 check cli-bad-cmd-rc "$CODE" 2 "CLI unknown command exits 2"
 
+# --- 14. worktree field readability and unknown key refusal -----------------
+
+R_WT_META="$(new_repo worktree-meta)"
+ID_WT_META="$(run_dir_new --dir "$R_WT_META" --task "worktree metadata test")"
+DIR_WT_META="$R_WT_META/.agy/runs/$ID_WT_META"
+
+# Initially worktree is absent from metadata
+WT_INITIAL="$(run_dir_get "$DIR_WT_META" "worktree" 2>/dev/null)"; CODE=$?
+check get-worktree-absent-rc "$CODE" 1 "run_dir_get worktree exits 1 when absent"
+check get-worktree-absent-out "$WT_INITIAL" "" "run_dir_get worktree is empty when absent"
+
+# When worktree is recorded in metadata
+WT_SAMPLE_PATH="$R_WT_META/.agy/worktrees/$ID_WT_META"
+FLAT_TMP="$DIR_WT_META/.flat.test.$$"
+_run_json_to_flat "$DIR_WT_META/run.json" "$FLAT_TMP"
+printf 'worktree=%s\n' "$WT_SAMPLE_PATH" >> "$FLAT_TMP"
+_run_json_serialize "$FLAT_TMP" "$DIR_WT_META/run.json"
+rm -f "$FLAT_TMP"
+
+WT_READ="$(run_dir_get "$DIR_WT_META" "worktree")"; CODE=$?
+check get-worktree-present-rc "$CODE" 0 "run_dir_get worktree exits 0 when present"
+check get-worktree-present-val "$WT_READ" "$WT_SAMPLE_PATH" "run_dir_get worktree returns recorded path"
+
+# Unknown / unrecognized key is refused (exits 1)
+UNKNOWN_OUT="$(run_dir_get "$DIR_WT_META" "nonexistent_key" 2>/dev/null)"; CODE=$?
+check get-unknown-key-rc "$CODE" 1 "run_dir_get unknown key exits 1"
+check get-unknown-key-out "$UNKNOWN_OUT" "" "run_dir_get unknown key produces no output"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
