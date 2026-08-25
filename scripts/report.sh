@@ -193,6 +193,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   r_verify_ran="$(_extract_bool verify_ran "$trimmed_top")"
   r_verify_rc="$(_extract_num verify_rc "$trimmed_top")"
   r_refunded="$(_extract_num retries_refunded "$trimmed_top")"
+  r_issue="$(_extract_num issue "$trimmed_top")"
 
   has_usage=0
   case "$trimmed" in
@@ -236,7 +237,7 @@ while IFS= read -r line || [ -n "$line" ]; do
 
   _tsv_write_row \
     "$r_run" "$r_phase" "$r_attempt" "$r_status" "$r_elapsed" "$r_verdict" "$r_verify_ran" "$r_started" \
-    "$r_inp" "$r_out" "$r_thk" "$r_tot" "${r_refunded:-0}" "$has_usage" >> "$VALID_TSV"
+    "$r_inp" "$r_out" "$r_thk" "$r_tot" "${r_refunded:-0}" "$has_usage" "$r_issue" >> "$VALID_TSV"
 done < "$LEDGER_FILE"
 
 TOTAL_VALID="$(grep -c . "$VALID_TSV" 2>/dev/null || true)"
@@ -261,8 +262,8 @@ for ph in $PHASES; do
   P_TOTAL="$(printf '%s\n' "$P_LINES" | grep -c . || true)"
   P_TOTAL="${P_TOTAL:-0}"
   P_PASS=0
-  while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts; do
-    _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts
+  while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss; do
+    _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss
     case "$r_st" in
       PASSED*|DONE*|READY*|PREPARED*|OK*) P_PASS=$((P_PASS + 1)) ;;
     esac
@@ -283,8 +284,8 @@ ROUND_2=0
 ROUND_3_PLUS=0
 CAP_REACHED=0
 
-while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u; do
-  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u
+while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss; do
+  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss
   case "$r_st" in
     RETRY_CAP_REACHED*) CAP_REACHED=$((CAP_REACHED + 1)) ;;
   esac
@@ -346,8 +347,8 @@ if [ -n "$PRICE_IN" ] || [ -n "$PRICE_OUT" ]; then
   P_OUT_MICRO="$(_parse_price_to_micro "${PRICE_OUT:-0}")"
 fi
 
-while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u; do
-  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u
+while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss; do
+  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss
   r_has_u="${r_has_u:-0}"
   [ "$r_has_u" -eq 1 ] || continue
 
@@ -383,8 +384,8 @@ if [ "$MEASURED_COUNT" -eq 0 ]; then
 else
   for ph in $PHASES; do
     P_INP=0; P_OUT=0; P_THK=0; P_TOT=0
-    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u; do
-      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u
+    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss; do
+      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss
       [ "$r_ph" = "$ph" ] || continue
       r_has_u="${r_has_u:-0}"
       [ "$r_has_u" -eq 1 ] || continue
@@ -451,8 +452,8 @@ else
     TOTAL_RUNS=$((TOTAL_RUNS + 1))
     R_PASS=0
     R_TOK=0
-    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u; do
-      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u
+    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss; do
+      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss
       [ "$r_run" = "$r" ] || continue
       r_has_u="${r_has_u:-0}"
       [ "$r_has_u" -eq 1 ] && R_TOK=$((R_TOK + r_tot))
@@ -492,8 +493,8 @@ echo ""
 VERIFY_OVERRIDES=0
 NO_STATUS_COUNT=0
 
-while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u; do
-  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u
+while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss; do
+  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss
   case "$r_st" in
     VERIFY_FAILED*) VERIFY_OVERRIDES=$((VERIFY_OVERRIDES + 1)) ;;
   esac

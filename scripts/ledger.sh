@@ -220,10 +220,12 @@ ledger_append() {
   local retries_spent_val="" retries_refunded_val="" task_val="" task_id_val=""
   local diff_val="" review_val=""
   local usage_val="" num_turns_val="" agy_status_val=""
+  local issue_val=""
 
   local has_elapsed=0 has_worker_rc=0 has_verdict=0 has_verify_rc=0
   local has_diff=0 has_review=0 has_attempt=0 has_retries_spent=0 has_retries_refunded=0
   local has_verify_ran=0 has_usage=0 has_num_turns=0 has_agy_status=0
+  local has_issue=0
 
   for pair in "$@"; do
     case "$pair" in
@@ -264,6 +266,11 @@ ledger_append() {
       usage) usage_val="$v"; has_usage=1 ;;
       num_turns) num_turns_val="$v"; has_num_turns=1 ;;
       agy_status) agy_status_val="$v"; has_agy_status=1 ;;
+      issue) issue_val="$v"; has_issue=1 ;;
+      *)
+        echo "ledger: unknown key '$k'" >&2
+        return 2 2>/dev/null || exit 2
+        ;;
     esac
   done
 
@@ -288,6 +295,9 @@ ledger_append() {
   local fields=()
 
   [ -n "$run_val" ] && fields[${#fields[@]}]="\"run\":\"$(_run_dir_escape "$run_val")\""
+  if [ $has_issue -eq 1 ] && [ -n "$issue_val" ]; then
+    fields[${#fields[@]}]="\"issue\":$issue_val"
+  fi
   [ -n "$phase_val" ] && fields[${#fields[@]}]="\"phase\":\"$(_run_dir_escape "$phase_val")\""
   if [ $has_attempt -eq 1 ]; then
     fields[${#fields[@]}]="\"attempt\":${attempt_val:-1}"
