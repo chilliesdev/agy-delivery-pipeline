@@ -398,6 +398,8 @@ BEGIN {
     
     hunk_assert_rem = ""
     hunk_exact_assert = 0
+    in_bash_case = 0
+    bash_case_reported = 0
 }
 
 function finish_file() {
@@ -556,6 +558,8 @@ function check_weakened_comparison(sline, lang, rem_line) {
 /^@@ / {
     hunk_assert_rem = ""
     hunk_exact_assert = 0
+    in_bash_case = 0
+    bash_case_reported = 0
     next
 }
 
@@ -573,6 +577,8 @@ function check_weakened_comparison(sline, lang, rem_line) {
     file_funcs_removed = 0
     hunk_assert_rem = ""
     hunk_exact_assert = 0
+    in_bash_case = 0
+    bash_case_reported = 0
     
     p = $3
     sub(/^a\//, "", p)
@@ -694,6 +700,39 @@ function check_weakened_comparison(sline, lang, rem_line) {
         
         if (triv_found != "") {
             print "WEAKENED:trivial_assertion: " triv_found " in " curr_file
+        } else if (curr_lang == "bash") {
+            if (sline ~ /^case[[:space:]]+.+[[:space:]]+in([[:space:]]|$)/) {
+                is_single_line = (sline ~ /(^|[[:space:]]|;)esac([[:space:]]|;|$)/)
+                has_glob = (sline ~ /\*.*\*\)/)
+                if (hunk_exact_assert && hunk_assert_rem != "" && has_glob) {
+                    weak_comp = "substring glob match replacing exact check"
+                    print "WEAKENED:comparison_weakened: " weak_comp " in " curr_file
+                    bash_case_reported = 1
+                }
+                if (is_single_line) {
+                    in_bash_case = 0
+                    bash_case_reported = 0
+                } else {
+                    in_bash_case = 1
+                }
+            } else if (in_bash_case) {
+                if (sline ~ /\*.*\*\)/) {
+                    if (hunk_exact_assert && hunk_assert_rem != "" && !bash_case_reported) {
+                        weak_comp = "substring glob match replacing exact check"
+                        print "WEAKENED:comparison_weakened: " weak_comp " in " curr_file
+                        bash_case_reported = 1
+                    }
+                }
+                if (sline ~ /(^|[[:space:]]|;)esac([[:space:]]|;|$)/) {
+                    in_bash_case = 0
+                    bash_case_reported = 0
+                }
+            } else if (hunk_exact_assert && hunk_assert_rem != "") {
+                weak_comp = check_weakened_comparison(sline, curr_lang, hunk_assert_rem)
+                if (weak_comp != "") {
+                    print "WEAKENED:comparison_weakened: " weak_comp " in " curr_file
+                }
+            }
         } else if (hunk_exact_assert && hunk_assert_rem != "") {
             weak_comp = check_weakened_comparison(sline, curr_lang, hunk_assert_rem)
             if (weak_comp != "") {
@@ -722,7 +761,7 @@ function check_weakened_comparison(sline, lang, rem_line) {
         
         if (is_assert) {
             file_asserts_added++
-            if (hunk_assert_rem != "" && hunk_assert_rem != line && triv_found == "" && weak_comp == "") {
+            if (hunk_assert_rem != "" && hunk_assert_rem != line && triv_found == "" && weak_comp == "" && !in_bash_case && line !~ /^[[:space:]]*case[[:space:]]+/) {
                 print "POTENTIAL_LITERAL_EDIT:" curr_file
             }
         }

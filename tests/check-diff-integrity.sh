@@ -611,8 +611,8 @@ check js-contain-rc "$CODE" 3 "exit 3 on expect().toBe() replaced by expect().to
 case "$(word_of "$OUT")" in DIFF_TESTS_WEAKENED*) ok js-contain-status "reported DIFF_TESTS_WEAKENED" ;;
   *) bad js-contain-status "unexpected status: $OUT" ;; esac
 
-# --- 24. Bash check exact match replaced by substring glob -> DIFF_TESTS_WEAKENED (exit 3)
-R="$(new_case bash-glob-match)"
+# --- 24. Bash check exact match replaced by single-line case glob -> DIFF_TESTS_WEAKENED (exit 3)
+R="$(new_case bash-glob-single-line)"
 set_brief "$R" <<'EOF'
 Update scripts/cli.sh and tests/cli.sh
 EOF
@@ -621,13 +621,123 @@ diff --git a/tests/cli.sh b/tests/cli.sh
 --- a/tests/cli.sh
 +++ b/tests/cli.sh
 @@ -10,2 +10,2 @@
--check cli-out "$OUT" "exact CLI response output" "cli outputs exact match"
-+case "$OUT" in *"response output"*) ok cli-out "cli outputs match" ;; esac
+-check legacy-scoped "$NOTE" "exact message" "exact check"
++case "$NOTE" in *"SKILL.md"*) bad legacy-scoped ;; *) ok legacy-scoped ;; esac
 EOF
 run "$R"
-check bash-glob-rc "$CODE" 3 "exit 3 on bash check replaced by substring glob"
-case "$(word_of "$OUT")" in DIFF_TESTS_WEAKENED*) ok bash-glob-status "reported DIFF_TESTS_WEAKENED" ;;
-  *) bad bash-glob-status "unexpected status: $OUT" ;; esac
+check bash-glob-single-rc "$CODE" 3 "exit 3 on single-line case glob replacing exact check"
+case "$(word_of "$OUT")" in DIFF_TESTS_WEAKENED*) ok bash-glob-single-status "reported DIFF_TESTS_WEAKENED" ;;
+  *) bad bash-glob-single-status "unexpected status: $OUT" ;; esac
+SINGLE_STATUS="$(word_of "$OUT")"
+SINGLE_CODE="$CODE"
+
+# --- 25. Bash check exact match replaced by multi-line case glob -> DIFF_TESTS_WEAKENED (exit 3)
+R="$(new_case bash-glob-multi-line)"
+set_brief "$R" <<'EOF'
+Update scripts/cli.sh and tests/cli.sh
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/tests/cli.sh b/tests/cli.sh
+--- a/tests/cli.sh
++++ b/tests/cli.sh
+@@ -10,2 +10,4 @@
+-check legacy-scoped "$NOTE" "exact message" "exact check"
++case "$NOTE" in
++  *"SKILL.md"*) bad legacy-scoped "leaked" ;;
++  *) ok legacy-scoped "fine" ;;
++esac
+EOF
+run "$R"
+check bash-glob-multi-rc "$CODE" 3 "exit 3 on multi-line case glob replacing exact check"
+case "$(word_of "$OUT")" in DIFF_TESTS_WEAKENED*) ok bash-glob-multi-status "reported DIFF_TESTS_WEAKENED" ;;
+  *) bad bash-glob-multi-status "unexpected status: $OUT" ;; esac
+check bash-glob-status-match "$(word_of "$OUT")" "$SINGLE_STATUS" "single-line and multi-line produce identical status"
+check bash-glob-code-match "$CODE" "$SINGLE_CODE" "single-line and multi-line produce identical exit code"
+
+# --- 26. Case statement added where nothing was removed -> DIFF_CLEAN (exit 0)
+R="$(new_case bash-case-added-clean)"
+set_brief "$R" <<'EOF'
+Update scripts/cli.sh and tests/cli.sh
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/tests/cli.sh b/tests/cli.sh
+--- a/tests/cli.sh
++++ b/tests/cli.sh
+@@ -10,0 +11,4 @@
++case "$NOTE" in
++  *"SKILL.md"*) bad legacy-scoped "leaked" ;;
++  *) ok legacy-scoped "fine" ;;
++esac
+EOF
+run "$R"
+check bash-case-added-rc "$CODE" 0 "exit 0 on added case statement where nothing removed"
+case "$(word_of "$OUT")" in DIFF_CLEAN) ok bash-case-added-status "reported DIFF_CLEAN" ;;
+  *) bad bash-case-added-status "unexpected status: $OUT" ;; esac
+
+# --- 27. Case statement in a non-test file -> DIFF_CLEAN (exit 0)
+R="$(new_case bash-case-non-test)"
+set_brief "$R" <<'EOF'
+Update scripts/cli.sh and tests/cli.sh
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/scripts/cli.sh b/scripts/cli.sh
+--- a/scripts/cli.sh
++++ b/scripts/cli.sh
+@@ -10,2 +10,4 @@
+-if [ "$1" = "exact" ]; then
++case "$1" in
++  *"SKILL.md"*) echo "matched" ;;
++  *) echo "other" ;;
++esac
+EOF
+run "$R"
+check bash-case-nontest-rc "$CODE" 0 "exit 0 on case statement in non-test file"
+case "$(word_of "$OUT")" in DIFF_CLEAN) ok bash-case-nontest-status "reported DIFF_CLEAN" ;;
+  *) bad bash-case-nontest-status "unexpected status: $OUT" ;; esac
+
+# --- 28. Existing case statement merely reindented -> DIFF_CLEAN (exit 0)
+R="$(new_case bash-case-reindented)"
+set_brief "$R" <<'EOF'
+Update scripts/cli.sh and tests/cli.sh
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/tests/cli.sh b/tests/cli.sh
+--- a/tests/cli.sh
++++ b/tests/cli.sh
+@@ -10,4 +10,4 @@
+ case "$NOTE" in
+-  *"SKILL.md"*) bad legacy-scoped "leaked" ;;
+-  *) ok legacy-scoped "fine" ;;
++    *"SKILL.md"*) bad legacy-scoped "leaked" ;;
++    *) ok legacy-scoped "fine" ;;
+ esac
+EOF
+run "$R"
+check bash-case-reindent-rc "$CODE" 0 "exit 0 on reindented case statement arms"
+case "$(word_of "$OUT")" in DIFF_CLEAN) ok bash-case-reindent-status "reported DIFF_CLEAN" ;;
+  *) bad bash-case-reindent-status "unexpected status: $OUT" ;; esac
+
+# --- 29. Multi-line case statement followed by trailing lines in hunk -> stops at esac
+R="$(new_case bash-case-trailing)"
+set_brief "$R" <<'EOF'
+Update scripts/cli.sh and tests/cli.sh
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/tests/cli.sh b/tests/cli.sh
+--- a/tests/cli.sh
++++ b/tests/cli.sh
+@@ -10,2 +10,6 @@
+-check cli-out "$OUT" "exact CLI response output" "cli outputs exact match"
++case "$OUT" in
++  *"response output"*) ok cli-out "cli outputs match" ;;
++  *) bad cli-out "no match" ;;
++esac
++echo "unrelated * line"
+EOF
+run "$R"
+check bash-case-trailing-rc "$CODE" 3 "exit 3 on multiline case statement with trailing lines"
+case "$(word_of "$OUT")" in DIFF_TESTS_WEAKENED*) ok bash-case-trailing-status "reported DIFF_TESTS_WEAKENED" ;;
+  *) bad bash-case-trailing-status "unexpected status: $OUT" ;; esac
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
