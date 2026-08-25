@@ -67,7 +67,7 @@ R="$(run_dir_resolve --dir "$DIR" --run "$RUN_TARGET")" || exit $?
 if [ "$FROM" -gt 0 ]; then
   TASK="$(run_dir_get "$R" "task" 2>/dev/null || true)"
   if [ -z "$TASK" ]; then
-    echo "STATUS: RANGE_REFUSED(from=$FROM) | Note: run has no recorded task"
+    echo "STATUS: RANGE_REFUSED(from=$FROM) | Note: run has no recorded task | Next: pass --task '<task>' to record the task, or start the range at 0"
     exit 1
   fi
 fi
@@ -139,7 +139,7 @@ for ART in $NEED; do
 done
 
 if [ -n "$MISSING" ]; then
-  echo "STATUS: RANGE_REFUSED(from=$FROM) | Note: the starting phase reads artifacts that no phase in this range produces"
+  echo "STATUS: RANGE_REFUSED(from=$FROM) | Note: the starting phase reads artifacts that no phase in this range produces | Next: run the earlier phases, or start the range at 0"
   for ART in $MISSING; do
     echo "  missing: $ART — written by $(producer "$ART")"
   done

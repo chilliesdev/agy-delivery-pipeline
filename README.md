@@ -226,6 +226,87 @@ can be supplied to `scripts/report.sh` via `--price-in` and `--price-out` (USD
 per million tokens) for a derived dollar figure; without them, the report says
 nothing about money.
 
+## The progress channel
+
+The rule *"you get back exactly one line — read it, not the log"* is correct
+and unchanged. But that rule is about the **orchestrator's context**, and it had
+been applied to the **user's terminal** as though they were the same thing.
+
+They are not. stdout is still exactly one STATUS line, for every outcome, and
+that is what the orchestrator reads. **stderr is a second channel, for the
+human**, and nothing on it ever enters the orchestrator's context. That
+separation is what makes the whole feature safe: a human reading a heartbeat
+knows the dispatch is alive without relaxing the one-line contract for the
+orchestrator.
+
+### Heartbeat and liveness
+
+During long-running dispatches, `scripts/phase.sh` streams diagnostic progress to
+stderr:
+
+- **The heartbeat:** Every 30 seconds on stderr, `scripts/phase.sh` emits
+  elapsed wall-clock time, phase, tier, model, and the most recently touched
+  file when visible:
+  ```
+  phase.sh: [30s] Phase: IMPLEMENT | Tier: medium | Model: gemini-3.7-flash-medium | File: src/app.ts
+  ```
+  `AGY_HEARTBEAT_INTERVAL` tunes the interval in seconds. `AGY_NO_PROGRESS=1` or
+  the `--quiet` (`-q`) flag silences progress output completely.
+- **The liveness warning:** If nothing has been written to the worker log for
+  `AGY_LIVENESS_INTERVAL` (default 5 minutes / `300s`, accepting suffixes like
+  `10m`), `scripts/phase.sh` warns on stderr:
+  ```
+  phase.sh: no output for 5m — the worker may be hung; the timeout is at 30m
+  ```
+  The liveness warning is distinct from the dispatch timeout and **does not
+  abort**. A hung worker and a thinking worker look identical from outside, and
+  the difference is thirty minutes of someone's afternoon. This repo has a
+  documented incident of an `agy models` listing sitting for ten minutes while
+  three immediate re-runs answered in three seconds. The warning alerts the
+  human operator without killing active reasoning prematurely.
+
+### Log tail on failure
+
+When a worker exits non-zero (`WORKER_FAILED`), `scripts/phase.sh` surfaces the
+last 20 lines of the worker transcript on stderr before emitting the single
+STATUS line on stdout. The commonest real cause of `WORKER_FAILED` is a denied
+permission aborting the headless run, which announces itself in those final
+lines — surfacing them directly on stderr means nobody has to open a log file
+and scroll to find the cause.
+
+### Second-terminal view
+
+`scripts/watch-run.sh` provides a live second-terminal view of any run:
+
+```
+scripts/watch-run.sh [--dir <repo>] [--run <id|current|last>] [--once]
+```
+
+It prints the run ID, repository directory, task description, and phase status
+table, then tails the active phase log (`tail -f`, or a one-shot snapshot with
+`--once`). This is only possible because state is run-scoped: there is a stable
+directory path under `.agy/runs/<run-id>/` to point at.
+
+## Refusal guidance: the Next field
+
+Every refusal status line now carries a trailing `| Next: …` sentence stating
+directly what to do about it — `RETRY_CAP_REACHED`, `NO_STATUS_REPORTED`,
+`VERIFY_FAILED`, `DIFF_EMPTY`, `BRIEF_INVALID`, `SECRETS_FOUND`,
+`BUDGET_EXCEEDED`, `DIFF_TESTS_WEAKENED`, `REVIEW_THIN`, `REVIEW_ABSENT`,
+`RELEASE_BLOCKED`, `RANGE_REFUSED`, `TEST_COMMAND_NOT_RUNNABLE`,
+`TEST_COMMAND_TIMEOUT`, and `PREFLIGHT_FAILED`.
+
+All of that guidance already existed in reference tables in the skills, and
+none of it was where the person actually was when looking at a refusal in the
+terminal or status file. `scripts/preflight.sh` was the exception and showed the
+pattern working — on exit 4 it prints the model IDs the account does have, right
+there in the message.
+
+A test suite enforces it: the `Next:` check is table-driven over the refusal
+statuses in `tests/progress.sh`, so a **new refusal shipped without guidance
+fails the build**. That test prevents refusal advice from decaying back into an
+unread table.
+
 ## Configuration
 
 Model selection, tier mappings, and phase fallbacks are configured in

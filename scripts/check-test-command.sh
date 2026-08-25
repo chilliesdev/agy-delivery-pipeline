@@ -205,7 +205,7 @@ matched() { tail -n +3 "$LOG" 2>/dev/null | head -n "$SCAN" | grep -a -E -i -q -
 ran_anything() { tail -n +3 "$LOG" 2>/dev/null | grep -a -E -i -q -- "$RAN_EVIDENCE"; }
 
 if [ "$TIMED_OUT" -eq 1 ]; then
-  LINE="STATUS: TEST_COMMAND_TIMEOUT(${LIMIT}s) | Command: $COMMAND | Note: it never returned — a test command wired to a watch mode is the usual cause; correct it to the one-shot form | Log: $LOG"
+  LINE="STATUS: TEST_COMMAND_TIMEOUT(${LIMIT}s) | Command: $COMMAND | Note: it never returned — a test command wired to a watch mode is the usual cause; correct it to the one-shot form | Next: correct the test command to a one-shot (non-watch) form in TEST_COMMAND | Log: $LOG"
   CODE=5
 elif [ "$RC" -eq 0 ]; then
   LINE="STATUS: TEST_COMMAND_OK | Command: $COMMAND | Elapsed: ${ELAPSED}s | Log: $LOG"
@@ -215,16 +215,16 @@ elif [ "$RC" -eq 127 ] || [ "$RC" -eq 126 ]; then
     127) WHY="the shell could not find it" ;;
     126) WHY="found but not executable" ;;
   esac
-  LINE="STATUS: TEST_COMMAND_NOT_RUNNABLE(rc=$RC) | Command: $COMMAND | Reason: $WHY — nothing ran, so this is the command, not the tests | Log: $LOG"
+  LINE="STATUS: TEST_COMMAND_NOT_RUNNABLE(rc=$RC) | Command: $COMMAND | Reason: $WHY — nothing ran, so this is the command, not the tests | Next: correct the test command in TEST_COMMAND before building Phase 1 brief | Log: $LOG"
   CODE=3
 elif ran_anything; then
   LINE="STATUS: TEST_COMMAND_FAILED(rc=$RC) | Command: $COMMAND | Tests: the runner ran and reported results — the command is right and the suite is red | Log: $LOG"
   CODE=4
 elif matched "$REJECT_MARKER"; then
-  LINE="STATUS: TEST_COMMAND_NOT_RUNNABLE(rc=$RC) | Command: $COMMAND | Reason: the runner refused the command before any test ran — see the first lines of the log | Log: $LOG"
+  LINE="STATUS: TEST_COMMAND_NOT_RUNNABLE(rc=$RC) | Command: $COMMAND | Reason: the runner refused the command before any test ran — see the first lines of the log | Next: correct the test command in TEST_COMMAND before building Phase 1 brief | Log: $LOG"
   CODE=3
 else
-  LINE="STATUS: TEST_COMMAND_FAILED(rc=$RC) | Command: $COMMAND | Tests: no runner output recognised, so read the log — probably a red suite, but nothing proves the command itself is right | Log: $LOG"
+  LINE="STATUS: TEST_COMMAND_FAILED(rc=$RC) | Command: $COMMAND | Tests: no runner output recognised, so read the log — probably a red suite, but nothing proves the command itself is right | Next: read the log to verify if the suite is red or the command is wrong | Log: $LOG"
   CODE=4
 fi
 

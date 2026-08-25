@@ -138,7 +138,7 @@ trap 'rm -f "$GIT_ERR"' EXIT INT TERM
 git_ro() { git -C "$ROOT" ${NOLOCK:+$NOLOCK} "$@" 2>"$GIT_ERR"; }
 
 fail() {
-  printf '%s\n' "STATUS: RELEASE_FAILED | Reason: ${1:-git refused} | Dir: $ROOT"
+  printf '%s\n' "STATUS: RELEASE_FAILED | Reason: ${1:-git refused} | Next: check git repository permissions and status | Dir: $ROOT"
   exit 4
 }
 
@@ -386,7 +386,7 @@ BRANCH_FIELD="${BRANCH:-detached}"
 [ "$ON_RELEASE_BRANCH" = yes ] && BRANCH_FIELD="$BRANCH (already the release branch — no merge step)"
 
 if [ -n "$BLOCKED" ]; then
-  printf '%s\n' "STATUS: $STATUS | Branch: $BRANCH_FIELD | Note: $BLOCK_NOTE | Facts: $FACTS"
+  printf '%s\n' "STATUS: $STATUS | Branch: $BRANCH_FIELD | Note: $BLOCK_NOTE | Next: resolve the blocking git condition named here, or pass --allow-dirty if uncommitted changes are intended | Facts: $FACTS"
   exit 3
 fi
 

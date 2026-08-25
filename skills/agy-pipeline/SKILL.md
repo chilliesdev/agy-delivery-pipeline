@@ -108,6 +108,10 @@ Prints one status line, logs to `.agy/runs/<run-id>/phases/<PHASE>/log`:
 STATUS: DONE | Phase: IMPLEMENT | Run: 2026-08-24T09-51-03Z-a4f1 | Log: /path/to/.agy/runs/2026-08-24T09-51-03Z-a4f1/phases/IMPLEMENT/log
 ```
 
+Read it, not the log. Progress heartbeats, liveness warnings, and failure log
+tails stream to stderr for the user's terminal — the orchestrator reads only
+the single stdout line and must not read the progress channel or log tails.
+
 Underneath sits the worker driver ([drivers/agy.sh](../../drivers/agy.sh)), with
 [agy-run.sh](../../scripts/agy-run.sh) retained as a compatibility shim. Every
 phase runs through a driver; `agy` is the only one today, and the gates do not
@@ -160,8 +164,9 @@ echoing the secret value. Pass `--no-secret-scan` to bypass. Covered by
 [tests/check-secrets.sh](../../tests/check-secrets.sh).
 
 `phase.sh` is covered by [tests/phase-status.sh](../../tests/phase-status.sh),
-[tests/phase-dispatch.sh](../../tests/phase-dispatch.sh) and
-[tests/phase-verify.sh](../../tests/phase-verify.sh) — run all three after touching it.
+[tests/phase-dispatch.sh](../../tests/phase-dispatch.sh),
+[tests/phase-verify.sh](../../tests/phase-verify.sh) and
+[tests/progress.sh](../../tests/progress.sh) — run them all after touching it.
 The Phase 2 helpers have their own suites,
 [tests/capture-diff.sh](../../tests/capture-diff.sh),
 [tests/check-diff-integrity.sh](../../tests/check-diff-integrity.sh) and

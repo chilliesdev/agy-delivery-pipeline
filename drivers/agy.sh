@@ -91,8 +91,9 @@ driver_run() {
   local start
   start=$(date +%s)
   local raw_output
-  raw_output="$( ( cd "$dir" && "${cmd[@]}" </dev/null ) 2>&1 )"
+  ( cd "$dir" && "${cmd[@]}" </dev/null 2>&1 | cat > "$log"; exit "${PIPESTATUS[0]}" )
   local rc=$?
+  raw_output="$(cat "$log" 2>/dev/null || true)"
 
   rm -f "$result_json"
 
