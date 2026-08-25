@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Say whether the Phase 2 review showed its work, or only its shape.
 #
-#   check-review.sh [--dir <repo>] [--file <path>] [--diff <path>]
-#                   [--min-anchors <n>] [--trivial <n>]
+#   check-review.sh [--dir <repo>] [--run <id|current|last>] [--file <path>]
+#                   [--diff <path>] [--min-anchors <n>] [--trivial <n>]
 #
-# Reads:   <repo>/.tmp/REVIEW_FEEDBACK.md   what the reviewer wrote
-#          <repo>/.tmp/REVIEW_DIFF.patch    what it was given to review
+# Reads:   <run-dir>/REVIEW_FEEDBACK.md   what the reviewer wrote
+#          <run-dir>/REVIEW_DIFF.patch    what it was given to review
 # Writes:  nothing.
 # Prints:  the STATUS line only — stdout belongs to it alone, as everywhere else.
 #
@@ -16,7 +16,7 @@
 #     4  REVIEW_ABSENT      there is no review, or the file is empty
 #
 # The failure this exists for. A Phase 2 run came back
-# `STATUS: PASSED | File: .tmp/REVIEW_FEEDBACK.md | Verify: ok` — both mechanical
+# `STATUS: PASSED | File: REVIEW_FEEDBACK.md | Verify: ok` — both mechanical
 # gates green — over an artifact that was the criteria document's output shape
 # with nothing in it: four zero counts and "No violations found." twice. No file,
 # no line, no snippet, no observation. Every gate the pipeline had was structural
@@ -50,14 +50,19 @@
 # that name-drops `cli.py` without having read it counts the same as one that
 # quotes it. This raises the floor on an *empty* review; it cannot detect a
 # thorough-looking wrong one. That job is still the orchestrator's, and the diff
-# is now on disk at .tmp/REVIEW_DIFF.patch for it to read.
+# is now on disk at <run-dir>/REVIEW_DIFF.patch for it to read.
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/run-dir.sh"
+
 DIR="$PWD"; FEEDBACK=""; PATCH=""; MIN_ANCHORS="1"; TRIVIAL="10"
+RUN_TARGET="current"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir)         DIR="$2";         shift 2 ;;
+    --run)         RUN_TARGET="$2";  shift 2 ;;
     --file)        FEEDBACK="$2";    shift 2 ;;
     --diff)        PATCH="$2";       shift 2 ;;
     --min-anchors) MIN_ANCHORS="$2"; shift 2 ;;
@@ -75,8 +80,12 @@ done
 
 [ -d "$DIR" ] || { echo "check-review: dir not found: $DIR" >&2; exit 2; }
 DIR="$(cd "$DIR" && pwd)"
-FEEDBACK="${FEEDBACK:-$DIR/.tmp/REVIEW_FEEDBACK.md}"
-PATCH="${PATCH:-$DIR/.tmp/REVIEW_DIFF.patch}"
+
+if [ -z "$FEEDBACK" ] || [ -z "$PATCH" ]; then
+  R="$(run_dir_resolve --dir "$DIR" --run "$RUN_TARGET")" || exit $?
+  FEEDBACK="${FEEDBACK:-$R/REVIEW_FEEDBACK.md}"
+  PATCH="${PATCH:-$R/REVIEW_DIFF.patch}"
+fi
 
 # Absent is its own answer, and a louder one than thin: a phase that claimed
 # PASSED without leaving an artifact has not been reviewed at all.

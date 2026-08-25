@@ -13,7 +13,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PHASE_SH="$HERE/../scripts/phase.sh"
+RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$PHASE_SH" ] || { echo "phase-verify: phase.sh not found next door" >&2; exit 2; }
+[ -f "$RUN_DIR_SH" ] || { echo "phase-verify: run-dir.sh not found next door" >&2; exit 2; }
+
+. "$RUN_DIR_SH"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/phase-verify.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
@@ -33,8 +37,14 @@ if [ "${1:-}" = "models" ]; then
   exit "${STUB_MODELS_RC:-0}"
 fi
 [ -n "${STUB_RAN:-}" ] && printf 'ran\n' >> "$STUB_RAN"
-mkdir -p .tmp
-printf '%s\n' "${STUB_VERDICT:-STATUS: PASSED | File: .tmp/CHANGES.md}" > ".tmp/$STUB_PHASE.verdict"
+if [ -f .agy/current ]; then
+  CUR_RUN="$(cat .agy/current 2>/dev/null || true)"
+  if [ -n "$CUR_RUN" ]; then
+    mkdir -p ".agy/runs/$CUR_RUN/phases/$STUB_PHASE"
+    printf '%s\n' "${STUB_VERDICT:-STATUS: PASSED | File: CHANGES.md}" > ".agy/runs/$CUR_RUN/phases/$STUB_PHASE/verdict"
+  fi
+fi
+printf '%s\n' "${STUB_VERDICT:-STATUS: PASSED | File: CHANGES.md}"
 exit "${STUB_RC:-0}"
 STUB_EOF
 chmod +x "$STUB"
@@ -50,6 +60,12 @@ new_repo() {
   ( cd "$R" && git init -q . )
   printf 'do the thing\n' > "$R/brief.md"
   printf '%s' "$R"
+}
+
+pdir() {
+  local repo="$1"
+  local id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
+  [ -n "$id" ] && printf '%s/.agy/runs/%s/phases/TEST' "$repo" "$id"
 }
 
 # run <repo> [args...] — one phase.sh dispatch; STATUS line into $OUT, code into
@@ -99,7 +115,7 @@ STUB_RC=4 run "$R" --verify 'exit 9'
 case "$(head_of "$OUT")" in WORKER_FAILED*)
     ok verify-skipped "worker failure wins over the check" ;;
   *) bad verify-skipped "unexpected verdict: $OUT" ;; esac
-[ -f "$R/.tmp/logs/TEST.verify.log" ] \
+[ -f "$(pdir "$R")/verify.log" ] \
   && bad verify-skipped-log "the check ran anyway" \
   || ok verify-skipped-log "the check did not run"
 
@@ -109,7 +125,7 @@ run "$R" --verify 'echo noise; echo more noise >&2; true'
 check verify-stdout-lines "$(printf '%s\n' "$OUT" | grep -c .)" 1 "stdout is one line"
 case "$OUT" in *noise*) bad verify-stdout-clean "check output leaked to stdout" ;;
   *) ok verify-stdout-clean "check output stayed out of stdout" ;; esac
-case "$(cat "$R/.tmp/logs/TEST.verify.log" 2>/dev/null)" in *noise*more\ noise*)
+case "$(cat "$(pdir "$R")/verify.log" 2>/dev/null)" in *noise*more\ noise*)
     ok verify-log "both streams landed in the verify log" ;;
   *) bad verify-log "verify log missing output" ;; esac
 
@@ -123,13 +139,13 @@ check verify-shell "$CODE" 0 "runs in \$DIR through a shell"
 
 # 7. a failing round accumulates, and the third dispatch is refused.
 R="$(new_repo retry-cap)"; RAN="$R/ran.txt"
-export STUB_VERDICT='STATUS: FAILED | File: .tmp/REVIEW_FEEDBACK.md'
+export STUB_VERDICT='STATUS: FAILED | File: REVIEW_FEEDBACK.md'
 STUB_RAN="$RAN" run "$R"
-check retry-1 "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "0" "first dispatch spends no retry"
+check retry-1 "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "0" "first dispatch spends no retry"
 STUB_RAN="$RAN" run "$R"
-check retry-2 "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "1" "second dispatch is retry 1"
+check retry-2 "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "1" "second dispatch is retry 1"
 STUB_RAN="$RAN" run "$R"
-check retry-3 "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "2" "third dispatch is retry 2"
+check retry-3 "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "2" "third dispatch is retry 2"
 BEFORE="$(grep -c . "$RAN" 2>/dev/null)"
 STUB_RAN="$RAN" run "$R"
 check retry-cap-rc "$CODE" 6 "exit 6 at the cap"
@@ -137,14 +153,14 @@ case "$(head_of "$OUT")" in RETRY_CAP_REACHED*)
     ok retry-cap-status "the cap is reported as its own verdict" ;;
   *) bad retry-cap-status "unexpected verdict: $OUT" ;; esac
 check retry-cap-nodispatch "$(grep -c . "$RAN" 2>/dev/null)" "$BEFORE" "no worker ran at the cap"
-[ -f "$R/.tmp/TEST.verdict" ] \
+[ -f "$(pdir "$R")/verdict" ] \
   && ok retry-cap-keeps "the last verdict survives the refusal" \
   || bad retry-cap-keeps "the refusal cleared the previous verdict"
 
 # 8. --reset-retries starts a fresh cycle.
 STUB_RAN="$RAN" run "$R" --reset-retries
 check reset-rc "$CODE" 0 "exit 0 after a reset"
-check reset-count "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "0" "the counter starts over"
+check reset-count "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "0" "the counter starts over"
 
 # 9. the cap is configurable. It counts retries, not dispatches, so --retry-cap 1
 # allows the opening round and one retry, then refuses.
@@ -160,22 +176,24 @@ unset STUB_VERDICT
 # 10. a clean round ends the cycle by itself.
 R="$(new_repo retry-clean)"
 STUB_VERDICT='STATUS: FAILED | File: x' run "$R"
-check clean-before "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "0" "the failing round counted"
+check clean-before "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "0" "the failing round counted"
 run "$R"
-[ -f "$R/.tmp/TEST.retries" ] \
+[ -f "$(pdir "$R")/retries" ] \
   && bad clean-after "a PASSED round left the counter behind" \
   || ok clean-after "a PASSED round cleared the counter"
 
 # 11. a failing check keeps the cycle open even when the worker claimed PASSED.
 R="$(new_repo retry-verify)"
 run "$R" --verify 'false'
-[ -f "$R/.tmp/TEST.retries" ] \
+[ -f "$(pdir "$R")/retries" ] \
   && ok verify-keeps-count "a failed check is not a clean round" \
   || bad verify-keeps-count "the counter was cleared despite a failing check"
 
 # 12. a junk counter degrades to zero rather than aborting the dispatch.
 R="$(new_repo retry-junk)"
-mkdir -p "$R/.tmp"; printf 'not a number\n' > "$R/.tmp/TEST.retries"
+RUN_ID_JUNK="$(run_dir_new --dir "$R" --task "retry-junk")"
+mkdir -p "$R/.agy/runs/$RUN_ID_JUNK/phases/TEST"
+printf 'not a number\n' > "$R/.agy/runs/$RUN_ID_JUNK/phases/TEST/retries"
 run "$R"
 check retry-junk "$CODE" 0 "a corrupt counter reads as zero"
 
@@ -190,7 +208,7 @@ case "$(head_of "$OUT")" in WORKER_FAILED*) ok refund-verdict "the round is WORK
   *) bad refund-verdict "unexpected verdict: $OUT" ;; esac
 check refund-dispatched "$(grep -c . "$RAN" 2>/dev/null)" "1" \
   "the worker really was dispatched, so the counter really was spent"
-[ -f "$R/.tmp/TEST.retries" ] \
+[ -f "$(pdir "$R")/retries" ] \
   && bad refund-opening "a dead worker left the opening round on the counter" \
   || ok refund-opening "an opening round the worker died in leaves no counter"
 
@@ -198,12 +216,12 @@ check refund-dispatched "$(grep -c . "$RAN" 2>/dev/null)" "1" \
 R="$(new_repo retry-refund-restores)"
 STUB_VERDICT='STATUS: FAILED | File: x' run "$R"
 STUB_VERDICT='STATUS: FAILED | File: x' run "$R"
-check refund-before "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "1" "two failing rounds, one retry spent"
+check refund-before "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "1" "two failing rounds, one retry spent"
 STUB_RC=4 run "$R"
-check refund-restores "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "1" \
+check refund-restores "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "1" \
   "the dead round is given back, the earlier retry is not"
 STUB_VERDICT='STATUS: FAILED | File: x' run "$R"
-check refund-resumes "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "2" \
+check refund-resumes "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "2" \
   "the next real round picks the count up where it was"
 
 # 14. a round preflight refuses spends nothing — it never dispatched at all.
@@ -212,7 +230,7 @@ STUB_MODELS_RC=1 run "$R"
 check preflight-rc "$CODE" 3 "phase.sh exits with preflight's own code"
 case "$(head_of "$OUT")" in PREFLIGHT_FAILED*) ok preflight-verdict "reported as PREFLIGHT_FAILED" ;;
   *) bad preflight-verdict "unexpected verdict: $OUT" ;; esac
-[ -f "$R/.tmp/TEST.retries" ] \
+[ -f "$(pdir "$R")/retries" ] \
   && bad preflight-no-spend "a refused preflight wrote the counter" \
   || ok preflight-no-spend "a refused preflight spends no retry"
 
@@ -220,7 +238,7 @@ case "$(head_of "$OUT")" in PREFLIGHT_FAILED*) ok preflight-verdict "reported as
 R="$(new_repo retry-preflight-after)"
 STUB_VERDICT='STATUS: FAILED | File: x' run "$R"
 STUB_MODELS_RC=1 run "$R"
-check preflight-keeps "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "0" \
+check preflight-keeps "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "0" \
   "the earlier round's count is left exactly as it was"
 
 # 14c. a preflight that hangs is the same class, under its own reason — the
@@ -231,7 +249,7 @@ check preflight-timeout-rc "$CODE" 7 "exit 7 when preflight times out"
 case "$OUT" in *"PREFLIGHT_FAILED(timeout)"*)
     ok preflight-timeout-reason "the hang is named as its own reason" ;;
   *) bad preflight-timeout-reason "unexpected line: $OUT" ;; esac
-[ -f "$R/.tmp/TEST.retries" ] \
+[ -f "$(pdir "$R")/retries" ] \
   && bad preflight-timeout-spend "a timed-out preflight spent a retry" \
   || ok preflight-timeout-spend "a timed-out preflight spends no retry"
 
@@ -239,17 +257,17 @@ case "$OUT" in *"PREFLIGHT_FAILED(timeout)"*)
 # whose work did not hold up; an empty verdict is a round left unresolved.
 R="$(new_repo retry-verify-spends)"
 run "$R" --verify 'false'
-check verify-spends "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "0" "a VERIFY_FAILED round is recorded"
+check verify-spends "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "0" "a VERIFY_FAILED round is recorded"
 run "$R" --verify 'false'
-check verify-spends-2 "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "1" "and the next one spends a retry"
+check verify-spends-2 "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "1" "and the next one spends a retry"
 
 R="$(new_repo retry-no-status)"
 STUB_VERDICT=' ' run "$R"
 case "$(head_of "$OUT")" in NO_STATUS_REPORTED*) ok no-status-verdict "the round is NO_STATUS_REPORTED" ;;
   *) bad no-status-verdict "unexpected verdict: $OUT" ;; esac
-check no-status-spends "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "0" "an unresolved round is recorded"
+check no-status-spends "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "0" "an unresolved round is recorded"
 STUB_VERDICT=' ' run "$R"
-check no-status-spends-2 "$(cat "$R/.tmp/TEST.retries" 2>/dev/null)" "1" "and the next one spends a retry"
+check no-status-spends-2 "$(cat "$(pdir "$R")/retries" 2>/dev/null)" "1" "and the next one spends a retry"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

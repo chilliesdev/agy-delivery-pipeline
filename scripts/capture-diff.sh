@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Write the change under review to a file the Phase 2 worker is allowed to read.
 #
-#   capture-diff.sh [--dir <repo>] [--base <ref>] [--into <dir>]
-#                   [--max-lines <n>] [--name <stem>]
+#   capture-diff.sh [--dir <repo>] [--run <id|current|last>] [--base <ref>]
+#                   [--into <dir>] [--max-lines <n>] [--name <stem>]
 #
-# Writes:  <repo>/.tmp/REVIEW_DIFF.patch  the unified diff — the review subject
-#          <repo>/.tmp/REVIEW_DIFF.stat   the per-file summary, never truncated
+# Writes:  <run-dir>/REVIEW_DIFF.patch  the unified diff — the review subject
+#          <run-dir>/REVIEW_DIFF.stat   the per-file summary, never truncated
 # Prints:  the STATUS line only — stdout belongs to it alone, as everywhere else.
 #
 # Exit codes, one per outcome:
@@ -47,20 +47,25 @@
 # tree the user is about to inspect. So the intent-to-add goes into a *copy* of
 # the index under $TMPDIR, pointed at by GIT_INDEX_FILE; the repository's own
 # index is never opened for writing, and `git status` reads the same before and
-# after. Anything git ignores stays out, and so does the directory these two
-# files are written to — excluded by pathspec rather than left to .gitignore, so
-# a second run never finds its own first run sitting in the change.
+# after. Anything git ignores stays out, and so does the .agy/ tree (or an
+# explicit --into directory) — excluded by pathspec rather than left to .gitignore,
+# so run N never finds run N-1's output sitting in the change.
 #
 # --into moves the pair elsewhere; the caller then owns keeping it inside
 # --add-dir, and a brief citing a path outside it is the bug this whole design
 # exists to prevent. --name changes the stem for both files.
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/run-dir.sh"
+
 DIR="$PWD"; BASE=""; INTO=""; MAX_LINES="4000"; NAME="REVIEW_DIFF"
+RUN_TARGET="current"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir)       DIR="$2";       shift 2 ;;
+    --run)       RUN_TARGET="$2"; shift 2 ;;
     --base)      BASE="$2";      shift 2 ;;
     --into)      INTO="$2";      shift 2 ;;
     --max-lines) MAX_LINES="$2"; shift 2 ;;
@@ -112,7 +117,12 @@ else
   fi
 fi
 
-OUT_DIR="${INTO:-$ROOT/.tmp}"
+if [ -n "$INTO" ]; then
+  OUT_DIR="$INTO"
+else
+  OUT_DIR="$(run_dir_resolve --dir "$ROOT" --run "$RUN_TARGET")" || exit $?
+fi
+
 mkdir -p "$OUT_DIR" 2>/dev/null \
   || { echo "capture-diff: could not create $OUT_DIR" >&2; exit 2; }
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
@@ -135,11 +145,18 @@ elif [ -n "$REAL_IDX" ] && [ -f "$REAL_IDX" ]; then
 fi
 
 # The output directory is excluded by pathspec, not left to .gitignore. In the
-# pipeline phase.sh has already ignored .tmp/, but this script also runs on its
+# pipeline phase.sh has already ignored .agy/, but this script also runs on its
 # own, and a patch whose second run contains its own first run is the kind of
 # thing a reviewer reports findings about.
+#
+# When OUT_DIR is inside .agy/, exclude the whole .agy/ tree rather than just the
+# current run directory: with run-scoped state, run N must exclude run N-1's
+# output as well as its own, and an exclusion scoped to the current run
+# silently stops working the second time anyone uses the same repo. An explicit
+# --into pointing elsewhere inside the repo keeps its targeted exclusion.
 SPEC=(. )
 case "$OUT_DIR" in
+  "$ROOT/.agy"|"$ROOT/.agy"/*) SPEC=(. ":(exclude).agy/") ;;
   "$ROOT"/*) SPEC=(. ":(exclude)${OUT_DIR#$ROOT/}") ;;
 esac
 
@@ -206,8 +223,8 @@ fi
   printf '# reviewed. A line removed or a test weakened is visible here and nowhere\n'
   printf '# else. Every finding must trace to a hunk below.\n'
   printf '#\n# New files appear as additions against /dev/null. Anything git ignores is\n'
-  printf '# excluded, as is the directory these two files are written to, so this\n'
-  printf '# patch never contains itself.\n'
+  printf '# excluded, as is the .agy/ tree (or the explicit --into directory), so this\n'
+  printf '# patch never contains previous runs or itself.\n'
   [ -n "$UNTRACKED_NOTE" ] && printf '#\n# WARNING: %s\n' "$UNTRACKED_NOTE"
   if [ "$TRUNCATED" -eq 1 ]; then
     printf '#\n# TRUNCATED: only the first %s of %s patch lines are below. You are\n' "$KEPT" "$BODY_LINES"

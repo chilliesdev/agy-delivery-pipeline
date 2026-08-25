@@ -12,8 +12,12 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE="$HERE/../scripts/resolve-criteria.sh"
+RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 VENDORED="$HERE/../criteria"
 [ -f "$RESOLVE" ] || { echo "resolve-criteria-test: script not found next door" >&2; exit 2; }
+[ -f "$RUN_DIR_SH" ] || { echo "resolve-criteria-test: run-dir.sh not found next door" >&2; exit 2; }
+
+. "$RUN_DIR_SH"
 
 # Normalised through `cd`, because $TMPDIR carries a trailing slash on macOS and
 # the script prints paths that have been through the same normalisation. Without
@@ -26,7 +30,18 @@ ok()  { PASS=$((PASS + 1)); printf '%-32s ok   %s\n' "$1" "$2"; }
 bad() { FAIL=$((FAIL + 1)); printf '%-32s FAIL %s\n' "$1" "$2"; }
 check() { if [ "$2" = "$3" ]; then ok "$1" "$4"; else bad "$1" "$4 (got '$2', want '$3')"; fi; }
 
-new_repo() { R="$ROOT/repos/$1"; mkdir -p "$R"; ( cd "$R" && git init -q . ); printf '%s' "$R"; }
+new_repo() {
+  R="$ROOT/repos/$1"; mkdir -p "$R"
+  ( cd "$R" && git init -q . )
+  run_dir_new --dir "$R" --task "criteria test $1" >/dev/null
+  printf '%s' "$R"
+}
+
+pdir() {
+  local repo="$1"
+  local id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
+  [ -n "$id" ] && printf '%s/.agy/runs/%s' "$repo" "$id"
+}
 
 # run <repo> <args...> — path into $OUT, exit code into $CODE.
 run() { R="$1"; shift; OUT="$(/bin/bash "$RESOLVE" "$@" --dir "$R" 2>/dev/null)"; CODE=$?; }
@@ -38,7 +53,7 @@ run() { R="$1"; shift; OUT="$(/bin/bash "$RESOLVE" "$@" --dir "$R" 2>/dev/null)"
 R="$(new_repo vendored)"
 run "$R" code-review
 check vendored-rc "$CODE" 0 "exit 0 with only the vendored default"
-check vendored-dest "$OUT" "$R/.tmp/criteria/code-review.md" "installed under the repo's .tmp/"
+check vendored-dest "$OUT" "$(pdir "$R")/criteria/code-review.md" "installed under the repo's run criteria"
 [ -f "$OUT" ] && ok vendored-exists "the installed file is really there" \
               || bad vendored-exists "nothing at the printed path"
 if diff -q "$VENDORED/code-review.md" "$OUT" >/dev/null 2>&1; then
@@ -54,7 +69,7 @@ case "$OUT" in "$R"/*) ok vendored-inside "the printed path is inside the repo" 
 
 # 3. qa resolves independently of code-review.
 run "$R" qa
-check qa-dest "$OUT" "$R/.tmp/criteria/qa.md" "qa installs alongside it"
+check qa-dest "$OUT" "$(pdir "$R")/criteria/qa.md" "qa installs alongside it"
 if diff -q "$VENDORED/qa.md" "$OUT" >/dev/null 2>&1; then
   ok qa-content "the qa copy matches its source"
 else
@@ -74,7 +89,7 @@ if grep -q 'only this project says so' "$OUT" 2>/dev/null; then
 else
   bad tier1-wins "the vendored default overrode the project's"
 fi
-check tier1-dest "$OUT" "$R/.tmp/criteria/code-review.md" "copied like any other tier"
+check tier1-dest "$OUT" "$(pdir "$R")/criteria/code-review.md" "copied like any other tier"
 
 # 5. An override for one name does not capture the other.
 run "$R" qa
@@ -100,11 +115,11 @@ fi
 
 # --- refresh --------------------------------------------------------------
 
-# 7. A stale copy is replaced, not reused: it lives in .tmp/ scratch, and a left
+# 7. A stale copy is replaced, not reused: it lives in run criteria, and a left
 #    over copy would review this run's diff against a previous run's bar.
 R="$(new_repo refresh)"
-mkdir -p "$R/.tmp/criteria"
-printf 'STALE\n' > "$R/.tmp/criteria/code-review.md"
+mkdir -p "$(pdir "$R")/criteria"
+printf 'STALE\n' > "$(pdir "$R")/criteria/code-review.md"
 run "$R" code-review
 if grep -q 'STALE' "$OUT" 2>/dev/null; then
   bad refresh "the stale copy survived"
@@ -120,7 +135,7 @@ run "$R" code-review --print-source
 check src-rc "$CODE" 0 "exit 0 with --print-source"
 case "$OUT" in "$R"/*) bad src-path "printed the copy, not the source" ;;
   *) ok src-path "printed the source path outside the repo" ;; esac
-[ -e "$R/.tmp/criteria/code-review.md" ] \
+[ -e "$(pdir "$R")/criteria/code-review.md" ] \
   && bad src-nocopy "--print-source copied anyway" \
   || ok src-nocopy "--print-source copied nothing"
 
@@ -141,7 +156,7 @@ check into-dest "$OUT" "$R/elsewhere/code-review.md" "--into moves the copy"
 R="$(new_repo release-vendored)"
 run "$R" release
 check release-rc "$CODE" 0 "exit 0 with only the vendored default"
-check release-dest "$OUT" "$R/.tmp/criteria/release.md" "release installs under the repo's .tmp/"
+check release-dest "$OUT" "$(pdir "$R")/criteria/release.md" "release installs under the repo's run criteria"
 if diff -q "$VENDORED/release.md" "$OUT" >/dev/null 2>&1; then
   ok release-content "the copy matches the vendored release flow"
 else

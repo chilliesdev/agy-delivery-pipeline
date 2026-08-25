@@ -13,7 +13,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK="$HERE/../scripts/check-test-command.sh"
+RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$CHECK" ] || { echo "check-test-command-test: script not found next door" >&2; exit 2; }
+[ -f "$RUN_DIR_SH" ] || { echo "check-test-command-test: run-dir.sh not found next door" >&2; exit 2; }
+
+. "$RUN_DIR_SH"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/check-test-command.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
@@ -23,8 +27,19 @@ ok()  { PASS=$((PASS + 1)); printf '%-30s ok   %s\n' "$1" "$2"; }
 bad() { FAIL=$((FAIL + 1)); printf '%-30s FAIL %s\n' "$1" "$2"; }
 check() { if [ "$2" = "$3" ]; then ok "$1" "$4"; else bad "$1" "$4 (got '$2', want '$3')"; fi; }
 
-# new_repo <name> — a throwaway directory; echoes its path.
-new_repo() { R="$ROOT/repos/$1"; mkdir -p "$R"; printf '%s' "$R"; }
+# new_repo <name> — a throwaway git directory with run initialized; echoes its path.
+new_repo() {
+  R="$ROOT/repos/$1"; mkdir -p "$R"
+  ( cd "$R" && git init -q . )
+  run_dir_new --dir "$R" --task "test-cmd $1" >/dev/null
+  printf '%s' "$R"
+}
+
+pdir() {
+  local repo="$1"
+  local id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
+  [ -n "$id" ] && printf '%s/.agy/runs/%s' "$repo" "$id"
+}
 
 # run <repo> [args...] — stdout into $OUT, stderr into $ERR, exit code into
 # $CODE. The two streams are kept apart on purpose: the STATUS line owns stdout.
@@ -92,13 +107,12 @@ case "$OUT" in *"no runner output recognised"*)
     ok silent-honest "the uncertainty is stated in the line" ;;
   *) bad silent-honest "the line overclaimed: $OUT" ;; esac
 
-# 6. the command comes from .tmp/TEST_COMMAND, which is the whole point of
+# 6. the command comes from TEST_COMMAND in the run directory, which is the whole point of
 # Phase 0 writing it there.
 R="$(new_repo from-file)"
-mkdir -p "$R/.tmp"
-printf 'echo from-the-file; exit 0\n' > "$R/.tmp/TEST_COMMAND"
+printf 'echo from-the-file; exit 0\n' > "$(pdir "$R")/TEST_COMMAND"
 run "$R"
-check from-file-rc "$CODE" 0 "exit 0 reading the command from .tmp/TEST_COMMAND"
+check from-file-rc "$CODE" 0 "exit 0 reading the command from TEST_COMMAND"
 case "$OUT" in *"Command: echo from-the-file; exit 0"*)
     ok from-file-echo "the line names the command it read" ;;
   *) bad from-file-echo "command not echoed back: $OUT" ;; esac
@@ -106,8 +120,7 @@ case "$OUT" in *"Command: echo from-the-file; exit 0"*)
 # 6b. discovery is a language model, so the file may arrive fenced or in
 # backticks. The command still has to come out clean.
 R="$(new_repo from-file-fenced)"
-mkdir -p "$R/.tmp"
-printf '```\n  `echo fenced; exit 0`  \n```\n' > "$R/.tmp/TEST_COMMAND"
+printf '```\n  `echo fenced; exit 0`  \n```\n' > "$(pdir "$R")/TEST_COMMAND"
 run "$R"
 check fenced-rc "$CODE" 0 "a fenced, backticked command still runs"
 case "$OUT" in *"Command: echo fenced; exit 0"*)
@@ -116,8 +129,7 @@ case "$OUT" in *"Command: echo fenced; exit 0"*)
 
 # 7. --command wins over the file — the orchestrator correcting a wrong guess.
 R="$(new_repo override)"
-mkdir -p "$R/.tmp"
-printf 'definitely-not-a-real-binary-xyz\n' > "$R/.tmp/TEST_COMMAND"
+printf 'definitely-not-a-real-binary-xyz\n' > "$(pdir "$R")/TEST_COMMAND"
 run "$R" --command 'echo corrected; exit 0'
 check override-rc "$CODE" 0 "--command overrides the file"
 case "$OUT" in *"Command: echo corrected; exit 0"*)
@@ -129,12 +141,12 @@ R="$(new_repo no-command)"
 run "$R"
 check no-command-rc "$CODE" 2 "exit 2 with no command anywhere"
 check no-command-stdout "$OUT" "" "nothing on stdout"
-case "$ERR" in *TEST_COMMAND*) ok no-command-msg "the error names .tmp/TEST_COMMAND" ;;
+case "$ERR" in *TEST_COMMAND*) ok no-command-msg "the error names TEST_COMMAND" ;;
   *) bad no-command-msg "unhelpful error: $ERR" ;; esac
 
 # 8b. the file is there but empty — same class, its own message.
 R="$(new_repo empty-file)"
-mkdir -p "$R/.tmp"; : > "$R/.tmp/TEST_COMMAND"
+: > "$(pdir "$R")/TEST_COMMAND"
 run "$R"
 check empty-file-rc "$CODE" 2 "exit 2 when the file holds no command"
 
@@ -149,7 +161,7 @@ run "$R" --command 'cat out.txt; cat err.txt >&2; exit 0'
 check stdout-lines "$(printf '%s\n' "$OUT" | grep -c .)" 1 "stdout is one line"
 case "$OUT" in *leakmarker*) bad stdout-clean "command output leaked to stdout" ;;
   *) ok stdout-clean "command output stayed out of stdout" ;; esac
-case "$(cat "$R/.tmp/logs/TEST_COMMAND.log" 2>/dev/null)" in *leakmarker-out*leakmarker-err*)
+case "$(cat "$(pdir "$R")/TEST_COMMAND.log" 2>/dev/null)" in *leakmarker-out*leakmarker-err*)
     ok log-has-both "both streams landed in the log" ;;
   *) bad log-has-both "the log is missing the command's output" ;; esac
 
