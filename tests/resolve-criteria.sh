@@ -56,7 +56,7 @@ check vendored-rc "$CODE" 0 "exit 0 with only the vendored default"
 check vendored-dest "$OUT" "$(pdir "$R")/criteria/code-review.md" "installed under the repo's run criteria"
 [ -f "$OUT" ] && ok vendored-exists "the installed file is really there" \
               || bad vendored-exists "nothing at the printed path"
-if diff -q "$VENDORED/code-review.md" "$OUT" >/dev/null 2>&1; then
+if diff -q "$VENDORED/code-review/base.md" "$OUT" >/dev/null 2>&1; then
   ok vendored-content "the copy matches the vendored source"
 else
   bad vendored-content "the copy differs from its source"
@@ -107,7 +107,7 @@ fi
 #    developer happens to have installed in ~/.claude/skills.
 R="$(new_repo no-skill-tier)"
 run "$R" code-review
-if diff -q "$VENDORED/code-review.md" "$OUT" >/dev/null 2>&1; then
+if diff -q "$VENDORED/code-review/base.md" "$OUT" >/dev/null 2>&1; then
   ok skill-tier-gone "a user's ~/.claude skill no longer outranks the vendored file"
 else
   bad skill-tier-gone "resolution picked something other than the vendored file"
@@ -222,6 +222,17 @@ run "$R"
 check no-name "$CODE" 2 "exit 2 when no name is given"
 OUT="$(/bin/bash "$RESOLVE" code-review --dir "$ROOT/nope" 2>/dev/null)"; CODE=$?
 check bad-dir "$CODE" 2 "exit 2 on a missing --dir"
+
+# --- single vendored source per criteria ----------------------------------
+
+# Exactly one vendored source per criteria name: prevents standalone copies
+# from reappearing alongside decomposed base files.
+for name in code-review qa release; do
+  count=0
+  [ -s "$VENDORED/$name.md" ] && count=$((count + 1))
+  [ -s "$VENDORED/$name/base.md" ] && count=$((count + 1))
+  check "single-source-$name" "$count" 1 "exactly one vendored source for $name"
+done
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
