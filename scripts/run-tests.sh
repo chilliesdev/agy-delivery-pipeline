@@ -59,7 +59,7 @@ for S in "${SUITES[@]}"; do
     "$ROOT"/*) DISPLAY_NAME="${TARGET#$ROOT/}" ;;
   esac
 
-  OUT="$("$TARGET" 2>&1)"
+  OUT="$(bash "$TARGET" 2>&1)"
   CODE=$?
 
   if [ $CODE -eq 0 ]; then
