@@ -123,10 +123,21 @@ printf -- '--- check-test-command: %s ---\n$ %s\n' "$DIR" "$COMMAND" > "$LOG" 2>
 
 # A hung suite is a real outcome, not a hypothetical: `npm test` wired to a
 # watch mode never returns, and blocking the orchestrator on it forever is worse
-# than any of the failures above. macOS ships no timeout(1) or gtimeout(1), so
-# here is one. `set -m` gives the job its own process group, which is what makes
-# a pipeline killable as a whole rather than leaving `sleep 30 | cat` orphaned;
-# the watchdog TERMs that group, then KILLs it, and marks that it fired.
+# than any of the failures above.
+#
+# The watchdog is hand-rolled here and in preflight.sh rather than using
+# timeout(1). macOS ships no timeout(1) and no gtimeout(1), so a timeout-based
+# path could only ever be the second implementation, never the only one. Two
+# implementations of a timeout means the platform that runs in CI most often
+# is not the platform most users are on, and the less-travelled branch is the
+# one that breaks. This repo has already been bitten by a rarely-taken branch —
+# the release phase's first-version path — and by a workaround that existed
+# only in prose. Furthermore, the hand-rolled watchdog does something timeout(1)
+# does not: `set -m` gives the job its own process group, which is what makes a
+# pipeline killable as a whole rather than leaving `sleep 30 | cat` orphaned.
+# The watchdog TERMs that whole group, then KILLs it, and marks that it fired.
+# The cost is that process-group semantics differ across platforms — which is
+# precisely why it now runs on both in CI on every push.
 MARKER="$R/TEST_COMMAND.timeout"
 rm -f "$MARKER"
 START=$(date +%s)
