@@ -41,6 +41,9 @@ fi
 if [ -n "${STUB_MUTATE_SCRIPT:-}" ] && [ -f "$STUB_MUTATE_SCRIPT" ]; then
   printf '\nthis is a syntax error that would kill bash if executed mid-run: (\n' >> "$STUB_MUTATE_SCRIPT"
 fi
+if [ -n "${STUB_ACTION:-}" ]; then
+  eval "$STUB_ACTION"
+fi
 if [ -f .agy/current ]; then
   CUR_RUN="$(cat .agy/current 2>/dev/null || true)"
   if [ -n "$CUR_RUN" ]; then
@@ -74,7 +77,7 @@ new_repo() {
 # brief validity has its own suite (tests/check-brief.sh).
 run_phase() {
   RP_REPO="$1"; RP_DIR="$2"; shift 2
-  STUB_PHASE=TEST STUB_ARGV="${STUB_ARGV_FILE:-}" AGY_BIN="$STUB" \
+  STUB_PHASE=TEST STUB_ARGV="${STUB_ARGV_FILE:-}" STUB_ACTION="${STUB_ACTION:-}" AGY_BIN="$STUB" \
     "$PHASE_SH" --phase TEST --brief "$RP_REPO/brief.md" --dir "$RP_DIR" --no-brief-lint "$@" 2>/dev/null
 }
 
@@ -685,6 +688,149 @@ case "$OUT_AD2" in
 esac
 
 wait "$PID_AD1" 2>/dev/null || true
+
+# --- diff integrity check integration --------------------------------------
+
+# ae. a worker that weakens an assertion fails the phase with status naming it
+REPO_AE="$(new_repo ae-weakened-fails)"
+mkdir -p "$REPO_AE/tests"
+printf 'def test_calc():\n    assert calculate() == 42\n' > "$REPO_AE/tests/test_calc.py"
+git -C "$REPO_AE" -c user.email=t@t -c user.name=t add tests/test_calc.py
+git -C "$REPO_AE" -c user.email=t@t -c user.name=t commit -q -m "initial tests"
+printf 'Update tests in tests/test_calc.py\n' > "$REPO_AE/brief.md"
+
+OUT_AE="$(STUB_ACTION='printf "def test_calc():\n    assert True\n" > tests/test_calc.py' run_phase "$REPO_AE" "$REPO_AE" 2>/dev/null)"; RC_AE=$?
+check ae-weakened-fails-rc "$RC_AE" 3 "dispatch with weakened assertion fails with exit 3"
+case "$OUT_AE" in
+  *"DIFF_TESTS_WEAKENED"*) ok ae-weakened-status "status line names DIFF_TESTS_WEAKENED" ;;
+  *) bad ae-weakened-status "DIFF_TESTS_WEAKENED missing from status: $OUT_AE" ;;
+esac
+
+# af. a worker that changes nothing surprising passes and line says check ran
+REPO_AF="$(new_repo af-clean-passes)"
+mkdir -p "$REPO_AF/src" "$REPO_AF/tests"
+printf 'def add(a, b):\n    return a + b\n' > "$REPO_AF/src/calc.py"
+printf 'def test_add():\n    assert add(1, 2) == 3\n' > "$REPO_AF/tests/test_calc.py"
+git -C "$REPO_AF" -c user.email=t@t -c user.name=t add .
+git -C "$REPO_AF" -c user.email=t@t -c user.name=t commit -q -m "initial calc"
+printf 'Add multiply in src/calc.py and tests in tests/test_calc.py\n' > "$REPO_AF/brief.md"
+
+OUT_AF="$(STUB_ACTION='printf "def multiply(a, b):\n    return a * b\n" >> src/calc.py; printf "def test_multiply():\n    assert multiply(2, 3) == 6\n" >> tests/test_calc.py' run_phase "$REPO_AF" "$REPO_AF" 2>/dev/null)"; RC_AF=$?
+check af-clean-passes-rc "$RC_AF" 0 "honest dispatch passes with exit 0"
+case "$OUT_AF" in
+  *"Integrity: DIFF_CLEAN"*) ok af-clean-status "status line reports Integrity: DIFF_CLEAN" ;;
+  *) bad af-clean-status "Integrity: DIFF_CLEAN missing from status: $OUT_AF" ;;
+esac
+
+# ag. dirty tree beforehand: attributes only worker's changes, not pre-existing edits
+REPO_AG="$(new_repo ag-dirty-tree-no-creep)"
+mkdir -p "$REPO_AG/src" "$REPO_AG/tests"
+printf 'def add(a, b):\n    return a + b\n' > "$REPO_AG/src/calc.py"
+printf 'def test_add():\n    assert add(1, 2) == 3\n' > "$REPO_AG/tests/test_calc.py"
+printf 'def unrelated():\n    return "unrelated"\n' > "$REPO_AG/src/unrelated.py"
+git -C "$REPO_AG" -c user.email=t@t -c user.name=t add .
+git -C "$REPO_AG" -c user.email=t@t -c user.name=t commit -q -m "initial repo"
+
+# Pre-existing uncommitted edits in unrelated files (not in brief)
+printf 'def extra_unrelated():\n    pass\n' >> "$REPO_AG/src/unrelated.py"
+printf 'notes\n' > "$REPO_AG/untracked_note.txt"
+
+# Brief only mentions src/calc.py and tests/test_calc.py
+printf 'Implement multiply in src/calc.py and test in tests/test_calc.py\n' > "$REPO_AG/brief.md"
+
+OUT_AG="$(STUB_ACTION='printf "def multiply(a, b):\n    return a * b\n" >> src/calc.py; printf "def test_multiply():\n    assert multiply(2, 3) == 6\n" >> tests/test_calc.py' run_phase "$REPO_AG" "$REPO_AG" 2>/dev/null)"; RC_AG=$?
+check ag-dirty-tree-rc "$RC_AG" 0 "dispatch with pre-existing dirty tree exits 0"
+case "$OUT_AG" in
+  *"Integrity: DIFF_CLEAN"*) ok ag-dirty-tree-clean "diff check sees only worker changes (DIFF_CLEAN)" ;;
+  *) bad ag-dirty-tree-clean "status did not report DIFF_CLEAN on dirty tree: $OUT_AG" ;;
+esac
+case "$OUT_AG" in
+  *scope:*|*unrelated.py*) bad ag-dirty-tree-no-creep "pre-existing edits falsely reported as scope creep: $OUT_AG" ;;
+  *) ok ag-dirty-tree-no-creep "pre-existing edits not reported as scope creep" ;;
+esac
+
+# ah. pre-existing edits in a file the worker also edits still yield only worker's part
+REPO_AH="$(new_repo ah-dirty-same-file)"
+mkdir -p "$REPO_AH/src" "$REPO_AH/tests"
+printf '# Module header line 1\n# Module header line 2\ndef add(a, b):\n    return a + b\n' > "$REPO_AH/src/calc.py"
+printf 'def test_add():\n    assert add(1, 2) == 3\n' > "$REPO_AH/tests/test_calc.py"
+git -C "$REPO_AH" -c user.email=t@t -c user.name=t add .
+git -C "$REPO_AH" -c user.email=t@t -c user.name=t commit -q -m "initial calc"
+
+# Pre-existing edit to the top of src/calc.py
+printf '# Module header line 1 EDITED\n# Module header line 2\ndef add(a, b):\n    return a + b\n' > "$REPO_AH/src/calc.py"
+
+printf 'Add sub function in src/calc.py and test in tests/test_calc.py\n' > "$REPO_AH/brief.md"
+
+OUT_AH="$(STUB_ACTION='printf "def sub(a, b):\n    return a - b\n" >> src/calc.py; printf "def test_sub():\n    assert sub(3, 1) == 2\n" >> tests/test_calc.py' run_phase "$REPO_AH" "$REPO_AH" 2>/dev/null)"; RC_AH=$?
+check ah-dirty-same-file-rc "$RC_AH" 0 "dispatch with same-file pre-existing edit exits 0"
+case "$OUT_AH" in
+  *"Integrity: DIFF_CLEAN"*) ok ah-dirty-same-file-clean "status reports Integrity: DIFF_CLEAN" ;;
+  *) bad ah-dirty-same-file-clean "status did not report DIFF_CLEAN: $OUT_AH" ;;
+esac
+
+RUN_ID_AH="$(cat "$REPO_AH/.agy/current")"
+DISPATCH_PATCH_AH="$REPO_AH/.agy/runs/$RUN_ID_AH/phases/TEST/DISPATCH_DIFF.patch"
+if [ -f "$DISPATCH_PATCH_AH" ]; then
+  if grep -q "EDITED" "$DISPATCH_PATCH_AH"; then
+    bad ah-dirty-same-file-patch "pre-existing edit in same file leaked into dispatch patch"
+  else
+    ok ah-dirty-same-file-patch "dispatch patch contains only worker edits to the shared file"
+  fi
+else
+  bad ah-dirty-same-file-patch "dispatch patch not found at $DISPATCH_PATCH_AH"
+fi
+
+# ai. review diff is not disturbed by dispatch diff capture
+REPO_AI="$(new_repo ai-review-diff-untouched)"
+RUN_ID_AI="$(run_dir_new --dir "$REPO_AI" --task "review diff preservation")"
+mkdir -p "$REPO_AI/.agy/runs/$RUN_ID_AI"
+SENTINEL_DIFF="SENTINEL_REVIEW_DIFF_CONTENT_12345"
+printf '%s\n' "$SENTINEL_DIFF" > "$REPO_AI/.agy/runs/$RUN_ID_AI/REVIEW_DIFF.patch"
+
+OUT_AI="$(run_phase "$REPO_AI" "$REPO_AI" --run "$RUN_ID_AI" 2>/dev/null)"; RC_AI=$?
+check ai-review-diff-rc "$RC_AI" 0 "dispatch completes with exit 0"
+check ai-review-diff-preserved "$(cat "$REPO_AI/.agy/runs/$RUN_ID_AI/REVIEW_DIFF.patch" 2>/dev/null)" \
+  "$SENTINEL_DIFF" "REVIEW_DIFF.patch is preserved byte-for-byte and not overwritten"
+
+# aj. opt-out flag (--no-diff-integrity) and env var (AGY_SKIP_DIFF_INTEGRITY) skip check
+REPO_AJ="$(new_repo aj-opt-out)"
+mkdir -p "$REPO_AJ/tests"
+printf 'def test_calc():\n    assert calculate() == 42\n' > "$REPO_AJ/tests/test_calc.py"
+git -C "$REPO_AJ" -c user.email=t@t -c user.name=t add tests/test_calc.py
+git -C "$REPO_AJ" -c user.email=t@t -c user.name=t commit -q -m "initial test"
+printf 'Update tests in tests/test_calc.py\n' > "$REPO_AJ/brief.md"
+
+# 1. With --no-diff-integrity flag
+OUT_AJ1="$(STUB_ACTION='printf "def test_calc():\n    assert True\n" > tests/test_calc.py' run_phase "$REPO_AJ" "$REPO_AJ" --no-diff-integrity 2>/dev/null)"; RC_AJ1=$?
+check aj-opt-out-flag-rc "$RC_AJ1" 0 "--no-diff-integrity skips check and exits 0"
+case "$OUT_AJ1" in
+  *"Integrity: skipped"*) ok aj-opt-out-flag-status "status line explicitly says Integrity: skipped" ;;
+  *) bad aj-opt-out-flag-status "Integrity: skipped missing from status line: $OUT_AJ1" ;;
+esac
+
+# 2. With AGY_SKIP_DIFF_INTEGRITY environment variable
+OUT_AJ2="$(AGY_SKIP_DIFF_INTEGRITY=1 STUB_ACTION='printf "def test_calc():\n    assert True\n" > tests/test_calc.py' run_phase "$REPO_AJ" "$REPO_AJ" 2>/dev/null)"; RC_AJ2=$?
+check aj-opt-out-env-rc "$RC_AJ2" 0 "AGY_SKIP_DIFF_INTEGRITY=1 skips check and exits 0"
+case "$OUT_AJ2" in
+  *"Integrity: skipped"*) ok aj-opt-out-env-status "status line explicitly says Integrity: skipped" ;;
+  *) bad aj-opt-out-env-status "Integrity: skipped missing from status line: $OUT_AJ2" ;;
+esac
+
+# ak. case where check cannot run reports DIFF_UNCHECKED and is not treated as pass
+REPO_AK="$(new_repo ak-diff-unchecked)"
+printf 'Update ruby script in app.rb\n' > "$REPO_AK/brief.md"
+
+OUT_AK="$(STUB_ACTION='printf "def foo; end\n" > app.rb' run_phase "$REPO_AK" "$REPO_AK" 2>/dev/null)"; RC_AK=$?
+check ak-diff-unchecked-rc "$RC_AK" 0 "dispatch on unsupported language exits 0"
+case "$OUT_AK" in
+  *"DIFF_UNCHECKED"*) ok ak-diff-unchecked-status "status line reports DIFF_UNCHECKED" ;;
+  *) bad ak-diff-unchecked-status "DIFF_UNCHECKED missing from status: $OUT_AK" ;;
+esac
+case "$OUT_AK" in
+  *"DIFF_CLEAN"*) bad ak-diff-unchecked-not-pass "DIFF_UNCHECKED must not read as DIFF_CLEAN" ;;
+  *) ok ak-diff-unchecked-not-pass "DIFF_UNCHECKED is not treated as clean pass" ;;
+esac
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
