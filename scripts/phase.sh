@@ -64,6 +64,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 PHASE=""; BRIEF=""; TIER=""; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
+QUIET=0
 DRIVER="${AGY_DRIVER:-}"
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
 SKIP_BRIEF_LINT="${AGY_SKIP_BRIEF_LINT:-}"
@@ -97,6 +98,7 @@ while [ $# -gt 0 ]; do
     --no-brief-lint) SKIP_BRIEF_LINT=1; shift ;;
     --no-secret-scan) SKIP_SECRET_SCAN=1; shift ;;
     --allow-shell) ALLOW_SHELL=1; shift ;;
+    --quiet|-q)    QUIET=1; shift ;;
     -h|--help)     sed -n '2,56p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -356,7 +358,7 @@ fi
 # no cleared verdict, so REVIEW_FEEDBACK.md and the last verdict survive for
 # the orchestrator, which SKILL.md tells to take the work over itself from here.
 if [ "$SPENT" -ge "$RETRY_CAP" ]; then
-  printf '%s\n' "STATUS: RETRY_CAP_REACHED(n=$SPENT, cap=$RETRY_CAP) | Phase: $PHASE | Run: $RUN_ID | Note: the retry budget for this phase is spent — take the work over yourself, or pass --reset-retries to start a fresh cycle | Log: $LOG$GITIGNORE_FIELD" \
+  printf '%s\n' "STATUS: RETRY_CAP_REACHED(n=$SPENT, cap=$RETRY_CAP) | Phase: $PHASE | Run: $RUN_ID | Note: the retry budget for this phase is spent — take the work over yourself, or pass --reset-retries to start a fresh cycle | Next: re-brief with what the last review asked for, or take it over; a third round rarely converges | Log: $LOG$GITIGNORE_FIELD" \
     | tee "$STATUS_FILE"
   TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
   [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
@@ -381,7 +383,7 @@ fi
 if [ -n "$BUDGET_TOKENS" ]; then
   SPENT_TOKENS="$(_ledger_spent_tokens "$DIR" "$RUN_ID")"
   if [ "$SPENT_TOKENS" -ge "$BUDGET_TOKENS" ]; then
-    printf '%s\n' "STATUS: BUDGET_EXCEEDED(spent=$SPENT_TOKENS, budget=$BUDGET_TOKENS) | Phase: $PHASE | Run: $RUN_ID | Note: the token budget for this run is spent — increase --budget-tokens to continue | Log: $LOG$GITIGNORE_FIELD" \
+    printf '%s\n' "STATUS: BUDGET_EXCEEDED(spent=$SPENT_TOKENS, budget=$BUDGET_TOKENS) | Phase: $PHASE | Run: $RUN_ID | Note: the token budget for this run is spent — increase --budget-tokens to continue | Next: increase --budget-tokens to continue, or inspect spend with report.sh | Log: $LOG$GITIGNORE_FIELD" \
       | tee "$STATUS_FILE"
     TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
     [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
@@ -502,7 +504,7 @@ if [ -z "$SKIP_PREFLIGHT" ]; then
       7)   REASON="timeout" ;;
       *)   REASON="rc=$PRC" ;;
     esac
-    printf '%s\n' "STATUS: PREFLIGHT_FAILED($REASON) | Phase: $PHASE | Run: $RUN_ID | Log: $PREFLIGHT_LOG$GITIGNORE_FIELD" \
+    printf '%s\n' "STATUS: PREFLIGHT_FAILED($REASON) | Phase: $PHASE | Run: $RUN_ID | Next: report the cause, do the work yourself | Log: $PREFLIGHT_LOG$GITIGNORE_FIELD" \
       | tee "$STATUS_FILE"
     TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
     [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
@@ -537,11 +539,101 @@ fi
 printf '%s\n' "$NEXT" > "$RETRY_FILE" 2>/dev/null
 
 START_EPOCH=$(date +%s)
+
+MONITOR_PID=""
+if [ -z "${AGY_NO_PROGRESS:-}" ] && [ "$QUIET" -eq 0 ]; then
+  HB_INTERVAL="${AGY_HEARTBEAT_INTERVAL:-30}"
+  LIVENESS_INTERVAL="${AGY_LIVENESS_INTERVAL:-300}"
+  case "$LIVENESS_INTERVAL" in
+    *m) L_SEC="${LIVENESS_INTERVAL%m}"; L_MULT=60 ;;
+    *s) L_SEC="${LIVENESS_INTERVAL%s}"; L_MULT=1 ;;
+    *)  L_SEC="$LIVENESS_INTERVAL";     L_MULT=1 ;;
+  esac
+  case "$L_SEC" in
+    ''|*[!0-9]*) L_LIMIT=300 ;;
+    *) L_LIMIT=$((L_SEC * L_MULT)) ;;
+  esac
+
+  (
+    LAST_LOG_SIZE=0
+    LAST_LOG_CHANGE=$START_EPOCH
+    WARNED_LIVENESS=0
+    NEXT_HB=$((START_EPOCH + HB_INTERVAL))
+
+    while :; do
+      sleep 1
+      NOW=$(date +%s)
+
+      CUR_SIZE=0
+      if [ -f "$LOG" ]; then
+        CUR_SIZE="$(wc -c < "$LOG" 2>/dev/null | tr -cd '0-9')"
+        CUR_SIZE="${CUR_SIZE:-0}"
+      fi
+
+      if [ "$CUR_SIZE" -gt "$LAST_LOG_SIZE" ]; then
+        LAST_LOG_SIZE="$CUR_SIZE"
+        LAST_LOG_CHANGE="$NOW"
+        WARNED_LIVENESS=0
+      fi
+
+      IDLE_TIME=$((NOW - LAST_LOG_CHANGE))
+      if [ "$L_LIMIT" -gt 0 ] && [ "$IDLE_TIME" -ge "$L_LIMIT" ] && [ "$WARNED_LIVENESS" -eq 0 ]; then
+        if [ $((L_LIMIT % 60)) -eq 0 ]; then
+          L_DISP="$((L_LIMIT / 60))m"
+        else
+          L_DISP="${L_LIMIT}s"
+        fi
+        printf 'phase.sh: no output for %s — the worker may be hung; the timeout is at %s\n' "$L_DISP" "$TIMEOUT" >&2
+        WARNED_LIVENESS=1
+      fi
+
+      if [ "$NOW" -ge "$NEXT_HB" ]; then
+        ELAPSED=$((NOW - START_EPOCH))
+        LAST_FILE=""
+        if [ -f "$LOG" ] && [ -s "$LOG" ]; then
+          LAST_FILE="$(tail -n 50 "$LOG" 2>/dev/null | LC_ALL=C sed -n \
+            -e 's/.*"TargetFile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            -e 's/.*TargetFile:[[:space:]]*\([^,[:space:]]*\).*/\1/p' \
+            -e 's/.*"path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            -e 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            -e 's/.*File:[[:space:]]*\([^|[:space:]]*\).*/\1/p' \
+            -e 's/.*file:[[:space:]]*\([^|[:space:]]*\).*/\1/p' | tail -1)"
+          if [ -n "$LAST_FILE" ]; then
+            case "$LAST_FILE" in
+              "$DIR"/*) LAST_FILE="${LAST_FILE#$DIR/}" ;;
+            esac
+          fi
+        fi
+
+        FILE_FIELD=""
+        if [ -n "$LAST_FILE" ]; then
+          FILE_FIELD=" | File: $LAST_FILE"
+        fi
+
+        printf 'phase.sh: [%ds] Phase: %s | Tier: %s | Model: %s%s\n' "$ELAPSED" "$PHASE" "$TIER" "$MODEL" "$FILE_FIELD" >&2
+        NEXT_HB=$((NOW + HB_INTERVAL))
+      fi
+    done
+  ) &
+  MONITOR_PID=$!
+fi
+
 driver_run --brief "$BRIEF" --dir "$DIR" --log "$LOG" \
   --model "$MODEL" --mode "$MODE" --timeout "$TIMEOUT" \
   ${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"} >/dev/null 2>&1
 RC=$?
 ELAPSED_S=$(( $(date +%s) - START_EPOCH ))
+
+if [ -n "$MONITOR_PID" ]; then
+  kill "$MONITOR_PID" 2>/dev/null || true
+  wait "$MONITOR_PID" 2>/dev/null || true
+fi
+
+if [ "$RC" -ne 0 ] && [ "$QUIET" -eq 0 ] && [ -f "$LOG" ] && [ -s "$LOG" ]; then
+  printf -- '--- phase.sh: log tail (%s) ---\n' "$LOG" >&2
+  tail -n 20 "$LOG" >&2
+  printf -- '--- phase.sh: end log tail ---\n' >&2
+fi
 
 RESULT_JSON="$PHASE_DIR/result.json"
 JSON_FALLBACK_FIELD=""
@@ -592,13 +684,13 @@ fi
 # Trust the claim only as a claim — the orchestrator still verifies the artifacts
 # on disk. rc=0 with no claim at all is not a failure and not a pass; say so.
 if [ "$RC" -ne 0 ]; then
-  LINE="STATUS: WORKER_FAILED(rc=$RC) | Phase: $PHASE | Run: $RUN_ID | Log: $LOG"
+  LINE="STATUS: WORKER_FAILED(rc=$RC) | Phase: $PHASE | Run: $RUN_ID | Next: check the brief path and the criteria, then retry once | Log: $LOG"
 elif [ -n "$VERIFY" ] && [ "$VRC" -ne 0 ]; then
-  LINE="STATUS: VERIFY_FAILED(rc=$VRC) | Phase: $PHASE | Run: $RUN_ID | Claimed: ${CLAIM:-none} | Log: $LOG | VerifyLog: $VERIFY_LOG"
+  LINE="STATUS: VERIFY_FAILED(rc=$VRC) | Phase: $PHASE | Run: $RUN_ID | Claimed: ${CLAIM:-none} | Next: read the verify log named on this line, then fix or re-brief once | Log: $LOG | VerifyLog: $VERIFY_LOG"
 elif [ -n "$CLAIM" ]; then
   LINE="$CLAIM | Phase: $PHASE | Run: $RUN_ID | Log: $LOG"
 else
-  LINE="STATUS: NO_STATUS_REPORTED | Phase: $PHASE | Run: $RUN_ID | Note: worker exited 0 without a verdict — the phase may have succeeded anyway; verify the artifact on disk before advancing or retrying | Log: $LOG"
+  LINE="STATUS: NO_STATUS_REPORTED | Phase: $PHASE | Run: $RUN_ID | Note: worker exited 0 without a verdict — the phase may have succeeded anyway; verify the artifact on disk before advancing or retrying | Next: check the diff, it may well have worked; neither pass nor fail | Log: $LOG"
 fi
 # Appended, never spliced: every existing caller matches on the head of this
 # line, so a passing check adds to it and shifts nothing.

@@ -139,7 +139,7 @@ should_discard_path() {
 
 # Check if brief is empty
 if [ ! -s "$BRIEF" ] || [ -z "$(awk 'NF { print "x"; exit }' "$BRIEF" 2>/dev/null)" ]; then
-  printf '%s\n' "STATUS: BRIEF_INVALID(empty_brief) | Phase: $PHASE | Brief: $BRIEF | Note: the brief is empty"
+  printf '%s\n' "STATUS: BRIEF_INVALID(empty_brief) | Phase: $PHASE | Brief: $BRIEF | Note: the brief is empty | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
   exit 3
 fi
 
@@ -180,7 +180,7 @@ while IFS= read -r TP; do
   case "$TP" in
     ""|"~"|"~/"|*\**|*\?*|*\$*|*\<*|*\>*|*…*|*...*) continue ;;
   esac
-  printf '%s\n' "STATUS: BRIEF_INVALID(outside_path:$TP) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief references path outside repository ($TP)"
+  printf '%s\n' "STATUS: BRIEF_INVALID(outside_path:$TP) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief references path outside repository ($TP) | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
   exit 3
 done <<EOF
 $TILDE_PATHS
@@ -196,7 +196,7 @@ while IFS= read -r AP; do
     /dev/null|/dev/null/*) continue ;;
     "$DIR"/*|"$DIR"|"$REAL_DIR"/*|"$REAL_DIR") continue ;;
     *)
-      printf '%s\n' "STATUS: BRIEF_INVALID(outside_path:$AP) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief references absolute path outside repository ($AP)"
+      printf '%s\n' "STATUS: BRIEF_INVALID(outside_path:$AP) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief references absolute path outside repository ($AP) | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
       exit 3
       ;;
   esac
@@ -211,7 +211,7 @@ EOF
 if printf '%s\n' "$BRIEF_TEXT" | grep -a -E '\.tmp/([^[:space:]`"'\''\)]*\.)?verdict|\.tmp/' 2>/dev/null | grep -q 'verdict'; then
   STALE_TMP="$(grep -a -o -E '[^[:space:]`"'\''\(\)]*\.tmp/[^[:space:]`"'\''\)]*' "$BRIEF" 2>/dev/null | head -1)"
   STALE_TMP="$(clean_candidate "${STALE_TMP:-.tmp/$PHASE.verdict}")"
-  printf '%s\n' "STATUS: BRIEF_INVALID(stale_verdict_path:$STALE_TMP) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief names a stale .tmp/ verdict path; verdicts must be written under .agy/runs/<run-id>/phases/$PHASE/verdict"
+  printf '%s\n' "STATUS: BRIEF_INVALID(stale_verdict_path:$STALE_TMP) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief names a stale .tmp/ verdict path; verdicts must be written under .agy/runs/<run-id>/phases/$PHASE/verdict | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
   exit 3
 fi
 
@@ -230,13 +230,13 @@ $PHASE_VERDICTS
 EOF
 
 if [ -n "$WRONG_PHASE" ]; then
-  printf '%s\n' "STATUS: BRIEF_INVALID(wrong_phase_verdict_path:phases/$WRONG_PHASE/verdict) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief names verdict path for phase '$WRONG_PHASE' but phase being dispatched is '$PHASE'"
+  printf '%s\n' "STATUS: BRIEF_INVALID(wrong_phase_verdict_path:phases/$WRONG_PHASE/verdict) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief names verdict path for phase '$WRONG_PHASE' but phase being dispatched is '$PHASE' | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
   exit 3
 fi
 
 # c. Ensure verdict path for current phase is present
 if ! printf '%s\n' "$BRIEF_TEXT" | grep -a -q -E "phases/$PHASE/verdict" 2>/dev/null; then
-  printf '%s\n' "STATUS: BRIEF_INVALID(missing_verdict_path) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief must specify verdict path .agy/runs/<run-id>/phases/$PHASE/verdict"
+  printf '%s\n' "STATUS: BRIEF_INVALID(missing_verdict_path) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief must specify verdict path .agy/runs/<run-id>/phases/$PHASE/verdict | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
   exit 3
 fi
 
@@ -247,7 +247,7 @@ if [ -n "$RUN_ID" ]; then
     [ -n "$NR" ] || continue
     NR="$(clean_candidate "$NR")"
     if [ "$NR" != "$RUN_ID" ]; then
-      printf '%s\n' "STATUS: BRIEF_INVALID(wrong_run_verdict_path:.agy/runs/$NR/phases/$PHASE/verdict) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief names run '$NR' but current run is '$RUN_ID'"
+      printf '%s\n' "STATUS: BRIEF_INVALID(wrong_run_verdict_path:.agy/runs/$NR/phases/$PHASE/verdict) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief names run '$NR' but current run is '$RUN_ID' | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
       exit 3
     fi
   done <<EOF
@@ -266,7 +266,7 @@ elif printf '%s\n' "$BRIEF_TEXT" | grep -a -i -E '(write|save|output|record|put)
 fi
 
 if [ "$HAS_FILE_ROUTE" -eq 0 ]; then
-  printf '%s\n' "STATUS: BRIEF_INVALID(missing_verdict_file_route) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief must instruct worker to write verdict to .agy/runs/<run-id>/phases/$PHASE/verdict"
+  printf '%s\n' "STATUS: BRIEF_INVALID(missing_verdict_file_route) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief must instruct worker to write verdict to .agy/runs/<run-id>/phases/$PHASE/verdict | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
   exit 3
 fi
 
@@ -276,7 +276,7 @@ if printf '%s\n' "$BRIEF_TEXT" | grep -a -i -E '(print|echo)[[:space:]]+(that[[:
 fi
 
 if [ "$HAS_PRINT_ROUTE" -eq 0 ]; then
-  printf '%s\n' "STATUS: BRIEF_INVALID(missing_verdict_print_route) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief must instruct worker to print verdict line to stdout"
+  printf '%s\n' "STATUS: BRIEF_INVALID(missing_verdict_print_route) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief must instruct worker to print verdict line to stdout | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
   exit 3
 fi
 
@@ -293,7 +293,7 @@ else
   fi
 
   if [ "$HAS_SHELL_PROHIBITION" -eq 0 ]; then
-    printf '%s\n' "STATUS: BRIEF_INVALID(missing_shell_prohibition) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief must prohibit shell commands (or pass --allow-shell if driver permits)"
+    printf '%s\n' "STATUS: BRIEF_INVALID(missing_shell_prohibition) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief must prohibit shell commands (or pass --allow-shell if driver permits) | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
     exit 3
   fi
 fi
@@ -307,7 +307,7 @@ if printf '%s\n' "$BRIEF_TEXT" | grep -a -i -E '(do[[:space:]]+not|never|no|must
 fi
 
 if [ "$HAS_GIT_PROHIBITION" -eq 0 ]; then
-  printf '%s\n' "STATUS: BRIEF_INVALID(missing_git_prohibition) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief must prohibit git commits and staging"
+  printf '%s\n' "STATUS: BRIEF_INVALID(missing_git_prohibition) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief must prohibit git commits and staging | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
   exit 3
 fi
 
@@ -542,7 +542,7 @@ EOF
 fi
 
 if [ -n "$MISSING_INPUT" ]; then
-  printf '%s\n' "STATUS: BRIEF_INVALID(missing_input_file:$MISSING_INPUT) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: referenced input file '$MISSING_INPUT' does not exist in repository"
+  printf '%s\n' "STATUS: BRIEF_INVALID(missing_input_file:$MISSING_INPUT) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: referenced input file '$MISSING_INPUT' does not exist in repository | Next: the reason names the rule; fix the brief and re-dispatch, it cost no model call"
   exit 3
 fi
 

@@ -178,7 +178,7 @@ git_d() { ( cd "$ROOT" && GIT_INDEX_FILE="$IDX" git diff "$@" ) 2>"$WORK/err"; }
 git_d --numstat "$BASE" -- ${SPEC[@]+"${SPEC[@]}"} > "$WORK/numstat"
 if [ "$?" -ne 0 ]; then
   WHY="$(head -1 "$WORK/err" 2>/dev/null | tr -d '|')"
-  printf '%s\n' "STATUS: DIFF_FAILED | Base: $BASE_SHOWN | Reason: ${WHY:-git diff failed} | Dir: $ROOT"
+  printf '%s\n' "STATUS: DIFF_FAILED | Base: $BASE_SHOWN | Reason: ${WHY:-git diff failed} | Next: check git repository status and the requested base ref | Dir: $ROOT"
   exit 4
 fi
 
@@ -246,7 +246,7 @@ fi
 } > "$PATCH" 2>/dev/null || { echo "capture-diff: could not write $PATCH" >&2; exit 2; }
 
 if [ "$FILES" -eq 0 ]; then
-  printf '%s\n' "STATUS: DIFF_EMPTY | Base: $BASE_SHOWN | Note: nothing changed against this base — if a phase committed its work, re-capture against the ref it started from (--base HEAD~1) before briefing the reviewer | Patch: $PATCH | Stat: $STAT"
+  printf '%s\n' "STATUS: DIFF_EMPTY | Base: $BASE_SHOWN | Note: nothing changed against this base — if a phase committed its work, re-capture against the ref it started from (--base HEAD~1) before briefing the reviewer | Next: the phase did nothing regardless of what it claimed; check whether the worker committed | Patch: $PATCH | Stat: $STAT"
   exit 3
 fi
 

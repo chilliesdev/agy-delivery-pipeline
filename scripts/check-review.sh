@@ -90,11 +90,11 @@ fi
 # Absent is its own answer, and a louder one than thin: a phase that claimed
 # PASSED without leaving an artifact has not been reviewed at all.
 if [ ! -f "$FEEDBACK" ]; then
-  printf '%s\n' "STATUS: REVIEW_ABSENT | File: $FEEDBACK | Note: the reviewer wrote no artifact at this path — the phase's claim rests on nothing; re-dispatch or take the review yourself"
+  printf '%s\n' "STATUS: REVIEW_ABSENT | File: $FEEDBACK | Note: the reviewer wrote no artifact at this path — the phase's claim rests on nothing; re-dispatch or take the review yourself | Next: re-dispatch the review phase or take the review over yourself"
   exit 4
 fi
 if [ ! -s "$FEEDBACK" ] || [ -z "$(awk 'NF { print "x"; exit }' "$FEEDBACK" 2>/dev/null)" ]; then
-  printf '%s\n' "STATUS: REVIEW_ABSENT | File: $FEEDBACK | Note: the artifact exists but is empty — the phase's claim rests on nothing; re-dispatch or take the review yourself"
+  printf '%s\n' "STATUS: REVIEW_ABSENT | File: $FEEDBACK | Note: the artifact exists but is empty — the phase's claim rests on nothing; re-dispatch or take the review yourself | Next: re-dispatch the review phase or take the review over yourself"
   exit 4
 fi
 
@@ -202,5 +202,5 @@ if [ "$ANCHORS" -ge "$MIN_ANCHORS" ]; then
   exit 0
 fi
 
-printf '%s\n' "STATUS: REVIEW_THIN(anchors=$ANCHORS, min=$MIN_ANCHORS) | Verdict: $VERDICT | Examined: $EXAMINED$DIFF_NOTE | Note: the report cites no line and no file the diff touched, so nothing in it shows the change was opened — this is an unevidenced review, not a failed one; read $FEEDBACK yourself and decide whether to accept it or re-dispatch | File: $FEEDBACK"
+printf '%s\n' "STATUS: REVIEW_THIN(anchors=$ANCHORS, min=$MIN_ANCHORS) | Verdict: $VERDICT | Examined: $EXAMINED$DIFF_NOTE | Note: the report cites no line and no file the diff touched, so nothing in it shows the change was opened — this is an unevidenced review, not a failed one; read $FEEDBACK yourself and decide whether to accept it or re-dispatch | Next: read $FEEDBACK yourself and decide whether to accept it or re-dispatch | File: $FEEDBACK"
 exit 3

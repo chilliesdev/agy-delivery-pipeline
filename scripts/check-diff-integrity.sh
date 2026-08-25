@@ -633,7 +633,7 @@ if [ -n "$WEAKENED_ITEMS" ]; then
     SUSP_LIST="$(printf '%s\n' "$SUSPICIOUS_ITEMS" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')"
     SUSP_NOTE=" | Suspicious: $SUSP_LIST"
   fi
-  printf '%s\n' "STATUS: DIFF_TESTS_WEAKENED($FIRST_WEAK)$LANG_NOTE$SUSP_NOTE | Checks: $CHECKS_INFO | Scope: $SCOPE_STATUS | Files: $TOTAL_FILES ($DIFF_COUNTS) | Patch: $PATCH"
+  printf '%s\n' "STATUS: DIFF_TESTS_WEAKENED($FIRST_WEAK)$LANG_NOTE$SUSP_NOTE | Checks: $CHECKS_INFO | Scope: $SCOPE_STATUS | Files: $TOTAL_FILES ($DIFF_COUNTS) | Next: revert test skips or deletions, or re-brief implementation; tests must not be weakened | Patch: $PATCH"
   exit 3
 fi
 

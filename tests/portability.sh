@@ -191,5 +191,21 @@ else
   ok repo-clean "all $TOTAL_FILES scripts/tests are free of non-portable constructs"
 fi
 
+# --- Syntax check: every file in scripts/, tests/ and drivers/ must pass bash -n ---
+# A script that does not parse cannot be caught by reading it, and this suite
+# is where mechanical facts about the shell live.
+for SCRIPT in "$ROOT"/scripts/*.sh "$ROOT"/tests/*.sh "$ROOT"/drivers/*.sh; do
+  [ -f "$SCRIPT" ] || continue
+  REL_NAME="${SCRIPT#$ROOT/}"
+  SYNTAX_OUT="$(bash -n "$SCRIPT" 2>&1)"
+  SYNTAX_RC=$?
+  if [ "$SYNTAX_RC" -eq 0 ]; then
+    ok "syntax-$REL_NAME" "$REL_NAME passes bash -n"
+  else
+    SYNTAX_MSG="$(printf '%s' "$SYNTAX_OUT" | tr '\n' '; ' | sed 's/; $//')"
+    bad "syntax-$REL_NAME" "syntax error in $REL_NAME: $SYNTAX_MSG"
+  fi
+done
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

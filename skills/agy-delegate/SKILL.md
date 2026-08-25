@@ -162,7 +162,9 @@ You get back exactly one line:
 STATUS: DONE | Phase: DELEGATE | Run: 2026-08-24T09-51-03Z-a4f1 | Log: /path/to/.agy/runs/2026-08-24T09-51-03Z-a4f1/phases/DELEGATE/log | Verify: ok | VerifyLog: /path/to/.agy/runs/2026-08-24T09-51-03Z-a4f1/phases/DELEGATE/verify.log
 ```
 
-Read it, not the log.
+Read it, not the log. Progress heartbeats, liveness warnings, and failure log
+tails stream to stderr for the user's terminal — the orchestrator reads only the
+single stdout line and should not read the progress channel.
 
 | status | means | do |
 |---|---|---|

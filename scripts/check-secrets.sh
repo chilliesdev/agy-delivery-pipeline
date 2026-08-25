@@ -391,7 +391,7 @@ if [ -n "$FOUND_WHAT" ]; then
   case "$REL_FILE" in
     "$DIR"/*) REL_FILE="${REL_FILE#$DIR/}" ;;
   esac
-  printf '%s\n' "STATUS: SECRETS_FOUND($FOUND_WHAT, $REL_FILE:$FOUND_LINE)$PHASE_FIELD$RUN_FIELD | Note: secret pattern '$FOUND_WHAT' detected at $REL_FILE:$FOUND_LINE"
+  printf '%s\n' "STATUS: SECRETS_FOUND($FOUND_WHAT, $REL_FILE:$FOUND_LINE)$PHASE_FIELD$RUN_FIELD | Note: secret pattern '$FOUND_WHAT' detected at $REL_FILE:$FOUND_LINE | Next: remove the credential and rotate it; it is in the file named here"
   exit 3
 fi
 
