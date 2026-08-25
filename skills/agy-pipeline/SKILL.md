@@ -128,6 +128,16 @@ counter refuses a dispatch once a phase has spent its budget. Both report throug
 the same single STATUS line, because that line is all the orchestrator sees.
 Phase 2 covers them in full.
 
+**Brief linting.** Each phase's brief is linted by
+[check-brief.sh](../../scripts/check-brief.sh) before dispatch. A
+`STATUS: BRIEF_INVALID(<reason>)` refusal means the brief violates structure or
+safety rules (stale `.tmp/` path, wrong phase, missing verdict route, or
+missing shell/git prohibition). It is not a worker failure — it is a brief the
+orchestrator must fix and re-dispatch, and it costs zero model calls and zero
+tokens. Start from the shipped templates at `briefs/<PHASE>.md` (such as
+[briefs/IMPLEMENT.md](../../briefs/IMPLEMENT.md)) as the starting shape for each
+phase's brief. Covered by [tests/check-brief.sh](../../tests/check-brief.sh).
+
 `phase.sh` is covered by [tests/phase-status.sh](../../tests/phase-status.sh),
 [tests/phase-dispatch.sh](../../tests/phase-dispatch.sh) and
 [tests/phase-verify.sh](../../tests/phase-verify.sh) — run all three after touching it.

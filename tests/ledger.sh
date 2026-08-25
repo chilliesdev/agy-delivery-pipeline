@@ -69,13 +69,16 @@ new_repo() {
   printf '%s' "$r"
 }
 
+# Dispatch helper for ledger tests: passes --no-brief-lint because this suite
+# tests dispatch mechanics and ledger accounting; the brief is a stub by design,
+# and brief validity has its own suite (tests/check-brief.sh).
 run_phase() {
   local repo="$1"
   shift
   STUB_PHASE="${STUB_PHASE:-TEST}" STUB_VERDICT="${STUB_VERDICT:-}" \
   STUB_OUTPUT="${STUB_OUTPUT:-}" STUB_RAN="${STUB_RAN:-}" STUB_NO_VERDICT_FILE="${STUB_NO_VERDICT_FILE:-}" \
   AGY_BIN="$STUB" \
-    /bin/bash "$PHASE_SH" --phase TEST --brief "$repo/brief.md" --dir "$repo" "$@" 2>/dev/null
+    /bin/bash "$PHASE_SH" --phase TEST --brief "$repo/brief.md" --dir "$repo" --no-brief-lint "$@" 2>/dev/null
 }
 
 # --- 1. single dispatch appends exactly one valid single-line JSON -----------

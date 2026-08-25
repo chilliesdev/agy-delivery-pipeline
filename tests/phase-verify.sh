@@ -70,10 +70,13 @@ pdir() {
 
 # run <repo> [args...] — one phase.sh dispatch; STATUS line into $OUT, code into
 # $CODE. STUB_* come from the caller's environment.
+# Dispatch helper for verify/retry tests: passes --no-brief-lint because this
+# suite tests verify overrides and retry accounting; the brief is a stub by
+# design, and brief validity has its own suite.
 run() {
   R="$1"; shift
   OUT="$(STUB_PHASE=TEST AGY_BIN="$STUB" \
-         /bin/bash "$PHASE_SH" --phase TEST --brief "$R/brief.md" --dir "$R" "$@" 2>/dev/null)"
+         /bin/bash "$PHASE_SH" --phase TEST --brief "$R/brief.md" --dir "$R" --no-brief-lint "$@" 2>/dev/null)"
   CODE=$?
 }
 

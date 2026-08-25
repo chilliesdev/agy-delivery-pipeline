@@ -60,9 +60,11 @@ run_case() {
     printf '%b' "$STALE" > "$REPO/.agy/runs/$RUN_ID/phases/TEST/verdict"
   fi
 
+  # Bypass brief lint: this suite tests verdict parsing and status extraction;
+  # the brief is a stub by design, and brief validity has its own suite.
   OUT="$(STUB_PHASE=TEST STUB_TRANSCRIPT="$TRANSCRIPT" STUB_VERDICT="$VERDICT" \
     STUB_RC="$WANT_RC" AGY_BIN="$STUB" \
-    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" 2>/dev/null)"
+    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint 2>/dev/null)"
 
   printf '%-28s %s\n' "$NAME" "$OUT"
   case "$OUT" in

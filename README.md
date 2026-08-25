@@ -246,6 +246,43 @@ This turns the human diff read into a **spot check rather than the load-bearing
 gate** — catching mechanical shortcuts automatically while leaving semantic
 judgement, invented APIs, and unanalysed languages to the orchestrator.
 
+## Brief linting
+
+`scripts/check-brief.sh` validates brief structure and safety constraints
+before any worker is dispatched. `scripts/phase.sh` runs it automatically on
+every dispatch and refuses an invalid brief before starting `agy`, so a bad
+brief costs zero model calls and zero tokens. Pass `--no-brief-lint` (or set
+`AGY_SKIP_BRIEF_LINT=1`) to bypass.
+
+The brief is the only artifact in the pipeline that nothing validated. Scripts
+are tested, diffs captured and analysed, criteria resolved by a script with its
+own suite, verdicts parsed defensively from two routes with a rule about which
+wins — and briefs were composed freehand and dispatched. Six ways to lose a
+dispatch, every one enforced by the model remembering to type a sentence.
+
+After run-scoped state landed, briefs kept naming the old verdict path,
+`.tmp/<PHASE>.verdict`. agy refused the write as an invalid artifact path,
+declared the run an ERROR, and still exited 0 with the work done and the verdict
+carried only by the printed-line fallback. The authoritative half of the verdict
+contract failed silently, and a text scan costing nothing would have caught it
+before the dispatch. That is #44, and `check-brief.sh` now has a fixture for
+exactly it.
+
+Checks performed:
+- **Verdict path:** must point to `.agy/runs/<run-id>/phases/<PHASE>/verdict`
+  (rejects stale `.tmp/` and wrong phase/run paths).
+- **Both verdict routes:** worker must be instructed to write the verdict file
+  and print the final `STATUS:` line to stdout.
+- **Shell prohibition:** brief must prohibit shell execution (unless
+  `--allow-shell` is given or phase runs in full mode).
+- **Git prohibition:** brief must forbid git commits, staging, and branching.
+- **Input paths:** all referenced repo files and criteria files must exist.
+- **No outside paths:** no references to paths outside the repo or user home.
+
+Shipped templates in `briefs/` (`briefs/DISCOVERY.md`, `briefs/IMPLEMENT.md`,
+`briefs/REVIEW.md`, `briefs/QA.md`, `briefs/RELEASE.md`, `briefs/DELEGATE.md`)
+provide the standard, pre-validated starting shape for each phase.
+
 ## Running a phase by hand
 
 The scripts are usable outside Claude Code:
@@ -253,6 +290,7 @@ The scripts are usable outside Claude Code:
 ```
 scripts/preflight.sh --tier low
 RUN_ID=$(scripts/run-dir.sh new --task "my task")
+scripts/check-brief.sh --phase DISCOVERY --brief .agy/runs/$RUN_ID/phases/DISCOVERY/brief.md --dir . --run "$RUN_ID"
 scripts/phase.sh --phase DISCOVERY --run "$RUN_ID" --brief .agy/runs/$RUN_ID/phases/DISCOVERY/brief.md --tier low
 scripts/capture-diff.sh --dir .
 scripts/check-diff-integrity.sh --dir .

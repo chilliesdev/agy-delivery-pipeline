@@ -117,6 +117,11 @@ Then the verdict contract, verbatim in shape:
 Both routes, because they are not redundant: the file is authoritative and is
 read first, and the printed line is the fallback for a worker that ignored it.
 
+Each brief is linted by [check-brief.sh](../../scripts/check-brief.sh) before
+dispatch. A `BRIEF_INVALID(<reason>)` refusal means the brief itself violates
+rules — it is not a worker failure; fix the brief and re-dispatch at zero token
+cost. Start from [briefs/DELEGATE.md](../../briefs/DELEGATE.md).
+
 ## Dispatch
 
 ```
@@ -156,6 +161,7 @@ Read it, not the log.
 |---|---|---|
 | `STATUS: DONE …` | the worker finished and the check held | gate it below |
 | `STATUS: BLOCKED …` | it could not proceed | read the reason, then take the work over yourself |
+| `BRIEF_INVALID(…)` | brief violates contract rules | fix the brief and re-dispatch (zero token cost) |
 | `VERIFY_FAILED(rc=N)` | it claimed success; the tests disagree | read `VerifyLog:`, then fix it yourself or re-brief once |
 | `WORKER_FAILED(rc=N)` | agy died | check the brief path and the criteria, then retry once |
 | `PREFLIGHT_FAILED(…)` | setup broke mid-session | report the cause, do the work yourself |

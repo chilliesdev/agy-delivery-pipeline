@@ -63,10 +63,13 @@ new_repo() {
 }
 
 # run_phase <repo> <dir> [extra phase.sh args...] — dispatch, capture stdout.
+# Passes --no-brief-lint because this suite tests dispatch mechanics (.gitignore
+# guards, sandbox forwarding, isolation); the brief is a stub by design, and
+# brief validity has its own suite (tests/check-brief.sh).
 run_phase() {
   RP_REPO="$1"; RP_DIR="$2"; shift 2
   STUB_PHASE=TEST STUB_ARGV="${STUB_ARGV_FILE:-}" AGY_BIN="$STUB" \
-    "$PHASE_SH" --phase TEST --brief "$RP_REPO/brief.md" --dir "$RP_DIR" "$@" 2>/dev/null
+    "$PHASE_SH" --phase TEST --brief "$RP_REPO/brief.md" --dir "$RP_DIR" --no-brief-lint "$@" 2>/dev/null
 }
 
 # --- .gitignore guard -------------------------------------------------------
@@ -247,6 +250,49 @@ TASK_N="$(run_dir_get "$REPO/.agy/runs/$RUN_ID_N" "task" 2>/dev/null || true)"
 CHECK_SH="$HERE/../scripts/check-phase-range.sh"
 CHECK_RC="$("$CHECK_SH" --dir "$REPO" --from 0 >/dev/null 2>&1; printf '%s' "$?")"
 check n-range-from-0-accepted "$CHECK_RC" 0 "check-phase-range.sh --from 0 accepts run directory created without --task"
+
+# --- brief lint integration -------------------------------------------------
+
+# o. dispatch with invalid brief and no --no-brief-lint is refused before worker invocation
+REPO="$(new_repo o-invalid-brief)"
+STUB_ARGV_FILE="$ROOT/argv-invalid-brief"
+OUT="$(STUB_PHASE=TEST STUB_ARGV="$STUB_ARGV_FILE" AGY_BIN="$STUB" \
+  "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" 2>/dev/null)"; CODE=$?
+check o-invalid-brief-rc "$CODE" 3 "dispatch with invalid brief exits non-zero (3)"
+case "$OUT" in
+  *"STATUS: BRIEF_INVALID"*) ok o-invalid-brief-status "STATUS line reports BRIEF_INVALID" ;;
+  *) bad o-invalid-brief-status "unexpected output on invalid brief: $OUT" ;;
+esac
+check o-invalid-brief-no-worker "$(count "$STUB_ARGV_FILE" '^--add-dir$')" "0" \
+  "worker was never invoked on invalid brief"
+
+# p. dispatch with a valid brief proceeds normally
+REPO="$(new_repo p-valid-brief)"
+RUN_ID_P="$(run_dir_new --dir "$REPO" --task "valid brief dispatch")"
+VALID_BRIEF="$REPO/valid_brief.md"
+cat > "$VALID_BRIEF" <<EOF
+# Phase: TEST
+Do the work.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+- Write nothing outside this repo.
+
+Contract:
+Write verdict to .agy/runs/$RUN_ID_P/phases/TEST/verdict and print that same line as STATUS: DONE | File: CHANGES.md.
+EOF
+
+STUB_ARGV_FILE="$ROOT/argv-valid-brief"
+OUT="$(STUB_PHASE=TEST STUB_ARGV="$STUB_ARGV_FILE" AGY_BIN="$STUB" \
+  "$PHASE_SH" --phase TEST --brief "$VALID_BRIEF" --dir "$REPO" --run "$RUN_ID_P" 2>/dev/null)"; CODE=$?
+check p-valid-brief-rc "$CODE" 0 "dispatch with valid brief exits 0"
+case "$OUT" in
+  *"STATUS: DONE | File: CHANGES.md"*) ok p-valid-brief-status "valid brief dispatch succeeds" ;;
+  *) bad p-valid-brief-status "unexpected output on valid brief: $OUT" ;;
+esac
+check p-valid-brief-worker-invoked "$(count "$STUB_ARGV_FILE" '^--add-dir$')" "1" \
+  "worker was invoked on valid brief"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
