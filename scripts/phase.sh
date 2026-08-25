@@ -6,7 +6,7 @@
 #            [--mode accept-edits|plan|full] [--timeout 30m]
 #            [--sandbox] [--no-preflight] [--no-brief-lint] [--no-secret-scan]
 #            [--allow-shell] [--verify '<command>'] [--retry-cap <n>]
-#            [--budget-tokens <n>] [--max-workers <n>]
+#            [--budget-tokens <n>] [--repo-budget-tokens <n>] [--max-workers <n>]
 #            [--reset-retries] [--ignore-via gitignore|exclude]
 #
 # Reads:   R/phases/<PHASE>/verdict      the verdict the worker wrote itself
@@ -35,6 +35,11 @@
 # exit 7. Budget in tokens, not dollars — do not hardcode a price per token anywhere.
 # Prices change, differ per model and account, and a stale number presented as a cost
 # is worse than no number.
+#
+# --repo-budget-tokens <n> enforces a spend ceiling across all runs: before
+# dispatching, sum total_tokens across every ledger record in the repository. If
+# already at or past the ceiling, phase.sh refuses to dispatch, returning
+# STATUS: REPO_BUDGET_EXCEEDED(spent=N, budget=M), exit 9.
 #
 # --max-workers <n> enforces a concurrency cap on in-flight dispatches for this
 # repository (default 1, matching AGY_MAX_WORKERS). Before dispatching, count
@@ -164,6 +169,7 @@ ALLOW_SHELL="${AGY_ALLOW_SHELL:-}"
 VERIFY=""; RESET_RETRIES=""; IGNORE_VIA="gitignore"
 RETRY_CAP="${AGY_RETRY_CAP:-2}"
 BUDGET_TOKENS="${AGY_BUDGET_TOKENS:-}"
+REPO_BUDGET_TOKENS="${AGY_REPO_BUDGET_TOKENS:-}"
 MAX_WORKERS="${AGY_MAX_WORKERS:-1}"
 RUN_TARGET=""
 TASK=""
@@ -183,6 +189,7 @@ while [ $# -gt 0 ]; do
     --verify)  VERIFY="$2";  shift 2 ;;
     --retry-cap) RETRY_CAP="$2"; shift 2 ;;
     --budget-tokens) BUDGET_TOKENS="$2"; shift 2 ;;
+    --repo-budget-tokens) REPO_BUDGET_TOKENS="$2"; shift 2 ;;
     --max-workers) MAX_WORKERS="$2"; shift 2 ;;
     --reset-retries) RESET_RETRIES=1; shift ;;
     --ignore-via) IGNORE_VIA="$2"; shift 2 ;;
@@ -192,7 +199,7 @@ while [ $# -gt 0 ]; do
     --no-secret-scan) SKIP_SECRET_SCAN=1; shift ;;
     --allow-shell) ALLOW_SHELL=1; shift ;;
     --quiet|-q)    QUIET=1; shift ;;
-    -h|--help)     sed -n '2,63p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,68p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -205,6 +212,14 @@ case "$BUDGET_TOKENS" in
   ""|*[!0-9]*)
     if [ -n "$BUDGET_TOKENS" ]; then
       echo "phase.sh: --budget-tokens wants a whole number, got '$BUDGET_TOKENS'" >&2
+      exit 2
+    fi
+    ;;
+esac
+case "$REPO_BUDGET_TOKENS" in
+  ""|*[!0-9]*)
+    if [ -n "$REPO_BUDGET_TOKENS" ]; then
+      echo "phase.sh: --repo-budget-tokens wants a whole number, got '$REPO_BUDGET_TOKENS'" >&2
       exit 2
     fi
     ;;
@@ -576,13 +591,45 @@ if [ -n "$BUDGET_TOKENS" ]; then
   fi
 fi
 
+# At the repository budget ceiling, refuse before anything is spent — no preflight fetch,
+# no worker, no cleared verdict.
+if [ -n "$REPO_BUDGET_TOKENS" ]; then
+  REPO_SPENT_TOKENS="$(_ledger_repo_spent_tokens "$DIR")"
+  if [ "$REPO_SPENT_TOKENS" -ge "$REPO_BUDGET_TOKENS" ]; then
+    printf '%s\n' "STATUS: REPO_BUDGET_EXCEEDED(spent=$REPO_SPENT_TOKENS, budget=$REPO_BUDGET_TOKENS) | Phase: $PHASE | Run: $RUN_ID | Note: the repository token budget is spent — increase --repo-budget-tokens to continue | Next: increase --repo-budget-tokens to continue, or inspect spend with report.sh | Log: $LOG$GITIGNORE_FIELD" \
+      | tee "$STATUS_FILE"
+    TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
+    [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
+    ledger_append "$DIR" \
+      "run=$RUN_ID" \
+      "phase=$PHASE" \
+      "attempt=$((SPENT + 1))" \
+      "tier=$TIER" \
+      "model=$MODEL" \
+      "backend=$DRIVER" \
+      "started=$STARTED_TS" \
+      "status=REPO_BUDGET_EXCEEDED(spent=$REPO_SPENT_TOKENS, budget=$REPO_BUDGET_TOKENS)" \
+      "retries_spent=$SPENT" \
+      "retries_refunded=0" \
+      "verify_ran=false" \
+      ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
+    exit 9
+  fi
+fi
+
 # At the worker concurrency cap, refuse before anything is spent — no preflight fetch,
 # no worker, no cleared verdict.
 WORKERS_DIR="$DIR/.agy/workers"
 WORKER_RECORD_FILE="$WORKERS_DIR/${RUN_ID}_${PHASE}_$$.rec"
 RUNNING_WORKERS="$(_count_running_workers "$WORKERS_DIR")"
 if [ "$RUNNING_WORKERS" -ge "$MAX_WORKERS" ]; then
-  printf '%s\n' "STATUS: WORKER_CAP_EXCEEDED(running=$RUNNING_WORKERS, cap=$MAX_WORKERS) | Phase: $PHASE | Run: $RUN_ID | Note: $RUNNING_WORKERS dispatches are running and the cap is $MAX_WORKERS — raising the cap is the caller's decision | Next: wait for a running dispatch to finish, or increase --max-workers to continue | Log: $LOG$GITIGNORE_FIELD" \
+  W_NOUN="dispatches"
+  W_VERB="are"
+  if [ "$RUNNING_WORKERS" -eq 1 ]; then
+    W_NOUN="dispatch"
+    W_VERB="is"
+  fi
+  printf '%s\n' "STATUS: WORKER_CAP_EXCEEDED(running=$RUNNING_WORKERS, cap=$MAX_WORKERS) | Phase: $PHASE | Run: $RUN_ID | Note: $RUNNING_WORKERS $W_NOUN $W_VERB running and the cap is $MAX_WORKERS — raising the cap is the caller's decision | Next: wait for a running dispatch to finish, or increase --max-workers to continue | Log: $LOG$GITIGNORE_FIELD" \
     | tee "$STATUS_FILE"
   TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
   [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
@@ -789,7 +836,8 @@ if [ -z "${AGY_NO_PROGRESS:-}" ] && [ "$QUIET" -eq 0 ]; then
         else
           L_DISP="${L_LIMIT}s"
         fi
-        printf 'phase.sh: [%s] no output for %s — the worker may be hung; the timeout is at %s\n' "$RUN_ID" "$L_DISP" "$TIMEOUT" >&2
+        ELAPSED=$((NOW - START_EPOCH))
+        printf 'phase.sh: [%ds] Run: %s | no output for %s — the worker may be hung; the timeout is at %s\n' "$ELAPSED" "$RUN_ID" "$L_DISP" "$TIMEOUT" >&2
         WARNED_LIVENESS=1
       fi
 

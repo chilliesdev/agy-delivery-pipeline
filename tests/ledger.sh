@@ -553,5 +553,73 @@ else
   bad unknown-key-names-key "stderr did not name unrecognised key: $(cat "$ERR17" 2>/dev/null)"
 fi
 
+# --- 20. repository spend ceiling and _ledger_repo_spent_tokens helper ------
+
+R18="$(new_repo repo-budget-ceiling)"
+RAN18="$R18/ran.txt"
+
+# Run 1: spends 16,814 tokens
+STUB_RAN="$RAN18" run_phase "$R18" --task "repo run 1" >/dev/null
+RUN1_ID_18="$(cat "$R18/.agy/current")"
+
+# Run 2: spends another 16,814 tokens (total repo spent = 33,628)
+STUB_RAN="$RAN18" run_phase "$R18" --run new --task "repo run 2" >/dev/null
+RUN2_ID_18="$(cat "$R18/.agy/current")"
+
+REPO_SPENT_18="$(_ledger_repo_spent_tokens "$R18")"
+check repo-spent-tokens-sums "$REPO_SPENT_18" "33628" "_ledger_repo_spent_tokens sums tokens across runs"
+
+RUN1_SPENT_18="$(_ledger_spent_tokens "$R18" "$RUN1_ID_18")"
+check run1-spent-tokens-intact "$RUN1_SPENT_18" "16814" "_ledger_spent_tokens sums tokens for run 1 only"
+
+# 20a. Repository ceiling refuses when per-run budget is nowhere near (or unset)
+OUT18_REPO_EXCEEDED="$(STUB_RAN="$RAN18" run_phase "$R18" --run new --task "repo run 3" --budget-tokens 50000 --repo-budget-tokens 20000)"; RC18_REPO=$?
+check repo-budget-exceeded-rc "$RC18_REPO" 9 "repo budget exceeded exits 9"
+
+case "$OUT18_REPO_EXCEEDED" in
+  *"STATUS: REPO_BUDGET_EXCEEDED(spent=33628, budget=20000)"*)
+    ok repo-budget-exceeded-status "STATUS line reports REPO_BUDGET_EXCEEDED with spent and budget" ;;
+  *) bad repo-budget-exceeded-status "unexpected STATUS line: $OUT18_REPO_EXCEEDED" ;;
+esac
+
+LINE18_REPO="$(tail -1 "$R18/.agy/ledger.jsonl")"
+if printf '%s\n' "$LINE18_REPO" | grep -q '"status":"REPO_BUDGET_EXCEEDED(spent=33628, budget=20000)"'; then
+  ok repo-budget-exceeded-ledger-recorded "REPO_BUDGET_EXCEEDED recorded in ledger"
+else
+  bad repo-budget-exceeded-ledger-recorded "REPO_BUDGET_EXCEEDED missing in ledger: $LINE18_REPO"
+fi
+
+if printf '%s\n' "$LINE18_REPO" | grep -q '"usage"'; then
+  bad repo-budget-exceeded-no-usage "usage key must be absent on repo budget refusal"
+else
+  ok repo-budget-exceeded-no-usage "usage key absent on repo budget refusal"
+fi
+
+# 20b. Per-run ceiling still refuses when repository ceiling is generous
+OUT18_RUN_EXCEEDED="$(STUB_RAN="$RAN18" run_phase "$R18" --run "$RUN1_ID_18" --budget-tokens 10000 --repo-budget-tokens 100000)"; RC18_RUN=$?
+check per-run-ceiling-still-refuses-rc "$RC18_RUN" 7 "per-run budget exceeded exits 7 even when repo budget generous"
+
+case "$OUT18_RUN_EXCEEDED" in
+  *"STATUS: BUDGET_EXCEEDED(spent=16814, budget=10000)"*)
+    ok per-run-ceiling-still-refuses-status "STATUS reports BUDGET_EXCEEDED when per-run exceeded and repo generous" ;;
+  *) bad per-run-ceiling-still-refuses-status "unexpected STATUS line: $OUT18_RUN_EXCEEDED" ;;
+esac
+
+# 20c. Both ceilings absent by default: dispatch proceeds normally
+OUT18_DEFAULT="$(STUB_RAN="$RAN18" run_phase "$R18" --run new --task "repo run 4 default")"; RC18_DEF=$?
+check ceilings-absent-by-default-rc "$RC18_DEF" 0 "dispatch succeeds when both ceilings absent by default"
+case "$OUT18_DEFAULT" in
+  *"STATUS: PASSED"*) ok ceilings-absent-by-default-status "dispatch passes with STATUS: PASSED by default" ;;
+  *) bad ceilings-absent-by-default-status "dispatch failed: $OUT18_DEFAULT" ;;
+esac
+
+# 20d. AGY_REPO_BUDGET_TOKENS environment variable is honoured
+OUT18_ENV="$(AGY_REPO_BUDGET_TOKENS=30000 STUB_RAN="$RAN18" run_phase "$R18" --run new --task "repo run 5 env")"; RC18_ENV=$?
+check repo-budget-env-rc "$RC18_ENV" 9 "AGY_REPO_BUDGET_TOKENS env var triggers exit 9 on refusal"
+case "$OUT18_ENV" in
+  *"STATUS: REPO_BUDGET_EXCEEDED"*) ok repo-budget-env-status "AGY_REPO_BUDGET_TOKENS env var reports REPO_BUDGET_EXCEEDED" ;;
+  *) bad repo-budget-env-status "unexpected STATUS line from env var: $OUT18_ENV" ;;
+esac
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

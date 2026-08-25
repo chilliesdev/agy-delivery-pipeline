@@ -431,8 +431,51 @@ case "$OUT_V2" in
     bad v-default-cap-status "unexpected output on exceeded cap: $OUT_V2"
     ;;
 esac
+case "$OUT_V2" in
+  *"Note: 1 dispatch is running and the cap is 1"*)
+    ok v-default-cap-singular-wording "cap refusal uses singular '1 dispatch is running'"
+    ;;
+  *)
+    bad v-default-cap-singular-wording "expected singular wording in cap note: $OUT_V2"
+    ;;
+esac
 
 wait "$PID_V1" 2>/dev/null || true
+
+# v2. cap refusal with multiple running workers uses plural wording
+REPO_V2="$(new_repo v2-concurrency-plural)"
+RUN_ID_V2_1="$(run_dir_new --dir "$REPO_V2" --task "concurrency plural 1")"
+RUN_ID_V2_2="$(run_dir_new --dir "$REPO_V2" --task "concurrency plural 2")"
+RUN_ID_V2_3="$(run_dir_new --dir "$REPO_V2" --task "concurrency plural 3")"
+
+STUB_SLEEP_SEC=2 run_phase "$REPO_V2" "$REPO_V2" --run "$RUN_ID_V2_1" --max-workers 3 >/dev/null 2>&1 &
+PID_V2_1=$!
+STUB_SLEEP_SEC=2 run_phase "$REPO_V2" "$REPO_V2" --run "$RUN_ID_V2_2" --max-workers 3 >/dev/null 2>&1 &
+PID_V2_2=$!
+
+sleep 0.3
+
+OUT_V2_3="$(run_phase "$REPO_V2" "$REPO_V2" --run "$RUN_ID_V2_3" --max-workers 1 2>/dev/null)"; RC_V2_3=$?
+check v2-plural-cap-rc "$RC_V2_3" 8 "third dispatch with max-workers 1 refused with exit 8"
+case "$OUT_V2_3" in
+  *"STATUS: WORKER_CAP_EXCEEDED(running=2, cap=1)"*)
+    ok v2-plural-cap-status "status line reports WORKER_CAP_EXCEEDED with running=2, cap=1"
+    ;;
+  *)
+    bad v2-plural-cap-status "unexpected output on exceeded cap: $OUT_V2_3"
+    ;;
+esac
+case "$OUT_V2_3" in
+  *"Note: 2 dispatches are running and the cap is 1"*)
+    ok v2-plural-cap-wording "cap refusal uses plural '2 dispatches are running'"
+    ;;
+  *)
+    bad v2-plural-cap-wording "expected plural wording in cap note: $OUT_V2_3"
+    ;;
+esac
+
+wait "$PID_V2_1" 2>/dev/null || true
+wait "$PID_V2_2" 2>/dev/null || true
 
 # w. explicitly raised cap (--max-workers 2) allows concurrent dispatches
 REPO_W="$(new_repo w-concurrency-raised)"
@@ -511,6 +554,37 @@ if grep -q "Run: $RUN_ID_Z" "$STDERR_Z"; then
   ok z-progress-has-run-id "progress lines on stderr carry the run id ($RUN_ID_Z)"
 else
   bad z-progress-has-run-id "progress lines missing run id on stderr: $(cat "$STDERR_Z")"
+fi
+
+if grep -E -q "phase\.sh: \[[0-9]+s\] Run: $RUN_ID_Z \| Phase: TEST" "$STDERR_Z"; then
+  ok z-progress-heartbeat-shape "heartbeat line on stderr matches shape 'phase.sh: [Ns] Run: <id> | Phase: ...'"
+else
+  bad z-progress-heartbeat-shape "heartbeat line format mismatch on stderr: $(cat "$STDERR_Z")"
+fi
+
+# z2. liveness warning line on stderr matches the same leading brackets shape
+REPO_Z2="$(new_repo z2-liveness-shape)"
+RUN_ID_Z2="$(run_dir_new --dir "$REPO_Z2" --task "liveness shape test")"
+STDERR_Z2="$ROOT/stderr-progress-z2"
+VALID_BRIEF_Z2="$REPO_Z2/valid_brief.md"
+cat > "$VALID_BRIEF_Z2" <<EOF
+# Phase: TEST
+Goal: test liveness line shape.
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+- Write nothing outside this repo.
+Contract:
+Write verdict to .agy/runs/$RUN_ID_Z2/phases/TEST/verdict and print that same line as STATUS: DONE | File: CHANGES.md.
+EOF
+
+AGY_HEARTBEAT_INTERVAL=60 AGY_LIVENESS_INTERVAL=1 STUB_SLEEP_SEC=2 AGY_BIN="$STUB" STUB_PHASE=TEST \
+  "$PHASE_SH" --phase TEST --brief "$VALID_BRIEF_Z2" --dir "$REPO_Z2" --run "$RUN_ID_Z2" --no-brief-lint --no-preflight >/dev/null 2>"$STDERR_Z2"
+
+if grep -E -q "phase\.sh: \[[0-9]+s\] Run: $RUN_ID_Z2 \| no output for" "$STDERR_Z2"; then
+  ok z2-liveness-warning-shape "liveness line on stderr matches shape 'phase.sh: [Ns] Run: <id> | no output for ...'"
+else
+  bad z2-liveness-warning-shape "liveness line format mismatch on stderr: $(cat "$STDERR_Z2")"
 fi
 
 # --- worker liveness & identity checks -------------------------------------
