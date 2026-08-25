@@ -499,5 +499,135 @@ case "$(word_of "$OUT")" in DIFF_CLEAN) ok no-paths-status "reported DIFF_CLEAN 
 case "$OUT" in *"Scope: not run"*|*"no paths in brief"*) ok no-paths-scope "scope reported as not run" ;;
   *) bad no-paths-scope "scope not run was not reported: $OUT" ;; esac
 
+# --- 19. Path named only in a prohibition touched -> DIFF_SUSPICIOUS(prohibited: …)
+R="$(new_case scope-prohibited-only)"
+set_brief "$R" <<'EOF'
+Fix resolve-criteria composition. Do not modify tests/resolve-criteria.sh.
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/tests/resolve-criteria.sh b/tests/resolve-criteria.sh
+--- a/tests/resolve-criteria.sh
++++ b/tests/resolve-criteria.sh
+@@ -1,1 +1,2 @@
++# modified
+EOF
+run "$R"
+check scope-prohib-rc "$CODE" 0 "exit 0 on touched prohibited file (suspicious advisory)"
+case "$(word_of "$OUT")" in DIFF_SUSPICIOUS*) ok scope-prohib-status "reported DIFF_SUSPICIOUS" ;;
+  *) bad scope-prohib-status "unexpected status: $OUT" ;; esac
+case "$OUT" in *"prohibited: tests/resolve-criteria.sh"*) ok scope-prohib-finding "named prohibited file in finding" ;;
+  *) bad scope-prohib-finding "prohibited file not cited: $OUT" ;; esac
+case "$OUT" in *"Scope: prohibited (tests/resolve-criteria.sh)"*) ok scope-prohib-scope "scope field reported prohibited" ;;
+  *) bad scope-prohib-scope "scope field not reported as prohibited: $OUT" ;; esac
+
+# --- 20. Path named in ordinary instruction touched while other path prohibited -> DIFF_CLEAN
+R="$(new_case scope-instruction-permitted)"
+set_brief "$R" <<'EOF'
+Update src/calc.py and tests/test_calc.py. Do not modify tests/resolve-criteria.sh.
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/src/calc.py b/src/calc.py
+--- a/src/calc.py
++++ b/src/calc.py
+@@ -1,1 +1,2 @@
++def add(a, b): return a + b
+diff --git a/tests/test_calc.py b/tests/test_calc.py
+--- a/tests/test_calc.py
++++ b/tests/test_calc.py
+@@ -1,1 +1,3 @@
++def test_add():
++    assert add(1, 2) == 3
+EOF
+run "$R"
+check scope-perm-rc "$CODE" 0 "exit 0 when touched files are permitted"
+case "$(word_of "$OUT")" in DIFF_CLEAN) ok scope-perm-status "reported DIFF_CLEAN" ;;
+  *) bad scope-perm-status "unexpected status: $OUT" ;; esac
+case "$OUT" in *"Scope: clean (all paths in brief)"*) ok scope-perm-scope "scope reported clean" ;;
+  *) bad scope-perm-scope "scope clean was not reported: $OUT" ;; esac
+
+# --- 21. Path named both ways treated as denied -> DIFF_SUSPICIOUS(prohibited: …)
+R="$(new_case scope-named-both-ways)"
+set_brief "$R" <<'EOF'
+Work on src/calc.py and tests/test_calc.py.
+
+## Do not
+Do not modify tests/test_calc.py.
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/src/calc.py b/src/calc.py
+--- a/src/calc.py
++++ b/src/calc.py
+@@ -1,1 +1,2 @@
++def add(a, b): return a + b
+diff --git a/tests/test_calc.py b/tests/test_calc.py
+--- a/tests/test_calc.py
++++ b/tests/test_calc.py
+@@ -1,1 +1,3 @@
++def test_add():
++    assert add(1, 2) == 3
+EOF
+run "$R"
+check scope-both-rc "$CODE" 0 "exit 0 on path named both ways (denied advisory)"
+case "$(word_of "$OUT")" in DIFF_SUSPICIOUS*) ok scope-both-status "reported DIFF_SUSPICIOUS" ;;
+  *) bad scope-both-status "unexpected status: $OUT" ;; esac
+case "$OUT" in *"prohibited: tests/test_calc.py"*) ok scope-both-finding "named both-ways path as prohibited" ;;
+  *) bad scope-both-finding "prohibited path not cited: $OUT" ;; esac
+
+# --- 22. Exact match replaced by substring match -> DIFF_TESTS_WEAKENED (exit 3)
+R="$(new_case assert-substring-match)"
+set_brief "$R" <<'EOF'
+Fix error formatting in src/parser.py and tests in tests/test_parser.py
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/tests/test_parser.py b/tests/test_parser.py
+--- a/tests/test_parser.py
++++ b/tests/test_parser.py
+@@ -10,2 +10,2 @@
+-    assert parse_error() == "SyntaxError: invalid token at line 42"
++    assert "invalid token" in parse_error()
+EOF
+run "$R"
+check assert-substring-rc "$CODE" 3 "exit 3 on exact equality replaced by substring match"
+case "$(word_of "$OUT")" in DIFF_TESTS_WEAKENED*) ok assert-substring-status "reported DIFF_TESTS_WEAKENED" ;;
+  *) bad assert-substring-status "unexpected status: $OUT" ;; esac
+case "$OUT" in *"substring match"*|*"comparison_weakened"*) ok assert-substring-detail "detail cited comparison weakening" ;;
+  *) bad assert-substring-detail "weakening detail missing: $OUT" ;; esac
+
+# --- 23. JS exact equality replaced by substring match -> DIFF_TESTS_WEAKENED (exit 3)
+R="$(new_case js-contain-match)"
+set_brief "$R" <<'EOF'
+Update response handling in src/app.js and tests/app.test.js
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/tests/app.test.js b/tests/app.test.js
+--- a/tests/app.test.js
++++ b/tests/app.test.js
+@@ -10,2 +10,2 @@
+-    expect(response.body).toBe("exact status message from backend");
++    expect(response.body).toContain("status message");
+EOF
+run "$R"
+check js-contain-rc "$CODE" 3 "exit 3 on expect().toBe() replaced by expect().toContain()"
+case "$(word_of "$OUT")" in DIFF_TESTS_WEAKENED*) ok js-contain-status "reported DIFF_TESTS_WEAKENED" ;;
+  *) bad js-contain-status "unexpected status: $OUT" ;; esac
+
+# --- 24. Bash check exact match replaced by substring glob -> DIFF_TESTS_WEAKENED (exit 3)
+R="$(new_case bash-glob-match)"
+set_brief "$R" <<'EOF'
+Update scripts/cli.sh and tests/cli.sh
+EOF
+set_patch "$R" <<'EOF'
+diff --git a/tests/cli.sh b/tests/cli.sh
+--- a/tests/cli.sh
++++ b/tests/cli.sh
+@@ -10,2 +10,2 @@
+-check cli-out "$OUT" "exact CLI response output" "cli outputs exact match"
++case "$OUT" in *"response output"*) ok cli-out "cli outputs match" ;; esac
+EOF
+run "$R"
+check bash-glob-rc "$CODE" 3 "exit 3 on bash check replaced by substring glob"
+case "$(word_of "$OUT")" in DIFF_TESTS_WEAKENED*) ok bash-glob-status "reported DIFF_TESTS_WEAKENED" ;;
+  *) bad bash-glob-status "unexpected status: $OUT" ;; esac
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
