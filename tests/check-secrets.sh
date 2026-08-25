@@ -341,6 +341,113 @@ case "$ORDER_OUT" in
   *) bad order-status "unexpected phase.sh output: $ORDER_OUT" ;;
 esac
 
+# --- 14. Documentation line with config syntax / backticks / doc words --------
+R_DOC="$(new_repo doc-config)"
+BRIEF_DOC="$R_DOC/brief_doc.md"
+cat > "$BRIEF_DOC" <<'EOF'
+# Configuration syntax
+The configuration supports:
+`key = "value"`, `key = 123`, and `key = ["a", "b"]` on one line.
+API_KEY=value
+SECRET_TOKEN=key
+AUTH_KEY=token
+DATABASE_PASSWORD=secret
+CLIENT_SECRET=example
+EOF
+run_check --dir "$R_DOC" --brief "$BRIEF_DOC"
+check doc-config-rc "$CODE" 0 "exit 0 on config syntax and documentation words"
+case "$OUT" in
+  *"STATUS: SECRETS_NONE"*)
+    ok doc-config-status "reported SECRETS_NONE for config documentation" ;;
+  *) bad doc-config-status "unexpected output: $OUT" ;;
+esac
+
+# --- 15. Fenced code block containing an env assignment -----------------------
+R_FENCE="$(new_repo fence-env)"
+BRIEF_FENCE="$R_FENCE/brief_fence.md"
+cat > "$BRIEF_FENCE" <<'EOF'
+# Example .env configuration
+```bash
+DATABASE_PASSWORD=SuperSecretP@ssw0rd!123
+API_KEY=SuperSecretApiKey99999
+```
+EOF
+run_check --dir "$R_FENCE" --brief "$BRIEF_FENCE"
+check fence-env-rc "$CODE" 0 "exit 0 on assignment inside fenced code block"
+case "$OUT" in
+  *"STATUS: SECRETS_NONE"*)
+    ok fence-env-status "reported SECRETS_NONE for assignment in fenced block" ;;
+  *) bad fence-env-status "unexpected output: $OUT" ;;
+esac
+
+# --- 16. Fenced code block containing high-confidence secrets must still fire -
+R_FENCE_HIGH="$(new_repo fence-high-conf)"
+BRIEF_FENCE_HIGH="$R_FENCE_HIGH/brief_fence_high.md"
+cat > "$BRIEF_FENCE_HIGH" <<'EOF'
+# Cloud credentials
+```bash
+AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF
+```
+EOF
+run_check --dir "$R_FENCE_HIGH" --brief "$BRIEF_FENCE_HIGH"
+check fence-high-rc "$CODE" 3 "exit 3 on AWS key inside fenced block"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(aws_access_key, "*":3)"*)
+    ok fence-high-status "reported SECRETS_FOUND for AWS key in fenced block" ;;
+  *) bad fence-high-status "unexpected output: $OUT" ;;
+esac
+
+# --- 17. Variable references in assignments must not fire --------------------
+R_VAR="$(new_repo var-ref)"
+BRIEF_VAR="$R_VAR/brief_var.md"
+cat > "$BRIEF_VAR" <<'EOF'
+# Variable reference configuration
+DATABASE_PASSWORD=$MY_DATABASE_PASSWORD
+API_KEY=${MY_API_KEY}
+AUTH_TOKEN=$(cat /tmp/token)
+EOF
+run_check --dir "$R_VAR" --brief "$BRIEF_VAR"
+check var-ref-rc "$CODE" 0 "exit 0 on variable reference assignments"
+case "$OUT" in
+  *"STATUS: SECRETS_NONE"*)
+    ok var-ref-status "reported SECRETS_NONE for variable references" ;;
+  *) bad var-ref-status "unexpected output: $OUT" ;;
+esac
+
+# --- 18. Angle brackets in assignments must not fire -------------------------
+R_ANGLE="$(new_repo angle-brackets)"
+BRIEF_ANGLE="$R_ANGLE/brief_angle.md"
+cat > "$BRIEF_ANGLE" <<'EOF'
+# Angle bracket configuration
+DATABASE_PASSWORD=<insert-db-password-here>
+API_KEY=<YOUR_API_KEY>
+AUTH_TOKEN=<token>
+EOF
+run_check --dir "$R_ANGLE" --brief "$BRIEF_ANGLE"
+check angle-brackets-rc "$CODE" 0 "exit 0 on angle bracket assignments"
+case "$OUT" in
+  *"STATUS: SECRETS_NONE"*)
+    ok angle-brackets-status "reported SECRETS_NONE for angle bracket values" ;;
+  *) bad angle-brackets-status "unexpected output: $OUT" ;;
+esac
+
+# --- 19. Values of 3 characters or fewer must not fire -----------------------
+R_SHORT="$(new_repo short-values)"
+BRIEF_SHORT="$R_SHORT/brief_short.md"
+cat > "$BRIEF_SHORT" <<'EOF'
+# Short value configuration
+API_KEY=abc
+DATABASE_PASSWORD=123
+SECRET_TOKEN=xyz
+EOF
+run_check --dir "$R_SHORT" --brief "$BRIEF_SHORT"
+check short-values-rc "$CODE" 0 "exit 0 on 3-char values"
+case "$OUT" in
+  *"STATUS: SECRETS_NONE"*)
+    ok short-values-status "reported SECRETS_NONE for short values" ;;
+  *) bad short-values-status "unexpected output: $OUT" ;;
+esac
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
 

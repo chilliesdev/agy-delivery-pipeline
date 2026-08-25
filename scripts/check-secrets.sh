@@ -236,6 +236,7 @@ is_env_secret() {
   case "$line" in
     +*|-*) line="${line#?}" ;;
   esac
+  line="$(printf '%s' "$line" | sed 's/`[^`]*`//g')"
   line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
   case "$line" in
@@ -284,32 +285,67 @@ is_env_secret() {
   done
   var_val="$(printf '%s' "$var_val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
-  if [ "${#var_val}" -lt 8 ]; then
+  if [ "${#var_val}" -le 3 ]; then
     return 1
   fi
+
+  case "$var_val" in
+    '$'*|*'${'*'}'*|*'$('*')'*)
+      return 1
+      ;;
+  esac
+
+  case "$var_val" in
+    *'<'*'>'*|'<'*|*'>')
+      return 1
+      ;;
+  esac
+
+  case "$var_val" in
+    '('*')'|'{'*'}'|'['*']')
+      return 1
+      ;;
+  esac
 
   local val_lower
   val_lower="$(printf '%s' "$var_val" | tr '[:upper:]' '[:lower:]')"
 
   case "$val_lower" in
-    changeme|change_me|change-me|change_this|changethis) return 1 ;;
-    your-*|your_*|yourapikey*|yourtoken*|yourpassword*|yoursecret*|yourkey*) return 1 ;;
-    *placeholder*|*example*|*dummy*|*sample*|*fake*|*mock*|*todo*|*fixme*|*default*) return 1 ;;
-    *xxxx*|*000000*|*123456*|*12345678*|*password*|*secret*)
-      case "$val_lower" in
-        password|secret|testpassword|mysecret|my_secret|secret123|admin|root) return 1 ;;
-        xxxx*|*xxxx) return 1 ;;
-      esac
+    test|tests|value|values|key|keys|token|tokens|secret|secrets|password|passwords|passwd|pass|example|examples)
+      return 1
       ;;
-    \<*\>|\(*\)|\{*\}|\[*\]) return 1 ;;
-    \$*|\$\{*\}) return 1 ;;
-    null|none|nil|false|true|undefined|unset|disabled|empty) return 1 ;;
-    \*\*\*|\.\.\.*) return 1 ;;
+    changeme|change_me|change-me|change_this|changethis)
+      return 1
+      ;;
+    your-*|your_*|yourapikey*|yourtoken*|yourpassword*|yoursecret*|yourkey*|yourvalue*|*your*)
+      return 1
+      ;;
+    *placeholder*|*example*|*dummy*|*sample*|*fake*|*mock*|*todo*|*fixme*|*default*)
+      return 1
+      ;;
+    *xxxx*|*000000*|*0000*|*123456*|*12345678*)
+      return 1
+      ;;
+    testpassword|mysecret|my_secret|secret123|admin|root|guest|user)
+      return 1
+      ;;
+    my_*|insert_*|test_*|sample_*|dummy_*|demo_*|mock_*)
+      return 1
+      ;;
+    *_here|*_value|*_key|*_token|*_secret|*_password)
+      return 1
+      ;;
+    null|none|nil|false|true|undefined|unset|disabled|empty|na)
+      return 1
+      ;;
+    \*\*\*|\.\.\.*)
+      return 1
+      ;;
   esac
 
   if printf '%s\n' "$var_val" | grep -q -E '^[A-Z0-9_]+$'; then
     case "$var_val" in
-      *YOUR_*|*INSERT_*|*MY_*|*API_KEY*|*SECRET_KEY*|*TOKEN_HERE*|*KEY_HERE*|*PASSWORD_HERE*)
+      *YOUR_*|*INSERT_*|*MY_*|*API_KEY*|*SECRET_KEY*|*TOKEN_HERE*|*KEY_HERE*|*PASSWORD_HERE*|*VALUE*|*KEY*|*TOKEN*|*SECRET*|*PASSWORD*)
         return 1
         ;;
     esac
@@ -339,8 +375,26 @@ FOUND_LINE=0
 for FILE in "${SCANNED_FILES[@]}"; do
   [ -f "$FILE" ] || continue
   LINE_NUM=0
+  IN_FENCE=0
   while IFS= read -r LINE || [ -n "$LINE" ]; do
     LINE_NUM=$((LINE_NUM + 1))
+
+    STRIP_DIFF="$LINE"
+    case "$STRIP_DIFF" in
+      +*|-*) STRIP_DIFF="${STRIP_DIFF#?}" ;;
+    esac
+    TRIM_DIFF="$(printf '%s' "$STRIP_DIFF" | sed -e 's/^[[:space:]]*//')"
+    IS_FENCE_LINE=0
+    case "$TRIM_DIFF" in
+      '```'*|'~~~'*)
+        IS_FENCE_LINE=1
+        if [ "$IN_FENCE" -eq 1 ]; then
+          IN_FENCE=0
+        else
+          IN_FENCE=1
+        fi
+        ;;
+    esac
 
     if is_private_key "$LINE"; then
       FOUND_WHAT="private_key"
@@ -377,7 +431,7 @@ for FILE in "${SCANNED_FILES[@]}"; do
       break 2
     fi
 
-    if is_env_secret "$LINE"; then
+    if [ "$IN_FENCE" -eq 0 ] && [ "$IS_FENCE_LINE" -eq 0 ] && is_env_secret "$LINE"; then
       FOUND_WHAT="env_secret"
       FOUND_FILE="$FILE"
       FOUND_LINE="$LINE_NUM"
