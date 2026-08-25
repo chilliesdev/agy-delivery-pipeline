@@ -12,7 +12,7 @@
 #
 # Exit codes, one per outcome:
 #     0  DIFF_CLEAN               nothing found — and the line says what was checked
-#     0  DIFF_SUSPICIOUS(...)     worth reading: scope creep, falling assertions
+#     0  DIFF_SUSPICIOUS(...)     worth reading: prohibited files, scope creep, falling assertions
 #     3  DIFF_TESTS_WEAKENED(...) strong enough to fail the phase
 #     0  DIFF_UNCHECKED(lang=?)   nothing was analysed — say so loudly
 #     2  bad arguments
@@ -23,8 +23,8 @@
 #        is the only one of these strong enough to fail a phase, and a status that
 #        silently demotes it means the one finding that should stop a run does not.
 #        A DIFF_TESTS_WEAKENED line still mentions any suspicious findings in its fields.
-#     2. DIFF_SUSPICIOUS — no weakened tests, but scope creep, a falling assertion
-#        count, an edited literal, or a suspected invented API.
+#     2. DIFF_SUSPICIOUS — no weakened tests, but touched prohibited files, scope
+#        creep, a falling assertion count, an edited literal, or a suspected invented API.
 #     3. DIFF_UNCHECKED — nothing was analysed at all.
 #     4. DIFF_CLEAN — checks ran and found nothing.
 #
@@ -36,8 +36,13 @@
 # script mechanises those checks.
 #
 # Scope check rule:
-# The scope check is a set difference between the paths a brief names and the
-# paths a diff touches.
+# The scope check distinguishes permitted paths from prohibited paths in the brief.
+# Paths in sentences that forbid (e.g. "Do not modify X") or under headings that
+# forbid (e.g. "## Do not", "## Prohibitions") belong on a deny list.
+# Touching a prohibited file is reported as DIFF_SUSPICIOUS(prohibited: ...).
+# Touching an unmentioned file is reported as DIFF_SUSPICIOUS(scope: ...).
+# When a path appears in both permitted and forbidden contexts, the deny reading
+# is preferred.
 #
 # What counts as a path:
 # Path-shaped tokens are extracted from anywhere in the brief (in prose sentences,
@@ -54,12 +59,14 @@
 # creep. An unparsed brief must not falsely flag honest diffs as scope creep.
 #
 # Why DIFF_TESTS_WEAKENED fails (exit 3) while DIFF_SUSPICIOUS advises (exit 0).
-# A deleted test file, an added test skip (@pytest.mark.skip, it.only, t.Skip), or
-# an assertion rewritten to a tautology (assert True) is unequivocal evidence of
-# a suite being dismantled. That is strong enough to override a phase verdict.
-# Conversely, scope creep or falling assertion counts may be legitimate refactors
-# or benign additions; they warrant human attention (DIFF_SUSPICIOUS) but must
-# not fail a build automatically.
+# A deleted test file, an added test skip (@pytest.mark.skip, it.only, t.Skip), an
+# assertion rewritten to a tautology (assert True), or an assertion whose comparison
+# is weakened (exact equality becoming substring matching, wildcard matching, or
+# mere existence/non-empty checking) is unequivocal evidence of a suite being dismantled.
+# That is strong enough to override a phase verdict.
+# Conversely, scope creep, touching prohibited files, or falling assertion counts
+# may be legitimate refactors or benign additions; they warrant human attention
+# (DIFF_SUSPICIOUS) but must not fail a build automatically.
 #
 # Why edited expected literals are reported as suspicion.
 # Changing an expected value in an assertion (e.g. from 42 to 99) with no
@@ -140,10 +147,15 @@ REMOVED_LINES="${REMOVED_LINES:-0}"
 DIFF_COUNTS="+$ADDED_LINES/-$REMOVED_LINES"
 
 # --- Scope check -----------------------------------------------------------
-# Scope check is a set difference between the paths a brief names and the paths
-# a diff touches. If zero paths are extracted, the check is reported as not run.
+# Scope check distinguishes permitted paths from prohibited paths in the brief.
+# Paths in sentences that forbid (e.g. "Do not modify X") or under headings that
+# forbid (e.g. "## Do not", "## Prohibitions") belong on a deny list.
+# Touching a prohibited file is a distinct finding from ordinary scope creep.
+# When a path appears in both permitted and forbidden contexts, deny is preferred.
+# If zero paths are extracted, the check is reported as not run.
 SCOPE_STATUS=""
 SCOPE_CREEP=""
+SCOPE_PROHIBITED=""
 SCOPE_RAN=0
 
 if [ -n "$BRIEF" ] && [ -f "$BRIEF" ] && [ -s "$BRIEF" ]; then
@@ -159,128 +171,203 @@ if [ -n "$BRIEF" ] && [ -f "$BRIEF" ] && [ -s "$BRIEF" ]; then
 $PATHS
 EOF
 
-  RAW_TOKENS=""
-  while IFS= read -r LINE || [ -n "$LINE" ]; do
-    LINE_CLEAN="$(printf '%s' "$LINE" | tr '`"'\''()[]<>{}*' ' ')"
-    set -f
-    for TOK in $LINE_CLEAN; do
-      CAND="$TOK"
-      while :; do
-        case "$CAND" in
-          [\'\"\`\(\[\<\{\,\.\:\;\!\?\-]*) CAND="${CAND#?}" ;;
-          *) break ;;
-        esac
-      done
-      while :; do
-        case "$CAND" in
-          *[\'\"\`\)\]\>\}\,\.\:\;\!\?]) CAND="${CAND%?}" ;;
-          *) break ;;
-        esac
-      done
+  BRIEF_PARSED="$(awk -v diff_dirs_str="$DIFF_DIRS" '
+BEGIN {
+    in_prohib_heading = 0
+}
 
-      [ -n "$CAND" ] || continue
+function clean_token(cand) {
+    sub(/^['\''"`(\[<{\,\.\:\;\!\?\-]+/, "", cand)
+    sub(/['\''"`\)\]\>}\,\.\:\;\!\?\-]+$/, "", cand)
+    sub(/^\.\//, "", cand)
+    sub(/^\//, "", cand)
+    return cand
+}
 
-      case "$CAND" in
-        ./*) CAND="${CAND#./}" ;;
-        /*)  CAND="${CAND#/}" ;;
-      esac
+function is_valid_path(cand) {
+    if (cand !~ /\//) return 0;
+    if (cand ~ /\.(py|pyi|js|mjs|cjs|jsx|ts|mts|cts|tsx|go|rs|java|kt|kts|scala|groovy|sh|bash|zsh|c|h|cpp|hpp|cc|cxx|hh|hxx|cs|fs|rb|rake|php|swift|lua|html|htm|css|scss|sass|less|vue|svelte|md|markdown|txt|json|ya?ml|toml|ini|cfg|conf|csv|tsv|xml|sql|graphql|proto|patch|diff)$/) {
+        return 1;
+    }
+    n = split(diff_dirs_str, darr, " ")
+    for (i = 1; i <= n; i++) {
+        d = darr[i]
+        d_no_slash = d
+        sub(/\/$/, "", d_no_slash)
+        if (substr(cand, 1, length(d)) == d || cand == d_no_slash) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
-      case "$CAND" in
-        */*) ;;
-        *) continue ;;
-      esac
+function extract_paths_from_text(txt, polarity) {
+    txt_clean = txt
+    gsub(/[`"'\''\(\)\[\]<>{}\*]/, " ", txt_clean)
+    num_toks = split(txt_clean, toks, /[[:space:]]+/)
+    for (t = 1; t <= num_toks; t++) {
+        cand = clean_token(toks[t])
+        if (cand != "" && is_valid_path(cand)) {
+            print polarity ":" cand
+        }
+    }
+}
 
-      IS_PATH=0
-      case "$CAND" in
-        *.py|*.pyi|\
-        *.js|*.mjs|*.cjs|*.jsx|*.ts|*.mts|*.cts|*.tsx|\
-        *.go|*.rs|*.java|*.kt|*.kts|*.scala|*.groovy|\
-        *.sh|*.bash|*.zsh|\
-        *.c|*.h|*.cpp|*.hpp|*.cc|*.cxx|*.hh|*.hxx|\
-        *.cs|*.fs|*.rb|*.rake|*.php|*.swift|*.lua|\
-        *.html|*.htm|*.css|*.scss|*.sass|*.less|*.vue|*.svelte|\
-        *.md|*.markdown|*.txt|*.json|*.yaml|*.yml|*.toml|*.ini|*.cfg|*.conf|*.csv|*.tsv|*.xml|*.sql|*.graphql|*.proto|*.patch|*.diff)
-          IS_PATH=1
-          ;;
-      esac
+function is_prohibition_text(txt) {
+    ltxt = tolower(txt)
+    if (ltxt ~ /(^|[^a-z0-9_])(do[[:space:]]+not|never|no|must[[:space:]]+not|cannot|can[[:space:]]*not|should[[:space:]]+not|forbidden|prohibit|prohibited|prohibitions|prohibiting|deny|denied|denies|disallow|disallowed|not[[:space:]]+permitted|not[[:space:]]+allowed|not[[:space:]]+to[[:space:]]+touch|not[[:space:]]+to[[:space:]]+modify|not[[:space:]]+to[[:space:]]+change|not[[:space:]]+to[[:space:]]+edit|files?[[:space:]]+not[[:space:]]+to[[:space:]]+touch|files?[[:space:]]+to[[:space:]]+avoid|untouched|out[[:space:]]+of[[:space:]]+scope|off[[:space:]]+limits|avoid([[:space:]]+(modifying|touching|changing|editing))?|exclude[ds]?|excluding)($|[^a-z0-9_])/) {
+        return 1
+    }
+    return 0
+}
 
-      if [ "$IS_PATH" -eq 0 ]; then
-        for D in $DIFF_DIRS; do
-          case "$CAND" in
-            "$D"*|"${D%/}")
-              IS_PATH=1
-              break
-              ;;
-          esac
-        done
-      fi
+# Heading check
+/^[[:space:]]*#/ {
+    htext = $0
+    sub(/^[[:space:]]*#+[[:space:]]*/, "", htext)
+    sub(/[[:space:]]*#+[[:space:]]*$/, "", htext)
+    if (is_prohibition_text(htext)) {
+        in_prohib_heading = 1
+    } else {
+        in_prohib_heading = 0
+    }
+}
 
-      if [ "$IS_PATH" -eq 1 ]; then
-        RAW_TOKENS="$RAW_TOKENS"$'\n'"$CAND"
-      fi
-    done
-    set +f
-  done < "$BRIEF"
+{
+    line = $0
+    if (in_prohib_heading) {
+        extract_paths_from_text(line, "DENY")
+        next
+    }
 
-  BRIEF_TOKENS="$(printf '%s\n' "$RAW_TOKENS" | sed '/^$/d' | sort -u)"
+    sline = line
+    # If the line starts with a list item header like "Files not to touch:", treat rest of line as prohibition
+    if (sline ~ /^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+.*\:/) {
+        prefix = sline
+        sub(/\:.*$/, "", prefix)
+        rest = sline
+        sub(/^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+[^:]*\:[[:space:]]*/, "", rest)
+        if (is_prohibition_text(prefix)) {
+            extract_paths_from_text(rest, "DENY")
+            next
+        }
+    }
 
-  if [ -n "$BRIEF_TOKENS" ]; then
+    # Split into clauses by . (followed by space), ;, !, ?, or , but / , except
+    gsub(/\.([[:space:]]+|$)/, "\n", sline)
+    gsub(/;[[:space:]]*/, "\n", sline)
+    gsub(/[!?]([[:space:]]+|$)/, "\n", sline)
+    gsub(/,[[:space:]]+(but|except)[[:space:]]+/, "\n\\1 ", sline)
+
+    num_segs = split(sline, segs, "\n")
+    for (s = 1; s <= num_segs; s++) {
+        seg = segs[s]
+        if (seg ~ /^[[:space:]]*$/) continue
+        if (is_prohibition_text(seg)) {
+            extract_paths_from_text(seg, "DENY")
+        } else {
+            extract_paths_from_text(seg, "ALLOW")
+        }
+    }
+}
+' "$BRIEF" 2>/dev/null)"
+
+  ALLOW_TOKENS="$(printf '%s\n' "$BRIEF_PARSED" | grep '^ALLOW:' | sed 's/^ALLOW://' | sort -u)"
+  DENY_TOKENS="$(printf '%s\n' "$BRIEF_PARSED" | grep '^DENY:' | sed 's/^DENY://' | sort -u)"
+
+  if [ -n "$ALLOW_TOKENS" ] || [ -n "$DENY_TOKENS" ]; then
     SCOPE_RAN=1
     while IFS= read -r F; do
       [ -n "$F" ] || continue
-      
-      # 1. Exact match
-      if printf '%s\n' "$BRIEF_TOKENS" | grep -F -x -q -- "$F" 2>/dev/null; then
-        continue
-      fi
-      
-      # 2. Basename match
       BASE_F="$(basename "$F")"
-      if printf '%s\n' "$BRIEF_TOKENS" | grep -F -x -q -- "$BASE_F" 2>/dev/null; then
+
+      # Check if F matches DENY_TOKENS
+      IS_DENIED=0
+      if [ -n "$DENY_TOKENS" ]; then
+        # 1. Exact match
+        if printf '%s\n' "$DENY_TOKENS" | grep -F -x -q -- "$F" 2>/dev/null; then
+          IS_DENIED=1
+        # 2. Basename match
+        elif printf '%s\n' "$DENY_TOKENS" | grep -F -x -q -- "$BASE_F" 2>/dev/null; then
+          IS_DENIED=1
+        else
+          # 3. Directory prefix match
+          while IFS= read -r DT; do
+            [ -n "$DT" ] || continue
+            CLEAN_DT="${DT%/}"
+            case "$F" in
+              "$CLEAN_DT"/*) IS_DENIED=1; break ;;
+            esac
+          done <<EOF
+$DENY_TOKENS
+EOF
+        fi
+      fi
+
+      if [ "$IS_DENIED" -eq 1 ]; then
+        if [ -z "$SCOPE_PROHIBITED" ]; then
+          SCOPE_PROHIBITED="$F"
+        else
+          SCOPE_PROHIBITED="$SCOPE_PROHIBITED, $F"
+        fi
         continue
       fi
-      
-      # 3. Directory prefix match (e.g. brief names "scripts/" or "tests/" or "src")
-      DIR_COVERED=0
-      while IFS= read -r BT; do
-        [ -n "$BT" ] || continue
-        CLEAN_BT="${BT%/}"
-        case "$F" in
-          "$CLEAN_BT"/*) DIR_COVERED=1; break ;;
-        esac
-      done <<EOF
-$BRIEF_TOKENS
+
+      # Check if F matches ALLOW_TOKENS
+      IS_ALLOWED=0
+      if [ -n "$ALLOW_TOKENS" ]; then
+        # 1. Exact match
+        if printf '%s\n' "$ALLOW_TOKENS" | grep -F -x -q -- "$F" 2>/dev/null; then
+          IS_ALLOWED=1
+        # 2. Basename match
+        elif printf '%s\n' "$ALLOW_TOKENS" | grep -F -x -q -- "$BASE_F" 2>/dev/null; then
+          IS_ALLOWED=1
+        else
+          # 3. Directory prefix match
+          while IFS= read -r AT; do
+            [ -n "$AT" ] || continue
+            CLEAN_AT="${AT%/}"
+            case "$F" in
+              "$CLEAN_AT"/*) IS_ALLOWED=1; break ;;
+            esac
+          done <<EOF
+$ALLOW_TOKENS
 EOF
-      [ "$DIR_COVERED" -eq 1 ] && continue
-      
-      # 4. Test file for named source file
-      STEM="$(basename "$F" | sed -e 's/\.[^.]*$//' -e 's/^test_//' -e 's/_test$//' -e 's/\.test$//' -e 's/\.spec$//' -e 's/Test$//' -e 's/^Test//')"
-      STEM_COVERED=0
-      if [ -n "$STEM" ]; then
-        while IFS= read -r BT; do
-          [ -n "$BT" ] || continue
-          BT_BASE="$(basename "$BT" | sed -e 's/\.[^.]*$//')"
-          if [ "$BT_BASE" = "$STEM" ]; then
-            STEM_COVERED=1
-            break
+          if [ "$IS_ALLOWED" -eq 0 ]; then
+            # 4. Test file for named source file
+            STEM="$(basename "$F" | sed -e 's/\.[^.]*$//' -e 's/^test_//' -e 's/_test$//' -e 's/\.test$//' -e 's/\.spec$//' -e 's/Test$//' -e 's/^Test//')"
+            if [ -n "$STEM" ]; then
+              while IFS= read -r AT; do
+                [ -n "$AT" ] || continue
+                AT_BASE="$(basename "$AT" | sed -e 's/\.[^.]*$//')"
+                if [ "$AT_BASE" = "$STEM" ]; then
+                  IS_ALLOWED=1
+                  break
+                fi
+              done <<EOF
+$ALLOW_TOKENS
+EOF
+            fi
           fi
-        done <<EOF
-$BRIEF_TOKENS
-EOF
+        fi
       fi
-      [ "$STEM_COVERED" -eq 1 ] && continue
-      
-      # If not covered, record as scope creep
-      if [ -z "$SCOPE_CREEP" ]; then
-        SCOPE_CREEP="$F"
-      else
-        SCOPE_CREEP="$SCOPE_CREEP, $F"
+
+      if [ "$IS_ALLOWED" -eq 0 ]; then
+        if [ -z "$SCOPE_CREEP" ]; then
+          SCOPE_CREEP="$F"
+        else
+          SCOPE_CREEP="$SCOPE_CREEP, $F"
+        fi
       fi
     done <<EOF
 $PATHS
 EOF
 
-    if [ -n "$SCOPE_CREEP" ]; then
+    if [ -n "$SCOPE_PROHIBITED" ] && [ -n "$SCOPE_CREEP" ]; then
+      SCOPE_STATUS="prohibited ($SCOPE_PROHIBITED), creep ($SCOPE_CREEP)"
+    elif [ -n "$SCOPE_PROHIBITED" ]; then
+      SCOPE_STATUS="prohibited ($SCOPE_PROHIBITED)"
+    elif [ -n "$SCOPE_CREEP" ]; then
       SCOPE_STATUS="creep ($SCOPE_CREEP)"
     else
       SCOPE_STATUS="clean (all paths in brief)"
@@ -310,6 +397,9 @@ BEGIN {
     test_files_changed = 0
     
     hunk_assert_rem = ""
+    hunk_exact_assert = 0
+    in_bash_case = 0
+    bash_case_reported = 0
 }
 
 function finish_file() {
@@ -366,8 +456,110 @@ function is_test_file(p) {
     return 0;
 }
 
+function is_exact_assert(line, lang) {
+    if (line ~ /^[[:space:]]*assert[[:space:]]+.+==/) return 1;
+    if (line ~ /^[[:space:]]*assert\(.+==.+\)/) return 1;
+    if (line ~ /^[[:space:]]*self\.assert(Equal|Equals|StrictEqual)\(/) return 1;
+    if (line ~ /expect\(.+\)\.(toBe|toEqual|toStrictEqual)\(/) return 1;
+    if (line ~ /assert\.(strictEqual|equal|deepEqual|deepStrictEqual)\(/) return 1;
+    if (line ~ /assert\.(Equal|DeepEqual)\(/ || line ~ /require\.(Equal|DeepEqual)\(/) return 1;
+    if (line ~ /assert_eq!\(/) return 1;
+    if (line ~ /assertEquals\(/ || line ~ /assertSame\(/) return 1;
+    if (lang == "bash") {
+        if (line ~ /^[[:space:]]*check[[:space:]]+/) return 1;
+        if (line ~ /^[[:space:]]*assert(_eq|_equal)[[:space:]]+/) return 1;
+        if (line ~ /\[\[?[[:space:]]+.*[!=]==?[[:space:]]+.*\]\]?/) return 1;
+    }
+    return 0;
+}
+
+function check_weakened_comparison(sline, lang, rem_line) {
+    # 1. Substring matching / containment replacing exact equality
+    if (sline ~ /^[[:space:]]*assert[[:space:]]+.+[[:space:]]in[[:space:]]+/ && rem_line ~ /==|assert(Equal|Equals)/) {
+        return "substring match replacing exact equality";
+    }
+    if (sline ~ /^[[:space:]]*self\.assertIn\(/ && rem_line ~ /==|assert(Equal|Equals)/) {
+        return "self.assertIn() replacing exact equality";
+    }
+    if (sline ~ /^[[:space:]]*assert[[:space:]]+.+\.(startswith|endswith)\(/ && rem_line ~ /==|assert(Equal|Equals)/) {
+        return "prefix/suffix match replacing exact equality";
+    }
+    if (sline ~ /^[[:space:]]*assert[[:space:]]+re\.(search|match|findall)\(/ && rem_line ~ /==|assert(Equal|Equals)/) {
+        return "regex pattern replacing exact equality";
+    }
+    if (sline ~ /expect\(.+\)\.(toContain|toMatch|stringContaining|stringMatching)\(/ && rem_line ~ /toBe|toEqual|toStrictEqual|assert(Equal|Equals)/) {
+        return "expect().toContain()/toMatch() replacing exact equality";
+    }
+    if (sline ~ /expect\(.+\)\.(objectContaining|arrayContaining|anything|any)\(/ && rem_line ~ /toBe|toEqual|toStrictEqual/) {
+        return "pattern/wildcard matching replacing exact equality";
+    }
+    if (sline ~ /assert\.(match|includes)\(/ && rem_line ~ /strictEqual|equal|deepEqual/) {
+        return "assert.match() replacing exact equality";
+    }
+    if ((sline ~ /assert\.(Contains|Subset)\(/ || sline ~ /require\.(Contains|Subset)\(/) && rem_line ~ /assert\.(Equal|DeepEqual)|require\.(Equal|DeepEqual)/) {
+        return "assert.Contains() replacing exact equality";
+    }
+    if (sline ~ /assert!\(.+\.contains\(/ && rem_line ~ /assert_eq!/) {
+        return "assert!(contains) replacing assert_eq!";
+    }
+    if (sline ~ /assertTrue\(.+\.contains\(/ && rem_line ~ /assertEquals|assertSame/) {
+        return "assertTrue(contains) replacing assertEquals";
+    }
+    if (sline ~ /assertThat\(.+,[[:space:]]*containsString\(/ && rem_line ~ /assertEquals|assertSame/) {
+        return "containsString replacing assertEquals";
+    }
+    if (lang == "bash") {
+        if (sline ~ /^[[:space:]]*case[[:space:]]+.+[[:space:]]+in[[:space:]]+\*.*\*\)/ && rem_line ~ /check[[:space:]]+|assert(_eq|_equal)|==/) {
+            return "substring glob match replacing exact check";
+        }
+        if (sline ~ /^[[:space:]]*assert_contains[[:space:]]+/ && rem_line ~ /check[[:space:]]+|assert(_eq|_equal)|==/) {
+            return "assert_contains replacing exact equality";
+        }
+        if (sline ~ /\[\[[[:space:]]+.+[[:space:]]*=~[[:space:]]*.+\]\]/ && rem_line ~ /check[[:space:]]+|assert(_eq|_equal)|==/) {
+            return "regex match =~ replacing exact check";
+        }
+        if (sline ~ /\[\[[[:space:]]+.+[[:space:]]*==[[:space:]]*\*.*\*[[:space:]]*\]\]/ && rem_line ~ /check[[:space:]]+|assert(_eq|_equal)|==/) {
+            return "wildcard match replacing exact check";
+        }
+    }
+
+    # 2. Value comparison becoming mere existence / non-empty / non-null check
+    if (sline ~ /expect\(.*\)\.toBeDefined\(\)/ && rem_line ~ /toBe|toEqual|toStrictEqual/) {
+        return "expect().toBeDefined() replacing value comparison";
+    }
+    if (sline ~ /expect\(.*\)\.(toBeTruthy|toBeFalsy|not\.toBeNull|toBeInstanceOf|toHaveLength|not\.toBeEmpty)\(\)/ && rem_line ~ /toBe\(|toEqual\(/) {
+        return "expect() presence/truthiness check replacing value comparison";
+    }
+    if (sline ~ /^[[:space:]]*assert[[:space:]]+.+[[:space:]]+is[[:space:]]+not[[:space:]]+None/ && rem_line ~ /==|assertEqual/) {
+        return "assert is not None replacing exact equality";
+    }
+    if (sline ~ /^[[:space:]]*assert[[:space:]]+len\(.+\)[[:space:]]*>[[:space:]]*0/ && rem_line ~ /==|assertEqual/) {
+        return "assert len > 0 replacing exact equality";
+    }
+    if (sline ~ /^[[:space:]]*self\.assert(IsNotNone|True)\(/ && rem_line ~ /assertEqual/) {
+        return "self.assertIsNotNone()/assertTrue() replacing assertEqual";
+    }
+    if ((sline ~ /assert\.(NotEmpty|NotNil|True)\(/ || sline ~ /require\.(NotEmpty|NotNil|True)\(/) && rem_line ~ /assert\.(Equal|DeepEqual)|require\.(Equal|DeepEqual)/) {
+        return "assert.NotEmpty()/NotNil() replacing Equal";
+    }
+    if (sline ~ /assert!\(.+\.is_some\(\)\)/ && rem_line ~ /assert_eq!/) {
+        return "assert!(is_some) replacing assert_eq!";
+    }
+    if (sline ~ /assert!\(!.+\.is_empty\(\)\)/ && rem_line ~ /assert_eq!/) {
+        return "assert!(!is_empty) replacing assert_eq!";
+    }
+    if (sline ~ /assertNotNull\(/ && rem_line ~ /assertEquals|assertSame/) {
+        return "assertNotNull replacing assertEquals";
+    }
+
+    return "";
+}
+
 /^@@ / {
     hunk_assert_rem = ""
+    hunk_exact_assert = 0
+    in_bash_case = 0
+    bash_case_reported = 0
     next
 }
 
@@ -384,6 +576,9 @@ function is_test_file(p) {
     file_funcs_added = 0
     file_funcs_removed = 0
     hunk_assert_rem = ""
+    hunk_exact_assert = 0
+    in_bash_case = 0
+    bash_case_reported = 0
     
     p = $3
     sub(/^a\//, "", p)
@@ -455,11 +650,14 @@ function is_test_file(p) {
         if (line ~ /t\.(Error|Fatal|Fail)/ || line ~ /assert\./ || line ~ /require\./) is_assert = 1;
         if (line ~ /assert!/ || line ~ /assert_eq!/ || line ~ /assert_ne!/) is_assert = 1;
         if (line ~ /assertEquals\(/ || line ~ /assertTrue\(/ || line ~ /assertFalse\(/ || line ~ /assertThat\(/) is_assert = 1;
-        if (curr_lang == "bash" && (line ~ /^[[:space:]]*(assert|check|ok|bad)[[:space:]]+/)) is_assert = 1;
+        if (curr_lang == "bash" && (line ~ /^[[:space:]]*(assert|check|ok|bad)[[:space:]]+/ || line ~ /\[\[?.*\]\]?/ || line ~ /^[[:space:]]*case[[:space:]]+/)) is_assert = 1;
         
         if (is_assert) {
             file_asserts_removed++
             hunk_assert_rem = line
+            if (is_exact_assert(line, curr_lang)) {
+                hunk_exact_assert = 1
+            }
         }
     }
     next
@@ -486,6 +684,7 @@ function is_test_file(p) {
     
     if (curr_is_test) {
         triv_found = ""
+        weak_comp = ""
         sline = line
         sub(/^[[:space:]]+/, "", sline)
         sub(/[[:space:]]+$/, "", sline)
@@ -498,10 +697,47 @@ function is_test_file(p) {
         else if (sline ~ /assert!\([[:space:]]*true[[:space:]]*\)/) triv_found = "assert!(true)";
         else if (sline ~ /assert_eq!\([[:space:]]*(1[[:space:]]*,[[:space:]]*1|true[[:space:]]*,[[:space:]]*true)[[:space:]]*\)/) triv_found = "assert_eq!(true, true)";
         else if (sline ~ /assertEquals\([[:space:]]*(1[[:space:]]*,[[:space:]]*1|true[[:space:]]*,[[:space:]]*true)[[:space:]]*\)/) triv_found = "assertEquals(true, true)";
-        else if (sline ~ /expect\(.*\)\.toBeDefined\(\)/ && hunk_assert_rem ~ /toBe|toEqual|strictEqual/) triv_found = "expect().toBeDefined() replacing value comparison";
         
         if (triv_found != "") {
             print "WEAKENED:trivial_assertion: " triv_found " in " curr_file
+        } else if (curr_lang == "bash") {
+            if (sline ~ /^case[[:space:]]+.+[[:space:]]+in([[:space:]]|$)/) {
+                is_single_line = (sline ~ /(^|[[:space:]]|;)esac([[:space:]]|;|$)/)
+                has_glob = (sline ~ /\*.*\*\)/)
+                if (hunk_exact_assert && hunk_assert_rem != "" && has_glob) {
+                    weak_comp = "substring glob match replacing exact check"
+                    print "WEAKENED:comparison_weakened: " weak_comp " in " curr_file
+                    bash_case_reported = 1
+                }
+                if (is_single_line) {
+                    in_bash_case = 0
+                    bash_case_reported = 0
+                } else {
+                    in_bash_case = 1
+                }
+            } else if (in_bash_case) {
+                if (sline ~ /\*.*\*\)/) {
+                    if (hunk_exact_assert && hunk_assert_rem != "" && !bash_case_reported) {
+                        weak_comp = "substring glob match replacing exact check"
+                        print "WEAKENED:comparison_weakened: " weak_comp " in " curr_file
+                        bash_case_reported = 1
+                    }
+                }
+                if (sline ~ /(^|[[:space:]]|;)esac([[:space:]]|;|$)/) {
+                    in_bash_case = 0
+                    bash_case_reported = 0
+                }
+            } else if (hunk_exact_assert && hunk_assert_rem != "") {
+                weak_comp = check_weakened_comparison(sline, curr_lang, hunk_assert_rem)
+                if (weak_comp != "") {
+                    print "WEAKENED:comparison_weakened: " weak_comp " in " curr_file
+                }
+            }
+        } else if (hunk_exact_assert && hunk_assert_rem != "") {
+            weak_comp = check_weakened_comparison(sline, curr_lang, hunk_assert_rem)
+            if (weak_comp != "") {
+                print "WEAKENED:comparison_weakened: " weak_comp " in " curr_file
+            }
         }
         
         if (line ~ /^[[:space:]]*(async[[:space:]]+)?def[[:space:]]+test_/ || \
@@ -521,11 +757,11 @@ function is_test_file(p) {
         if (line ~ /t\.(Error|Fatal|Fail)/ || line ~ /assert\./ || line ~ /require\./) is_assert = 1;
         if (line ~ /assert!/ || line ~ /assert_eq!/ || line ~ /assert_ne!/) is_assert = 1;
         if (line ~ /assertEquals\(/ || line ~ /assertTrue\(/ || line ~ /assertFalse\(/ || line ~ /assertThat\(/) is_assert = 1;
-        if (curr_lang == "bash" && (line ~ /^[[:space:]]*(assert|check|ok|bad)[[:space:]]+/)) is_assert = 1;
+        if (curr_lang == "bash" && (line ~ /^[[:space:]]*(assert|check|ok|bad)[[:space:]]+/ || line ~ /\[\[?.*\]\]?/ || line ~ /^[[:space:]]*case[[:space:]]+/)) is_assert = 1;
         
         if (is_assert) {
             file_asserts_added++
-            if (hunk_assert_rem != "" && hunk_assert_rem != line) {
+            if (hunk_assert_rem != "" && hunk_assert_rem != line && triv_found == "" && weak_comp == "" && !in_bash_case && line !~ /^[[:space:]]*case[[:space:]]+/) {
                 print "POTENTIAL_LITERAL_EDIT:" curr_file
             }
         }
@@ -600,6 +836,16 @@ $POTENTIAL_LITERALS
 EOF
 fi
 
+# If prohibited files were touched, add to suspicious (prioritized before creep)
+if [ -n "$SCOPE_PROHIBITED" ]; then
+  PROHIB_FINDING="prohibited: $SCOPE_PROHIBITED"
+  if [ -z "$SUSPICIOUS_ITEMS" ]; then
+    SUSPICIOUS_ITEMS="$PROHIB_FINDING"
+  else
+    SUSPICIOUS_ITEMS="$PROHIB_FINDING"$'\n'"$SUSPICIOUS_ITEMS"
+  fi
+fi
+
 # If scope creep was detected, add to suspicious
 if [ -n "$SCOPE_CREEP" ]; then
   SCOPE_FINDING="scope: $SCOPE_CREEP"
@@ -612,7 +858,7 @@ fi
 
 # --- Verdict generation ---------------------------------------------------
 
-CHECKS_INFO="deleted_tests, skips, trivial_assertions, assertion_counts, literals"
+CHECKS_INFO="deleted_tests, skips, trivial_assertions, weakened_comparisons, assertion_counts, literals"
 if [ "$SCOPE_RAN" -eq 1 ]; then
   CHECKS_INFO="$CHECKS_INFO, scope"
 elif [ -n "$BRIEF" ] && [ -f "$BRIEF" ] && [ -s "$BRIEF" ]; then
