@@ -173,12 +173,18 @@ RUN_FIELD=""
 # =============================================================================
 # Check 5: No paths outside repository (~/... or absolute paths outside DIR)
 # =============================================================================
-RAW_TILDE="$(grep -a -o -E '(^|[[:space:]`"'\''\(])~[A-Za-z0-9_./+-]*' "$BRIEF" 2>/dev/null | sed -e 's/^[[:space:]`"'\''\(]*//' | head -1)"
-if [ -n "$RAW_TILDE" ]; then
-  RAW_TILDE="$(clean_candidate "$RAW_TILDE")"
-  printf '%s\n' "STATUS: BRIEF_INVALID(outside_path:$RAW_TILDE) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief references path outside repository ($RAW_TILDE)"
+TILDE_PATHS="$(grep -a -o -E '(^|[[:space:]`"'\''\(])~[A-Za-z0-9_./+-]*' "$BRIEF" 2>/dev/null | sed -e 's/^[[:space:]`"'\''\(]*//' | sort -u)"
+while IFS= read -r TP; do
+  [ -n "$TP" ] || continue
+  TP="$(clean_candidate "$TP")"
+  case "$TP" in
+    ""|"~"|"~/"|*\**|*\?*|*\$*|*\<*|*\>*|*…*|*...*) continue ;;
+  esac
+  printf '%s\n' "STATUS: BRIEF_INVALID(outside_path:$TP) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: brief references path outside repository ($TP)"
   exit 3
-fi
+done <<EOF
+$TILDE_PATHS
+EOF
 
 ABS_PATHS="$(grep -a -o -E '(^|[[:space:]`"'\''\(])/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+' "$BRIEF" 2>/dev/null | sed -e 's/^[[:space:]`"'\''\(]*//' | sort -u)"
 REAL_DIR="$(cd "$DIR" && pwd -P 2>/dev/null || echo "$DIR")"
@@ -308,78 +314,250 @@ fi
 # =============================================================================
 # Check 4: Input Files Exist Inside Repository
 # =============================================================================
-# Scan brief for candidate input paths
-CHECKED_INPUTS=0
-MISSING_INPUT=""
+# Bias: prefer under-reporting to crying wolf.
+# Only treat a token as an input path when it contains a '/'.
+# A bare filename with no directory is a generic mention in prose
+# (e.g. "the SKILL.md files", "a package.json", "your Makefile"), not an
+# assertion that a file exists at the repo root.
+#
+# Classification:
+# 1. A path inside an ## Output Contract section is an output.
+# 2. A path introduced with creation words (create, creates, write, writes, add,
+#    adds, new file, produce, ship, generate) is an output.
+# 3. Everything else containing '/' is treated as an input.
+# 4. If a path appears both as input and output, treat as input.
+list_contains() {
+  local list="$1"
+  local item="$2"
+  [ -z "$list" ] && return 1
+  printf '%s\n' "$list" | grep -F -x -q -- "$item"
+}
 
-RAW_TOKENS=""
+is_output_context() {
+  local ctx=" $1 "
+  local norm=" $(printf '%s' "$ctx" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' ' ' | tr -s ' ') "
+
+  case "$norm" in
+    *" create "*|*" creates "*|*" write "*|*" writes "*|*" add "*|*" adds "*|*" new file "*|*" produce "*|*" ship "*|*" generate "*)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  local last_after=""
+  local shortest_len=999999
+  local cand_after=""
+  local cand_len=0
+  for kw in " create " " creates " " write " " writes " " add " " adds " " new file " " produce " " ship " " generate "; do
+    case "$norm" in
+      *"$kw"*)
+        cand_after="${norm##*$kw}"
+        cand_len="${#cand_after}"
+        if [ "$cand_len" -lt "$shortest_len" ]; then
+          shortest_len="$cand_len"
+          last_after="$cand_after"
+        fi
+        ;;
+    esac
+  done
+
+  case " $last_after " in
+    *" read "*|*" reads "*|*" follow "*|*" follows "*|*" inspect "*|*" inspects "*|*" examine "*|*" examines "*|*" check "*|*" checks "*|*" review "*|*" reviews "*|*" from "*)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+SEEN_PATHS=""
+INPUT_PATHS=""
+OUTPUT_PATHS=""
+
+record_path_occurrence() {
+  local p="$1"
+  local is_out="$2"
+
+  if ! list_contains "$SEEN_PATHS" "$p"; then
+    if [ -z "$SEEN_PATHS" ]; then
+      SEEN_PATHS="$p"
+    else
+      SEEN_PATHS="$SEEN_PATHS
+$p"
+    fi
+  fi
+
+  if [ "$is_out" -eq 1 ]; then
+    if ! list_contains "$OUTPUT_PATHS" "$p"; then
+      if [ -z "$OUTPUT_PATHS" ]; then
+        OUTPUT_PATHS="$p"
+      else
+        OUTPUT_PATHS="$OUTPUT_PATHS
+$p"
+      fi
+    fi
+  else
+    if ! list_contains "$INPUT_PATHS" "$p"; then
+      if [ -z "$INPUT_PATHS" ]; then
+        INPUT_PATHS="$p"
+      else
+        INPUT_PATHS="$INPUT_PATHS
+$p"
+      fi
+    fi
+  fi
+}
+
+IN_OUTPUT_SECTION=0
+PREV_WINDOW=""
+
 while IFS= read -r LINE || [ -n "$LINE" ]; do
-  # Extract markdown links targets [text](target)
-  REST="$LINE"
-  while case "$REST" in *']('*')'*) true ;; *) false ;; esac; do
-    REST="${REST#*']('}"
-    TARGET="${REST%%')'*}"
-    REST="${REST#*')'}"
-    RAW_TOKENS="$RAW_TOKENS $TARGET"
-  done
+  case "$LINE" in
+    \#*)
+      HEADING_TEXT="$(printf '%s' "$LINE" | sed -e 's/^#*[[:space:]]*//' | tr '[:upper:]' '[:lower:]')"
+      case "$HEADING_TEXT" in
+        output\ contract*|"output contract"*)
+          IN_OUTPUT_SECTION=1
+          ;;
+        *)
+          IN_OUTPUT_SECTION=0
+          ;;
+      esac
+      PREV_WINDOW=""
+      ;;
+    -[[:space:]]*|\*[[:space:]]*|[0-9]*.[[:space:]]*)
+      PREV_WINDOW=""
+      ;;
+  esac
 
-  # Extract backticked tokens
-  REST="$LINE"
-  while case "$REST" in *'`'*'`'*) true ;; *) false ;; esac; do
-    REST="${REST#*'`'}"
-    CODE_TOK="${REST%%'`'*}"
-    REST="${REST#*'`'}"
-    RAW_TOKENS="$RAW_TOKENS $CODE_TOK"
-  done
-
-  # Extract tokens with slashes
   set -f
   for TOK in $LINE; do
+    set +f
+    CAND_LIST=""
     case "$TOK" in
-      */*) RAW_TOKENS="$RAW_TOKENS $TOK" ;;
+      *']('*')'*)
+        REST="$TOK"
+        while case "$REST" in *']('*')'*) true ;; *) false ;; esac; do
+          REST="${REST#*']('}"
+          TARGET="${REST%%')'*}"
+          REST="${REST#*')'}"
+          CAND_LIST="$CAND_LIST $TARGET"
+        done
+        ;;
     esac
+
+    case "$TOK" in
+      *'`'*'`'*)
+        REST="$TOK"
+        while case "$REST" in *'`'*'`'*) true ;; *) false ;; esac; do
+          REST="${REST#*'`'}"
+          CODE_TOK="${REST%%'`'*}"
+          REST="${REST#*'`'}"
+          CAND_LIST="$CAND_LIST $CODE_TOK"
+        done
+        ;;
+    esac
+
+    case "$TOK" in
+      */*)
+        CAND_LIST="$CAND_LIST $TOK"
+        ;;
+    esac
+
+    if [ -n "$CAND_LIST" ]; then
+      for RAW_CAND in $CAND_LIST; do
+        CAND="$(clean_candidate "$RAW_CAND")"
+        if [ -z "$CAND" ] || should_discard_path "$CAND"; then
+          continue
+        fi
+        case "$CAND" in
+          */*) ;;
+          *) continue ;;
+        esac
+
+        IS_OUTPUT_OCCURRENCE=0
+        if [ "$IN_OUTPUT_SECTION" -eq 1 ]; then
+          IS_OUTPUT_OCCURRENCE=1
+        elif is_output_context "$PREV_WINDOW"; then
+          IS_OUTPUT_OCCURRENCE=1
+        fi
+
+        record_path_occurrence "$CAND" "$IS_OUTPUT_OCCURRENCE"
+      done
+    fi
+
+    PREV_WINDOW="$PREV_WINDOW $TOK"
+
+    case "$TOK" in
+      *[\.\!\?\;])
+        case "$TOK" in
+          *\`*|*\"*|*\'*)
+            case "$TOK" in
+              *[\`\"\'][\.\!\?\;]) PREV_WINDOW="" ;;
+            esac
+            ;;
+          *)
+            case "$TOK" in
+              */*) ;;
+              *) PREV_WINDOW="" ;;
+            esac
+            ;;
+        esac
+        ;;
+    esac
+    set -f
   done
   set +f
 done < "$BRIEF"
 
-for RAW_CAND in $RAW_TOKENS; do
-  CAND="$(clean_candidate "$RAW_CAND")"
-  if should_discard_path "$CAND"; then
-    continue
-  fi
+CHECKED_INPUTS=0
+SKIPPED_OUTPUTS=0
+MISSING_INPUT=""
 
-  # Must look like a file path: has / or recognizable extension
-  IS_PATH=0
-  case "$CAND" in
-    */*) IS_PATH=1 ;;
-    *.py|*.sh|*.bash|*.zsh|*.js|*.mjs|*.cjs|*.ts|*.tsx|*.jsx|\
-    *.go|*.rs|*.java|*.c|*.h|*.cpp|*.md|*.patch|*.stat|*.json|\
-    *.yaml|*.yml|*.toml|*.txt) IS_PATH=1 ;;
-  esac
+if [ -n "$SEEN_PATHS" ]; then
+  while IFS= read -r CAND; do
+    [ -n "$CAND" ] || continue
 
-  [ "$IS_PATH" -eq 1 ] || continue
+    if list_contains "$INPUT_PATHS" "$CAND" || ! list_contains "$OUTPUT_PATHS" "$CAND"; then
+      CHECKED_INPUTS=$((CHECKED_INPUTS + 1))
 
-  # Resolve path against DIR
-  RESOLVED=""
-  case "$CAND" in
-    "$DIR"/*) RESOLVED="$CAND" ;;
-    ./*)      RESOLVED="$DIR/${CAND#./}" ;;
-    *)        RESOLVED="$DIR/$CAND" ;;
-  esac
+      RESOLVED=""
+      case "$CAND" in
+        "$DIR"/*) RESOLVED="$CAND" ;;
+        ./*)      RESOLVED="$DIR/${CAND#./}" ;;
+        *)        RESOLVED="$DIR/$CAND" ;;
+      esac
 
-  CHECKED_INPUTS=$((CHECKED_INPUTS + 1))
-  if [ ! -e "$RESOLVED" ]; then
-    MISSING_INPUT="$CAND"
-    break
-  fi
-done
+      if [ ! -e "$RESOLVED" ]; then
+        MISSING_INPUT="$CAND"
+        break
+      fi
+    else
+      SKIPPED_OUTPUTS=$((SKIPPED_OUTPUTS + 1))
+    fi
+  done <<EOF
+$SEEN_PATHS
+EOF
+fi
 
 if [ -n "$MISSING_INPUT" ]; then
   printf '%s\n' "STATUS: BRIEF_INVALID(missing_input_file:$MISSING_INPUT) | Phase: $PHASE$RUN_FIELD | Brief: $BRIEF | Note: referenced input file '$MISSING_INPUT' does not exist in repository"
   exit 3
 fi
 
-if [ "$CHECKED_INPUTS" -gt 0 ]; then
+if [ "$SKIPPED_OUTPUTS" -gt 0 ]; then
+  if [ "$SKIPPED_OUTPUTS" -eq 1 ]; then
+    OUTPUT_STR="1 output skipped"
+  else
+    OUTPUT_STR="$SKIPPED_OUTPUTS outputs skipped"
+  fi
+  if [ "$CHECKED_INPUTS" -gt 0 ]; then
+    INPUT_CHECK_STATUS="input_paths ($CHECKED_INPUTS checked, $OUTPUT_STR)"
+  else
+    INPUT_CHECK_STATUS="input_paths (0 checked, $OUTPUT_STR)"
+  fi
+elif [ "$CHECKED_INPUTS" -gt 0 ]; then
   INPUT_CHECK_STATUS="input_paths ($CHECKED_INPUTS checked)"
 else
   INPUT_CHECK_STATUS="input_paths (none in brief)"

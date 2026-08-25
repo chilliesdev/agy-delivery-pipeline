@@ -166,6 +166,203 @@ case "$OUT" in
   *) bad missing-input-status "unexpected output: $OUT" ;;
 esac
 
+# --- Check 4b: Bare filenames in backticks are not input paths (Issue #48) ---
+REPO="$(new_repo bare-filenames)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Read \`SKILL.md\` and \`package.json\` first.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check bare-filenames-rc "$CODE" 0 "exit 0 when brief mentions bare filenames in backticks"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok bare-filenames-status "reported BRIEF_VALID for bare filenames in prose" ;;
+  *) bad bare-filenames-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4c: Mentioning DISCOVERY.md in prose (Issue #48) -------------------
+REPO="$(new_repo prose-mention)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+The orchestrator reads DISCOVERY.md in full by design.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check prose-mention-rc "$CODE" 0 "exit 0 when brief mentions DISCOVERY.md in prose"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok prose-mention-status "reported BRIEF_VALID for DISCOVERY.md prose mention" ;;
+  *) bad prose-mention-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4d: Nonexistent path with directory is refused --------------------
+REPO="$(new_repo missing-path-with-slash)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Read scripts/does-not-exist.sh before starting.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check missing-path-slash-rc "$CODE" 3 "exit 3 when path with directory does not exist"
+case "$OUT" in
+  *"STATUS: BRIEF_INVALID(missing_input_file:scripts/does-not-exist.sh)"*)
+    ok missing-path-slash-status "reported missing_input_file for nonexistent script path" ;;
+  *) bad missing-path-slash-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4e: Existing path with directory is accepted ----------------------
+REPO="$(new_repo existing-path-with-slash)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+mkdir -p "$REPO/briefs"
+touch "$REPO/briefs/DELEGATE.md"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Follow instructions in briefs/DELEGATE.md.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check existing-path-slash-rc "$CODE" 0 "exit 0 when path with directory exists"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok existing-path-slash-status "reported BRIEF_VALID for existing path with slash" ;;
+  *) bad existing-path-slash-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4f: Brief writing a nonexistent file is accepted (Issue #48) -------
+REPO="$(new_repo create-nonexistent-file)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Write \`docs/new-thing.md\` with initial architecture documentation.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check create-nonexistent-rc "$CODE" 0 "exit 0 when brief writes a file to create"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*"input_paths (0 checked, 1 output skipped)"*)
+    ok create-nonexistent-status "reported BRIEF_VALID and 1 output skipped for created file" ;;
+  *) bad create-nonexistent-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4g: Nonexistent path under Output Contract is accepted (Issue #48) -
+REPO="$(new_repo output-contract-nonexistent)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Implement the requested feature.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+## Output Contract
+1. Write output report to \`docs/generated-report.md\`.
+2. Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check output-contract-nonexistent-rc "$CODE" 0 "exit 0 when nonexistent path is in Output Contract"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*"input_paths (0 checked, 1 output skipped)"*)
+    ok output-contract-nonexistent-status "reported BRIEF_VALID for Output Contract path" ;;
+  *) bad output-contract-nonexistent-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4h: Reading and creating same nonexistent path is refused ---------
+REPO="$(new_repo read-and-create-same)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Read \`docs/scratch.md\` and then write \`docs/scratch.md\`.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check read-and-create-same-rc "$CODE" 3 "exit 3 when reading and creating same nonexistent path"
+case "$OUT" in
+  *"STATUS: BRIEF_INVALID(missing_input_file:docs/scratch.md)"*)
+    ok read-and-create-same-status "reported missing_input_file when path is both read and written" ;;
+  *) bad read-and-create-same-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4i: Reports both inputs checked and outputs skipped counts --------
+REPO="$(new_repo input-and-output-counts)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+mkdir -p "$REPO/briefs"
+touch "$REPO/briefs/DELEGATE.md"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Read \`briefs/DELEGATE.md\` and write \`docs/new-module.md\`.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check input-and-output-counts-rc "$CODE" 0 "exit 0 for brief with input and output paths"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*"input_paths (1 checked, 1 output skipped)"*)
+    ok input-and-output-counts-status "reported BRIEF_VALID with 1 checked, 1 output skipped" ;;
+  *) bad input-and-output-counts-status "unexpected output: $OUT" ;;
+esac
+
 # --- Check 5: Path outside repository (~/.claude/something) -----------------
 REPO="$(new_repo outside-tilde)"
 RUN_ID="$(cat "$REPO/.agy/current")"
@@ -210,6 +407,29 @@ case "$OUT" in
   *"STATUS: BRIEF_INVALID(outside_path:/etc/passwd)"*)
     ok outside-abs-status "reported outside_path (/etc/passwd)" ;;
   *) bad outside-abs-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 5c: Tilde in table or ellipsis is not treated as outside path -----
+REPO="$(new_repo tilde-example)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+- Write nothing outside this repository (~/ or ~/... are examples of outside paths).
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check tilde-example-rc "$CODE" 0 "exit 0 when brief mentions ~/ or ~/... as examples"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok tilde-example-status "reported BRIEF_VALID for tilde example mentions" ;;
+  *) bad tilde-example-status "unexpected output: $OUT" ;;
 esac
 
 # --- Check 3: Missing shell prohibition & --allow-shell override ------------
