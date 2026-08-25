@@ -34,6 +34,9 @@ if [ "${1:-}" = "models" ]; then
   printf 'gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\ngemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n'
   exit 0
 fi
+if [ -n "${STUB_SLEEP_SEC:-}" ]; then
+  sleep "$STUB_SLEEP_SEC"
+fi
 [ -n "${STUB_ARGV:-}" ] && printf '%s\n' "$@" > "$STUB_ARGV"
 if [ -n "${STUB_MUTATE_SCRIPT:-}" ] && [ -f "$STUB_MUTATE_SCRIPT" ]; then
   printf '\nthis is a syntax error that would kill bash if executed mid-run: (\n' >> "$STUB_MUTATE_SCRIPT"
@@ -405,6 +408,211 @@ case "$(cat "$STDERR_U" 2>/dev/null)" in
   *) ok u-external-no-reexec "no re-execution diagnostic when script is outside target repo" ;;
 esac
 
+# --- concurrency cap & in-flight worker accounting -------------------------
+
+# v. default cap allows exactly one worker and refuses a second concurrent dispatch
+REPO_V="$(new_repo v-concurrency-default)"
+RUN_ID_V1="$(run_dir_new --dir "$REPO_V" --task "concurrency test 1")"
+RUN_ID_V2="$(run_dir_new --dir "$REPO_V" --task "concurrency test 2")"
+
+STUB_SLEEP_SEC=2 run_phase "$REPO_V" "$REPO_V" --run "$RUN_ID_V1" >/dev/null 2>&1 &
+PID_V1=$!
+
+# Wait briefly for background dispatch to enter its run
+sleep 0.3
+
+OUT_V2="$(run_phase "$REPO_V" "$REPO_V" --run "$RUN_ID_V2" 2>/dev/null)"; RC_V2=$?
+check v-default-cap-refused-rc "$RC_V2" 8 "second concurrent dispatch is refused with exit 8"
+case "$OUT_V2" in
+  *"STATUS: WORKER_CAP_EXCEEDED(running=1, cap=1)"*)
+    ok v-default-cap-status "status line reports WORKER_CAP_EXCEEDED with running=1, cap=1"
+    ;;
+  *)
+    bad v-default-cap-status "unexpected output on exceeded cap: $OUT_V2"
+    ;;
+esac
+
+wait "$PID_V1" 2>/dev/null || true
+
+# w. explicitly raised cap (--max-workers 2) allows concurrent dispatches
+REPO_W="$(new_repo w-concurrency-raised)"
+RUN_ID_W1="$(run_dir_new --dir "$REPO_W" --task "concurrency raised 1")"
+RUN_ID_W2="$(run_dir_new --dir "$REPO_W" --task "concurrency raised 2")"
+
+STUB_SLEEP_SEC=2 run_phase "$REPO_W" "$REPO_W" --run "$RUN_ID_W1" --max-workers 2 >/dev/null 2>&1 &
+PID_W1=$!
+
+sleep 0.3
+
+OUT_W2="$(run_phase "$REPO_W" "$REPO_W" --run "$RUN_ID_W2" --max-workers 2 2>/dev/null)"; RC_W2=$?
+check w-raised-cap-rc "$RC_W2" 0 "second dispatch with --max-workers 2 succeeds (exit 0)"
+case "$OUT_W2" in
+  *"STATUS: DONE"*) ok w-raised-cap-status "second dispatch completes with STATUS: DONE" ;;
+  *) bad w-raised-cap-status "second dispatch failed: $OUT_W2" ;;
+esac
+
+wait "$PID_W1" 2>/dev/null || true
+
+# x. leftover record from dead process is cleared and does not block dispatch.
+# Construct a PID that is guaranteed not running: spawn a subshell, wait for it
+# to terminate, and confirm via kill -0 that the OS reports no such process.
+REPO_X="$(new_repo x-stale-worker-record)"
+( : ) &
+DEAD_PID=$!
+wait "$DEAD_PID" 2>/dev/null || true
+
+# Explicit reasoning: DEAD_PID was reaped by wait and is verified dead by kill -0.
+if ! kill -0 "$DEAD_PID" 2>/dev/null; then
+  ok x-dead-pid-confirmed "dead pid $DEAD_PID confirmed dead via kill -0"
+else
+  bad x-dead-pid-confirmed "expected pid $DEAD_PID to be dead"
+fi
+
+mkdir -p "$REPO_X/.agy/workers"
+STALE_REC="$REPO_X/.agy/workers/stale_${DEAD_PID}.rec"
+printf 'pid=%s\nrun=stale-run\nphase=TEST\nstarted=2026-08-25T00:00:00Z\n' "$DEAD_PID" > "$STALE_REC"
+
+OUT_X="$(run_phase "$REPO_X" "$REPO_X" 2>/dev/null)"; RC_X=$?
+check x-stale-record-rc "$RC_X" 0 "dispatch with stale worker record succeeds (exit 0)"
+[ ! -f "$STALE_REC" ] && ok x-stale-record-cleaned "stale worker record was cleaned up" \
+  || bad x-stale-record-cleaned "stale worker record was not removed"
+
+# y. worker record is cleaned up when a dispatch finishes and also when it fails
+REPO_Y="$(new_repo y-record-cleanup)"
+run_phase "$REPO_Y" "$REPO_Y" >/dev/null 2>&1
+RUNNING_Y1="$(ls -A "$REPO_Y/.agy/workers" 2>/dev/null || true)"
+check y-clean-on-success "${RUNNING_Y1:-empty}" "empty" "workers directory empty after successful dispatch"
+
+# Failing dispatch
+STUB_RC=1 run_phase "$REPO_Y" "$REPO_Y" >/dev/null 2>&1 || true
+RUNNING_Y2="$(ls -A "$REPO_Y/.agy/workers" 2>/dev/null || true)"
+check y-clean-on-failure "${RUNNING_Y2:-empty}" "empty" "workers directory empty after failing dispatch"
+
+# z. progress heartbeat lines on stderr carry the run id
+REPO_Z="$(new_repo z-progress-run-id)"
+RUN_ID_Z="$(run_dir_new --dir "$REPO_Z" --task "progress run id test")"
+STDERR_Z="$ROOT/stderr-progress-z"
+VALID_BRIEF_Z="$REPO_Z/valid_brief.md"
+cat > "$VALID_BRIEF_Z" <<EOF
+# Phase: TEST
+Goal: test progress line run id.
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+- Write nothing outside this repo.
+Contract:
+Write verdict to .agy/runs/$RUN_ID_Z/phases/TEST/verdict and print that same line as STATUS: DONE | File: CHANGES.md.
+EOF
+
+AGY_HEARTBEAT_INTERVAL=1 STUB_SLEEP_SEC=2 AGY_BIN="$STUB" STUB_PHASE=TEST \
+  "$PHASE_SH" --phase TEST --brief "$VALID_BRIEF_Z" --dir "$REPO_Z" --run "$RUN_ID_Z" --no-brief-lint --no-preflight >/dev/null 2>"$STDERR_Z"
+
+if grep -q "Run: $RUN_ID_Z" "$STDERR_Z"; then
+  ok z-progress-has-run-id "progress lines on stderr carry the run id ($RUN_ID_Z)"
+else
+  bad z-progress-has-run-id "progress lines missing run id on stderr: $(cat "$STDERR_Z")"
+fi
+
+# --- worker liveness & identity checks -------------------------------------
+
+# aa. live process with missing run field does not count as worker and record is cleared
+REPO_AA="$(new_repo aa-live-proc-missing-run)"
+sleep 10 &
+LIVE_PID_AA=$!
+if kill -0 "$LIVE_PID_AA" 2>/dev/null; then
+  ok aa-live-pid-confirmed "fixture pid $LIVE_PID_AA confirmed alive"
+else
+  bad aa-live-pid-confirmed "expected fixture pid $LIVE_PID_AA to be alive"
+fi
+
+mkdir -p "$REPO_AA/.agy/workers"
+REC_AA="$REPO_AA/.agy/workers/missing_run_${LIVE_PID_AA}.rec"
+printf 'pid=%s\nphase=TEST\nstarted=2026-08-25T00:00:00Z\n' "$LIVE_PID_AA" > "$REC_AA"
+
+OUT_AA="$(run_phase "$REPO_AA" "$REPO_AA" 2>/dev/null)"; RC_AA=$?
+check aa-missing-run-rc "$RC_AA" 0 "dispatch with missing run field record succeeds (exit 0)"
+case "$OUT_AA" in
+  *"STATUS: DONE"*) ok aa-missing-run-status "dispatch completes with STATUS: DONE" ;;
+  *) bad aa-missing-run-status "dispatch failed: $OUT_AA" ;;
+esac
+[ ! -f "$REC_AA" ] && ok aa-missing-run-cleaned "malformed worker record (missing run) cleared" \
+  || bad aa-missing-run-cleaned "worker record was not cleared"
+
+kill "$LIVE_PID_AA" 2>/dev/null || true
+wait "$LIVE_PID_AA" 2>/dev/null || true
+
+# ab. live process with missing phase field does not count as worker and record is cleared
+REPO_AB="$(new_repo ab-live-proc-missing-phase)"
+sleep 10 &
+LIVE_PID_AB=$!
+if kill -0 "$LIVE_PID_AB" 2>/dev/null; then
+  ok ab-live-pid-confirmed "fixture pid $LIVE_PID_AB confirmed alive"
+else
+  bad ab-live-pid-confirmed "expected fixture pid $LIVE_PID_AB to be alive"
+fi
+
+mkdir -p "$REPO_AB/.agy/workers"
+REC_AB="$REPO_AB/.agy/workers/missing_phase_${LIVE_PID_AB}.rec"
+printf 'pid=%s\nrun=valid-run-id\nstarted=2026-08-25T00:00:00Z\n' "$LIVE_PID_AB" > "$REC_AB"
+
+OUT_AB="$(run_phase "$REPO_AB" "$REPO_AB" 2>/dev/null)"; RC_AB=$?
+check ab-missing-phase-rc "$RC_AB" 0 "dispatch with missing phase field record succeeds (exit 0)"
+case "$OUT_AB" in
+  *"STATUS: DONE"*) ok ab-missing-phase-status "dispatch completes with STATUS: DONE" ;;
+  *) bad ab-missing-phase-status "dispatch failed: $OUT_AB" ;;
+esac
+[ ! -f "$REC_AB" ] && ok ab-missing-phase-cleaned "malformed worker record (missing phase) cleared" \
+  || bad ab-missing-phase-cleaned "worker record was not cleared"
+
+kill "$LIVE_PID_AB" 2>/dev/null || true
+wait "$LIVE_PID_AB" 2>/dev/null || true
+
+# ac. live process whose command line contains repository path but is not a dispatch
+REPO_AC="$(new_repo ac-live-proc-repo-path)"
+sh -c 'sleep 10' -- "$REPO_AC" &
+LIVE_PID_AC=$!
+if kill -0 "$LIVE_PID_AC" 2>/dev/null; then
+  ok ac-live-pid-confirmed "fixture pid $LIVE_PID_AC confirmed alive"
+else
+  bad ac-live-pid-confirmed "expected fixture pid $LIVE_PID_AC to be alive"
+fi
+
+mkdir -p "$REPO_AC/.agy/workers"
+REC_AC="$REPO_AC/.agy/workers/unrelated_${LIVE_PID_AC}.rec"
+printf 'pid=%s\nrun=some-run\nphase=TEST\nstarted=2026-08-25T00:00:00Z\n' "$LIVE_PID_AC" > "$REC_AC"
+
+OUT_AC="$(run_phase "$REPO_AC" "$REPO_AC" 2>/dev/null)"; RC_AC=$?
+check ac-unrelated-proc-rc "$RC_AC" 0 "dispatch with unrelated process record succeeds (exit 0)"
+case "$OUT_AC" in
+  *"STATUS: DONE"*) ok ac-unrelated-proc-status "dispatch completes with STATUS: DONE" ;;
+  *) bad ac-unrelated-proc-status "dispatch failed: $OUT_AC" ;;
+esac
+[ ! -f "$REC_AC" ] && ok ac-unrelated-proc-cleaned "record for unrelated process cleared" \
+  || bad ac-unrelated-proc-cleaned "record for unrelated process was not cleared"
+
+kill "$LIVE_PID_AC" 2>/dev/null || true
+wait "$LIVE_PID_AC" 2>/dev/null || true
+
+# ad. AGY_MAX_WORKERS environment variable is honoured
+REPO_AD="$(new_repo ad-env-max-workers)"
+RUN_ID_AD1="$(run_dir_new --dir "$REPO_AD" --task "env max workers 1")"
+RUN_ID_AD2="$(run_dir_new --dir "$REPO_AD" --task "env max workers 2")"
+
+STUB_SLEEP_SEC=2 AGY_MAX_WORKERS=2 run_phase "$REPO_AD" "$REPO_AD" --run "$RUN_ID_AD1" >/dev/null 2>&1 &
+PID_AD1=$!
+
+sleep 0.3
+
+OUT_AD2="$(AGY_MAX_WORKERS=2 run_phase "$REPO_AD" "$REPO_AD" --run "$RUN_ID_AD2" 2>/dev/null)"; RC_AD2=$?
+check ad-env-max-workers-rc "$RC_AD2" 0 "second dispatch with AGY_MAX_WORKERS=2 succeeds (exit 0)"
+case "$OUT_AD2" in
+  *"STATUS: DONE"*) ok ad-env-max-workers-status "second dispatch with AGY_MAX_WORKERS=2 completes with STATUS: DONE" ;;
+  *) bad ad-env-max-workers-status "second dispatch failed: $OUT_AD2" ;;
+esac
+
+wait "$PID_AD1" 2>/dev/null || true
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
+
 

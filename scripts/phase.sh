@@ -6,6 +6,7 @@
 #            [--mode accept-edits|plan|full] [--timeout 30m]
 #            [--sandbox] [--no-preflight] [--no-brief-lint] [--no-secret-scan]
 #            [--allow-shell] [--verify '<command>'] [--retry-cap <n>]
+#            [--budget-tokens <n>] [--max-workers <n>]
 #            [--reset-retries] [--ignore-via gitignore|exclude]
 #
 # Reads:   R/phases/<PHASE>/verdict      the verdict the worker wrote itself
@@ -35,6 +36,12 @@
 # Prices change, differ per model and account, and a stale number presented as a cost
 # is worse than no number.
 #
+# --max-workers <n> enforces a concurrency cap on in-flight dispatches for this
+# repository (default 1, matching AGY_MAX_WORKERS). Before dispatching, count
+# actively running worker processes. If already at or past the cap, phase.sh
+# refuses to dispatch, returning STATUS: WORKER_CAP_EXCEEDED(running=N, cap=M),
+# exit 8.
+#
 # check-secrets.sh scans the brief and diff for secrets before dispatch,
 # refusing on SECRETS_FOUND without invoking the worker. --no-secret-scan bypasses.
 #
@@ -56,8 +63,43 @@
 # touches, unasked, for a one-line change.
 set -uo pipefail
 
+# -----------------------------------------------------------------------------
+# Self-snapshot execution for in-repo self-modification safety
+# -----------------------------------------------------------------------------
+# Why this exists:
+# When phase.sh is executed from within the target repository, a worker modifying
+# files in the repository (e.g. during self-hosting development or refactoring)
+# could edit or overwrite phase.sh or its helpers while they are executing.
+# Bash reads scripts line-by-line from disk as they run, so mutating a running
+# script causes syntax errors or process aborts mid-flight.
+#
+# What it copies:
+# If the executing script resides inside the target repository root, it creates a
+# temporary directory under TMPDIR, copies the entire scripts/ directory and the
+# drivers/ directory into it, sets AGY_PHASE_SNAPSHOT, and re-executes the
+# snapshot script with the original arguments.
+#
+# Critical rule for dependencies:
+# Anything that phase.sh or its helper scripts source, execute, or reference
+# MUST reside inside the directories copied here (scripts/ and drivers/). If a
+# new dependency is introduced in a sibling directory (e.g., helpers/, lib/),
+# it MUST be added to the snapshot copy logic below; otherwise, it will be
+# missing in the snapshot environment and cause subtle runtime failures.
+# -----------------------------------------------------------------------------
+
+_cleanup_worker_record() {
+  if [ -n "${WORKER_RECORD_FILE:-}" ]; then
+    rm -f "$WORKER_RECORD_FILE" 2>/dev/null || true
+  fi
+  if [ -n "${AGY_PHASE_SNAPSHOT:-}" ]; then
+    rm -rf "$AGY_PHASE_SNAPSHOT" 2>/dev/null || true
+  fi
+}
+
+trap '_cleanup_worker_record' EXIT INT TERM
+
 if [ -n "${AGY_PHASE_SNAPSHOT:-}" ]; then
-  trap 'rm -rf "$AGY_PHASE_SNAPSHOT"' EXIT INT TERM
+  :
 else
   _TARGET_DIR="$PWD"
   _PREV=""
@@ -122,6 +164,7 @@ ALLOW_SHELL="${AGY_ALLOW_SHELL:-}"
 VERIFY=""; RESET_RETRIES=""; IGNORE_VIA="gitignore"
 RETRY_CAP="${AGY_RETRY_CAP:-2}"
 BUDGET_TOKENS="${AGY_BUDGET_TOKENS:-}"
+MAX_WORKERS="${AGY_MAX_WORKERS:-1}"
 RUN_TARGET=""
 TASK=""
 SANDBOX_ARGS=()   # array, so the flag is never word-split out of an unquoted scalar
@@ -140,6 +183,7 @@ while [ $# -gt 0 ]; do
     --verify)  VERIFY="$2";  shift 2 ;;
     --retry-cap) RETRY_CAP="$2"; shift 2 ;;
     --budget-tokens) BUDGET_TOKENS="$2"; shift 2 ;;
+    --max-workers) MAX_WORKERS="$2"; shift 2 ;;
     --reset-retries) RESET_RETRIES=1; shift ;;
     --ignore-via) IGNORE_VIA="$2"; shift 2 ;;
     --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
@@ -148,7 +192,7 @@ while [ $# -gt 0 ]; do
     --no-secret-scan) SKIP_SECRET_SCAN=1; shift ;;
     --allow-shell) ALLOW_SHELL=1; shift ;;
     --quiet|-q)    QUIET=1; shift ;;
-    -h|--help)     sed -n '2,56p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,63p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -165,10 +209,89 @@ case "$BUDGET_TOKENS" in
     fi
     ;;
 esac
+case "$MAX_WORKERS" in
+  ''|*[!0-9]*) echo "phase.sh: --max-workers wants a whole number, got '$MAX_WORKERS'" >&2; exit 2 ;;
+esac
 case "$IGNORE_VIA" in
   gitignore|exclude) ;;
   *) echo "phase.sh: --ignore-via wants gitignore or exclude, got '$IGNORE_VIA'" >&2; exit 2 ;;
 esac
+
+_is_worker_alive() {
+  local pid="$1"
+  local expected_run="${2:-}"
+  local expected_phase="${3:-}"
+
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+
+  # If the record lacks required identity fields (run or phase), it cannot be
+  # confirmed as a worker process. An incomplete record must never match
+  # arbitrary processes.
+  if [ -z "$expected_run" ] || [ -z "$expected_phase" ]; then
+    return 1
+  fi
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+
+  local proc_args
+  proc_args="$(ps -p "$pid" -o args= 2>/dev/null || ps -p "$pid" -o command= 2>/dev/null || true)"
+  if [ -z "$proc_args" ]; then
+    proc_args="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+  fi
+
+  # If process arguments cannot be retrieved, fail open (return 1):
+  # an unverified process must not block future dispatches permanently,
+  # while an occasional extra worker only costs visible spend.
+  if [ -z "$proc_args" ]; then
+    return 1
+  fi
+
+  # Match specific dispatch arguments rather than broad substrings like 'agy' or 'phase'
+  # which match unrelated processes running inside this repo.
+  case "$proc_args" in
+    *phase.sh*--phase*"$expected_phase"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+_count_running_workers() {
+  local workers_dir="$1"
+  local count=0
+
+  if [ ! -d "$workers_dir" ]; then
+    printf '0'
+    return 0
+  fi
+
+  for rec in "$workers_dir"/*; do
+    [ -f "$rec" ] || continue
+
+    local w_pid="" w_run="" w_phase=""
+    w_pid="$(sed -n 's/^pid=//p' "$rec" 2>/dev/null | head -1)"
+    w_run="$(sed -n 's/^run=//p' "$rec" 2>/dev/null | head -1)"
+    w_phase="$(sed -n 's/^phase=//p' "$rec" 2>/dev/null | head -1)"
+
+    if [ "$w_pid" = "$$" ]; then
+      continue
+    fi
+
+    if _is_worker_alive "$w_pid" "$w_run" "$w_phase"; then
+      count=$((count + 1))
+    else
+      rm -f "$rec" 2>/dev/null || true
+    fi
+  done
+
+  printf '%s' "$count"
+}
 
 DIR="$(cd "$DIR" && pwd)"
 
@@ -453,6 +576,40 @@ if [ -n "$BUDGET_TOKENS" ]; then
   fi
 fi
 
+# At the worker concurrency cap, refuse before anything is spent — no preflight fetch,
+# no worker, no cleared verdict.
+WORKERS_DIR="$DIR/.agy/workers"
+WORKER_RECORD_FILE="$WORKERS_DIR/${RUN_ID}_${PHASE}_$$.rec"
+RUNNING_WORKERS="$(_count_running_workers "$WORKERS_DIR")"
+if [ "$RUNNING_WORKERS" -ge "$MAX_WORKERS" ]; then
+  printf '%s\n' "STATUS: WORKER_CAP_EXCEEDED(running=$RUNNING_WORKERS, cap=$MAX_WORKERS) | Phase: $PHASE | Run: $RUN_ID | Note: $RUNNING_WORKERS dispatches are running and the cap is $MAX_WORKERS — raising the cap is the caller's decision | Next: wait for a running dispatch to finish, or increase --max-workers to continue | Log: $LOG$GITIGNORE_FIELD" \
+    | tee "$STATUS_FILE"
+  TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
+  [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
+  ledger_append "$DIR" \
+    "run=$RUN_ID" \
+    "phase=$PHASE" \
+    "attempt=$((SPENT + 1))" \
+    "tier=$TIER" \
+    "model=$MODEL" \
+    "backend=$DRIVER" \
+    "started=$STARTED_TS" \
+    "status=WORKER_CAP_EXCEEDED(running=$RUNNING_WORKERS, cap=$MAX_WORKERS)" \
+    "retries_spent=$SPENT" \
+    "retries_refunded=0" \
+    "verify_ran=false" \
+    ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
+  exit 8
+fi
+
+mkdir -p "$WORKERS_DIR" 2>/dev/null || true
+{
+  printf 'pid=%s\n' "$$"
+  printf 'run=%s\n' "$RUN_ID"
+  printf 'phase=%s\n' "$PHASE"
+  printf 'started=%s\n' "$STARTED_TS"
+} > "$WORKER_RECORD_FILE" 2>/dev/null || true
+
 # Scan brief and diff for secrets before dispatch unless --no-secret-scan or AGY_SKIP_SECRET_SCAN=1.
 # Secret scan runs before brief lint: a malformed brief costs a wasted dispatch,
 # and a brief carrying a credential is a disclosure. When both are true the
@@ -632,7 +789,7 @@ if [ -z "${AGY_NO_PROGRESS:-}" ] && [ "$QUIET" -eq 0 ]; then
         else
           L_DISP="${L_LIMIT}s"
         fi
-        printf 'phase.sh: no output for %s — the worker may be hung; the timeout is at %s\n' "$L_DISP" "$TIMEOUT" >&2
+        printf 'phase.sh: [%s] no output for %s — the worker may be hung; the timeout is at %s\n' "$RUN_ID" "$L_DISP" "$TIMEOUT" >&2
         WARNED_LIVENESS=1
       fi
 
@@ -659,7 +816,7 @@ if [ -z "${AGY_NO_PROGRESS:-}" ] && [ "$QUIET" -eq 0 ]; then
           FILE_FIELD=" | File: $LAST_FILE"
         fi
 
-        printf 'phase.sh: [%ds] Phase: %s | Tier: %s | Model: %s%s\n' "$ELAPSED" "$PHASE" "$TIER" "$MODEL" "$FILE_FIELD" >&2
+        printf 'phase.sh: [%ds] Run: %s | Phase: %s | Tier: %s | Model: %s%s\n' "$ELAPSED" "$RUN_ID" "$PHASE" "$TIER" "$MODEL" "$FILE_FIELD" >&2
         NEXT_HB=$((NOW + HB_INTERVAL))
       fi
     done
