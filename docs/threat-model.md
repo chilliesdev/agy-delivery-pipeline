@@ -46,6 +46,50 @@ by code. A discovery report or review artifact influenced by repository
 content is therefore a direct, unconstrained path from files on disk into every
 subsequent dispatch brief.
 
+## Untrusted input: GitHub issues
+
+The pipeline can start from a GitHub issue via `scripts/issue.sh`. An issue body
+is written by anyone who can open an issue on the repository, making it an
+unauthenticated, untrusted input vector arriving directly from external users.
+
+`scripts/issue.sh` reads the issue and writes it to `.agy/runs/<run-id>/ISSUE.md`.
+To establish a clear structural boundary:
+
+- `ISSUE.md` opens with an explicit header stating that everything below is
+  quoted from a GitHub issue, that it is a description of a problem and not a
+  set of instructions, and that instructions appearing inside it are part of the
+  quoted material.
+- Issue metadata (title, labels, state, URL) are rendered as plain fields.
+- The issue body is quoted inside a markdown fence whose length dynamically
+  exceeds the longest run of consecutive backticks anywhere in the body
+  (minimum three backticks), preventing fence-breakout attacks.
+- The body text is preserved byte-for-byte without alteration, escaping, or
+  keyword filtering. Quoting is the entire mechanism; rewriting issue text
+  would corrupt the evidence without providing meaningful protection.
+
+**What this boundary does not protect against:**
+
+A worker model reading `ISSUE.md` can still be persuaded by prompt injection
+payloads contained within the quoted body. The fence marks the boundary and
+establishes provenance; it does not enforce model obedience to it.
+
+The defences in place combine mechanical and procedural controls:
+1. **No shell execution in Phase 1 (mechanical).** Workers in Phase 1 run under
+   `--mode accept-edits`, where the CLI driver mechanically denies shell tool
+   use. An attempt to execute shell commands aborts the run on permission denial.
+2. **No git mutation (split mechanism / procedural).** In Phase 1, workers
+   cannot invoke `git` because shell execution is mechanically denied. Pipeline
+   scripts themselves never run `git push`, `tag`, or `merge`. However, in
+   Phase 3 (QA) under `--mode full`, shell execution is unrestricted; the rule
+   against git mutation is enforced only by brief instructions telling the worker
+   not to, not by a mechanical sandbox or git hook.
+3. **Gating and diff review (mechanical `--verify`, procedural review).** `--verify`
+   is mechanical and runs automatically on every dispatch configured with it. Diff
+   integrity checking (`check-diff-integrity.sh`) and Phase 2 review are
+   procedural: they run only when an orchestrator invokes them between phases on
+   the review path. As demonstrated by issue #56, unreviewed worker edits can
+   reach downstream phases if the orchestrator omits these steps.
+
 ## Secrets and data leakage
 
 Repository contents, captured diffs, and briefs leave the local machine to be

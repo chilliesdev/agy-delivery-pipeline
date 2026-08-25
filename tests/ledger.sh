@@ -516,5 +516,42 @@ else
   ok report-rates-absent "report omits dollar figures when rates not supplied"
 fi
 
+# --- 19. issue key recording, omission when absent, and unknown key error ---
+
+R17="$(new_repo issue-and-unknown-keys)"
+ledger_append "$R17" run=run-17 issue=58 phase=TEST tier=medium model=m backend=agy \
+  started=2026-08-24T10:00:00Z elapsed_s=5 worker_rc=0 verdict=PASSED verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0
+LINE17_A="$(cat "$R17/.agy/ledger.jsonl" 2>/dev/null)"
+
+if printf '%s\n' "$LINE17_A" | grep -q '"issue":58'; then
+  ok issue-key-recorded "issue key recorded in ledger line"
+else
+  bad issue-key-recorded "issue key missing in ledger line: $LINE17_A"
+fi
+
+# Run without issue produces line with no issue field
+ledger_append "$R17" run=run-17-no-issue phase=TEST tier=medium model=m backend=agy \
+  started=2026-08-24T10:05:00Z elapsed_s=5 worker_rc=0 verdict=PASSED verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0
+LINE17_B="$(tail -1 "$R17/.agy/ledger.jsonl" 2>/dev/null)"
+
+if printf '%s\n' "$LINE17_B" | grep -q '"issue"'; then
+  bad issue-absent-omitted "issue key present in ledger for run without issue: $LINE17_B"
+else
+  ok issue-absent-omitted "issue key omitted entirely for run without issue"
+fi
+
+# Unknown key returns 2 and names the key on stderr
+ERR17="$ROOT/err17.txt"
+/bin/bash "$LEDGER_SH" append --dir "$R17" run=run-17-bad retries_spend=1 2> "$ERR17"; RC17=$?
+check unknown-key-rc "$RC17" 2 "unknown key returns exit code 2"
+
+if grep -q "retries_spend" "$ERR17" 2>/dev/null; then
+  ok unknown-key-names-key "stderr names unrecognised key"
+else
+  bad unknown-key-names-key "stderr did not name unrecognised key: $(cat "$ERR17" 2>/dev/null)"
+fi
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
