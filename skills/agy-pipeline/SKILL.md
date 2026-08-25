@@ -138,6 +138,13 @@ tokens. Start from the shipped templates at `briefs/<PHASE>.md` (such as
 [briefs/IMPLEMENT.md](../../briefs/IMPLEMENT.md)) as the starting shape for each
 phase's brief. Covered by [tests/check-brief.sh](../../tests/check-brief.sh).
 
+**Secret scanning.** Each dispatch is scanned by
+[check-secrets.sh](../../scripts/check-secrets.sh) before starting the worker.
+A `STATUS: SECRETS_FOUND(<what>, <file>:<line>)` refusal blocks dispatch if a
+private key or credential appears in the brief or captured diff, without
+echoing the secret value. Pass `--no-secret-scan` to bypass. Covered by
+[tests/check-secrets.sh](../../tests/check-secrets.sh).
+
 `phase.sh` is covered by [tests/phase-status.sh](../../tests/phase-status.sh),
 [tests/phase-dispatch.sh](../../tests/phase-dispatch.sh) and
 [tests/phase-verify.sh](../../tests/phase-verify.sh) — run all three after touching it.

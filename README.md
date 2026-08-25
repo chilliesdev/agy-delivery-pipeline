@@ -283,6 +283,27 @@ Shipped templates in `briefs/` (`briefs/DISCOVERY.md`, `briefs/IMPLEMENT.md`,
 `briefs/REVIEW.md`, `briefs/QA.md`, `briefs/RELEASE.md`, `briefs/DELEGATE.md`)
 provide the standard, pre-validated starting shape for each phase.
 
+## Secret scanning
+
+`scripts/check-secrets.sh` scans briefs and captured diffs for credentials
+before any worker is dispatched. `scripts/phase.sh` runs it automatically on
+every dispatch and refuses on detection with `STATUS: SECRETS_FOUND` (exit 3)
+before starting `agy`, preventing accidental leakage to external models. Pass
+`--no-secret-scan` (or set `AGY_SKIP_SECRET_SCAN=1`) to bypass.
+
+Checks performed (high-confidence, low-false-positive set):
+- **Private keys:** headers and blocks (`BEGIN … PRIVATE KEY`).
+- **AWS access keys:** `AKIA` followed by 16 alphanumeric characters.
+- **GitHub tokens:** `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`.
+- **Slack tokens:** `xoxb-`, `xoxa-`, `xoxp-`, `xoxr-`, `xoxs-`.
+- **Google API keys:** `AIza` followed by 35 characters.
+- **.env assignments:** assignments with non-placeholder secret values.
+
+**Never prints the secret.** Refusals name the pattern, file, and line number
+without echoing the credential value into logs or terminal scrollback. Obvious
+placeholders (`changeme`, `your-key-here`, `<insert-key>`) are ignored to avoid
+false alarms.
+
 ## Running a phase by hand
 
 The scripts are usable outside Claude Code:
@@ -291,6 +312,7 @@ The scripts are usable outside Claude Code:
 scripts/preflight.sh --tier low
 RUN_ID=$(scripts/run-dir.sh new --task "my task")
 scripts/check-brief.sh --phase DISCOVERY --brief .agy/runs/$RUN_ID/phases/DISCOVERY/brief.md --dir . --run "$RUN_ID"
+scripts/check-secrets.sh --brief .agy/runs/$RUN_ID/phases/DISCOVERY/brief.md --dir . --run "$RUN_ID"
 scripts/phase.sh --phase DISCOVERY --run "$RUN_ID" --brief .agy/runs/$RUN_ID/phases/DISCOVERY/brief.md --tier low
 scripts/capture-diff.sh --dir .
 scripts/check-diff-integrity.sh --dir .
@@ -327,16 +349,33 @@ around them:
   verdict contract's two routes earning their keep — one of them changed shape
   entirely and the other did not notice.
 
+## Security guarantees
+
+The pipeline enforces concrete architectural guarantees across every run:
+
+- **No push, no tag, no merge.** No script and no worker in this repository runs
+  `git push`, creates a tag, or merges — not behind a flag, not as a default.
+  The release phase inspects, prepares and proposes, printing the commands a
+  person then runs by hand.
+- **Workers never handle credentials.** Discovery reports credential names and
+  never values; secret scanning prevents credentials from entering briefs or
+  diffs.
+- **The orchestrator prints commands rather than running them.** Irreversible
+  actions are surfaced as instructions for the operator, never executed
+  autonomously.
+- **The orchestrator gates every dispatch.** A worker's `STATUS: PASSED` is a
+  claim, not evidence: the orchestrator runs the tests itself, checks diff
+  integrity, and spot-checks the diff before advancing.
+- **Brief path confinement.** `scripts/check-brief.sh` refuses briefs naming
+  paths outside the repository or pointing to stale temporary locations.
+- **Ledger privacy by default.** `scripts/ledger.sh` records task strings as a
+  hash by default (`git hash-object`), keeping `.agy/ledger.jsonl` safe to
+  share.
+
+See [docs/threat-model.md](docs/threat-model.md) for the complete threat model,
+trust boundaries, and uncovered risks.
+
 ## Design stance
-
-The orchestrator gates every dispatch. A worker's `STATUS: PASSED` is a claim,
-not evidence: the orchestrator runs the tests itself, checks diff integrity, and
-spot-checks the diff before advancing. Workers never push, never handle secrets,
-never publish.
-
-Nor does anything else here. **No script and no worker in this repository runs
-`git push`, creates a tag, or merges** — the release phase inspects, prepares and
-proposes, printing the commands a person then runs by hand.
 
 Delegation is a skill rather than a hook. A `PreToolUse` deny on `Edit` would
 mean Claude cannot edit code in any repo where the plugin is enabled — including

@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# Exercise check-secrets.sh: that secrets in briefs and diffs are refused without
+# echoing the secret value, that placeholders do not fire, that phase.sh enforces
+# the scan before dispatch, and that --no-secret-scan bypasses it.
+#
+#   tests/check-secrets.sh
+#
+# Runs against throwaway repos under ${TMPDIR:-/tmp}. Nothing is written inside
+# this repo. Prints one line per case and exits non-zero if any case fails.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHECK="$HERE/../scripts/check-secrets.sh"
+PHASE_SH="$HERE/../scripts/phase.sh"
+RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
+
+[ -f "$CHECK" ] || { echo "check-secrets-test: check-secrets.sh not found next door" >&2; exit 2; }
+[ -f "$PHASE_SH" ] || { echo "check-secrets-test: phase.sh not found next door" >&2; exit 2; }
+[ -f "$RUN_DIR_SH" ] || { echo "check-secrets-test: run-dir.sh not found next door" >&2; exit 2; }
+
+. "$RUN_DIR_SH"
+
+ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/check-secrets.XXXXXX")" && pwd)"
+trap 'rm -rf "$ROOT"' EXIT INT TERM
+
+PASS=0; FAIL=0
+ok()   { PASS=$((PASS + 1)); printf '%-34s ok   %s\n' "$1" "$2"; }
+bad()  { FAIL=$((FAIL + 1)); printf '%-34s FAIL %s\n' "$1" "$2"; }
+check() { if [ "$2" = "$3" ]; then ok "$1" "$4"; else bad "$1" "$4 (got '$2', want '$3')"; fi; }
+
+# Stub agy for phase.sh tests
+STUB="$ROOT/agy"
+cat > "$STUB" <<'STUB_EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+if [ "${1:-}" = "models" ]; then
+  printf 'gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\ngemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n'
+  exit 0
+fi
+[ -n "${STUB_CALLED_FILE:-}" ] && printf '1\n' >> "$STUB_CALLED_FILE"
+if [ -f .agy/current ]; then
+  CUR_RUN="$(cat .agy/current 2>/dev/null || true)"
+  if [ -n "$CUR_RUN" ]; then
+    mkdir -p ".agy/runs/$CUR_RUN/phases/${STUB_PHASE:-TEST}"
+    printf '%b\n' "${STUB_VERDICT:-STATUS: DONE | File: CHANGES.md}" > ".agy/runs/$CUR_RUN/phases/${STUB_PHASE:-TEST}/verdict"
+  fi
+fi
+printf '%b\n' "${STUB_VERDICT:-STATUS: DONE | File: CHANGES.md}"
+exit 0
+STUB_EOF
+chmod +x "$STUB"
+
+# Helper to create a throwaway repo
+new_repo() {
+  local name="$1"
+  local r="$ROOT/repos/$name"
+  mkdir -p "$r"
+  ( cd "$r" && git init -q . && git config user.email "test@example.com" \
+      && git config user.name "Tester" && git commit -q --allow-empty -m "initial" )
+  local run_id="$(run_dir_new --dir "$r" --task "secret test $name")"
+  [ -n "$run_id" ] || { echo "check-secrets-test: run_dir_new failed for $name" >&2; exit 2; }
+  printf '%s' "$r"
+}
+
+run_check() {
+  OUT="$(/bin/bash "$CHECK" "$@" 2>/dev/null)"
+  CODE=$?
+}
+
+# --- 1. Pattern fixture: private_key header in brief -------------------------
+R="$(new_repo privkey-brief)"
+BRIEF="$R/brief.md"
+cat > "$BRIEF" <<'EOF'
+# Task
+Deploy with the following configuration:
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEA0Y...
+-----END RSA PRIVATE KEY-----
+EOF
+run_check --dir "$R" --brief "$BRIEF"
+check privkey-rc "$CODE" 3 "exit 3 on private key in brief"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(private_key, brief.md:3)"*)
+    ok privkey-status "reported SECRETS_FOUND(private_key, brief.md:3)" ;;
+  *) bad privkey-status "unexpected output: $OUT" ;;
+esac
+
+# --- 2. Pattern fixture: generic private key (BEGIN PRIVATE KEY) -------------
+BRIEF_GEN="$R/brief_gen.md"
+cat > "$BRIEF_GEN" <<'EOF'
+# Setup
+-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7...
+-----END PRIVATE KEY-----
+EOF
+run_check --dir "$R" --brief "$BRIEF_GEN"
+check privkey-gen-rc "$CODE" 3 "exit 3 on generic private key"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(private_key, brief_gen.md:2)"*)
+    ok privkey-gen-status "reported SECRETS_FOUND(private_key, brief_gen.md:2)" ;;
+  *) bad privkey-gen-status "unexpected output: $OUT" ;;
+esac
+
+# --- 3. Pattern fixture: AWS access key ID -----------------------------------
+BRIEF_AWS="$R/brief_aws.md"
+SECRET_AWS="AKIA1234567890ABCDEF"
+cat > "$BRIEF_AWS" <<EOF
+Use credentials: AWS_ACCESS_KEY_ID=$SECRET_AWS
+EOF
+run_check --dir "$R" --brief "$BRIEF_AWS"
+check aws-rc "$CODE" 3 "exit 3 on AWS access key ID"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(aws_access_key, brief_aws.md:1)"*)
+    ok aws-status "reported SECRETS_FOUND(aws_access_key, brief_aws.md:1)" ;;
+  *) bad aws-status "unexpected output: $OUT" ;;
+esac
+case "$OUT" in
+  *"$SECRET_AWS"*) bad aws-no-echo "output contained secret AWS key value" ;;
+  *) ok aws-no-echo "output did not contain secret AWS key value" ;;
+esac
+
+# --- 4. Pattern fixture: GitHub token ----------------------------------------
+BRIEF_GH="$R/brief_gh.md"
+SECRET_GH="ghp_1234567890abcdef1234567890abcdef12"
+cat > "$BRIEF_GH" <<EOF
+GITHUB_TOKEN=$SECRET_GH
+EOF
+run_check --dir "$R" --brief "$BRIEF_GH"
+check gh-rc "$CODE" 3 "exit 3 on GitHub token"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(github_token, brief_gh.md:1)"*)
+    ok gh-status "reported SECRETS_FOUND(github_token, brief_gh.md:1)" ;;
+  *) bad gh-status "unexpected output: $OUT" ;;
+esac
+case "$OUT" in
+  *"$SECRET_GH"*) bad gh-no-echo "output contained secret GitHub token value" ;;
+  *) ok gh-no-echo "output did not contain secret GitHub token value" ;;
+esac
+
+# --- 5. Pattern fixture: Slack token -----------------------------------------
+BRIEF_SLACK="$R/brief_slack.md"
+SECRET_SLACK="xoxb-123456789012-1234567890123-abcdef123456"
+cat > "$BRIEF_SLACK" <<EOF
+SLACK_BOT_TOKEN=$SECRET_SLACK
+EOF
+run_check --dir "$R" --brief "$BRIEF_SLACK"
+check slack-rc "$CODE" 3 "exit 3 on Slack token"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(slack_token, brief_slack.md:1)"*)
+    ok slack-status "reported SECRETS_FOUND(slack_token, brief_slack.md:1)" ;;
+  *) bad slack-status "unexpected output: $OUT" ;;
+esac
+case "$OUT" in
+  *"$SECRET_SLACK"*) bad slack-no-echo "output contained secret Slack token value" ;;
+  *) ok slack-no-echo "output did not contain secret Slack token value" ;;
+esac
+
+# --- 6. Pattern fixture: Google API key --------------------------------------
+BRIEF_GOOGLE="$R/brief_google.md"
+SECRET_GOOGLE="AIzaSyA1234567890123456789012345678901"
+cat > "$BRIEF_GOOGLE" <<EOF
+API_KEY=$SECRET_GOOGLE
+EOF
+run_check --dir "$R" --brief "$BRIEF_GOOGLE"
+check google-rc "$CODE" 3 "exit 3 on Google API key"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(google_api_key, brief_google.md:1)"*)
+    ok google-status "reported SECRETS_FOUND(google_api_key, brief_google.md:1)" ;;
+  *) bad google-status "unexpected output: $OUT" ;;
+esac
+case "$OUT" in
+  *"$SECRET_GOOGLE"*) bad google-no-echo "output contained secret Google API key value" ;;
+  *) ok google-no-echo "output did not contain secret Google API key value" ;;
+esac
+
+# --- 7. Pattern fixture: .env-style secret assignment ------------------------
+BRIEF_ENV="$R/brief_env.md"
+SECRET_ENV="SuperSecretP@ssw0rd!123"
+cat > "$BRIEF_ENV" <<EOF
+DATABASE_PASSWORD=$SECRET_ENV
+EOF
+run_check --dir "$R" --brief "$BRIEF_ENV"
+check env-rc "$CODE" 3 "exit 3 on .env secret assignment"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(env_secret, brief_env.md:1)"*)
+    ok env-status "reported SECRETS_FOUND(env_secret, brief_env.md:1)" ;;
+  *) bad env-status "unexpected output: $OUT" ;;
+esac
+case "$OUT" in
+  *"$SECRET_ENV"*) bad env-no-echo "output contained secret env value" ;;
+  *) ok env-no-echo "output did not contain secret env value" ;;
+esac
+
+# --- 8. Placeholder-laden .env that must NOT fire ----------------------------
+BRIEF_PLACEHOLDERS="$R/brief_placeholders.md"
+cat > "$BRIEF_PLACEHOLDERS" <<'EOF'
+# Sample configuration
+PASSWORD=changeme
+API_KEY=your-key-here
+SECRET_TOKEN=YOUR_TOKEN_HERE
+AUTH_KEY=<insert-key>
+DB_PASS=
+CLIENT_SECRET=xxx
+AWS_SECRET=dummy
+API_KEY=test
+PRIVATE_KEY=TODO
+TOKEN=example
+SECRET=...
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+DATABASE_URL=postgres://user:pass@localhost:5432/mydb
+EOF
+run_check --dir "$R" --brief "$BRIEF_PLACEHOLDERS"
+check placeholders-rc "$CODE" 0 "exit 0 on placeholder .env"
+case "$OUT" in
+  *"STATUS: SECRETS_NONE"*)
+    ok placeholders-status "reported SECRETS_NONE for placeholders" ;;
+  *) bad placeholders-status "unexpected output: $OUT" ;;
+esac
+
+# --- 9. Diff containing a private key that must fire -------------------------
+R_DIFF="$(new_repo diff-privkey)"
+RUN_ID_DIFF="$(cat "$R_DIFF/.agy/current")"
+PATCH_FILE="$R_DIFF/.agy/runs/$RUN_ID_DIFF/REVIEW_DIFF.patch"
+cat > "$PATCH_FILE" <<'EOF'
+diff --git a/keys/server.key b/keys/server.key
+new file mode 100644
+--- /dev/null
++++ b/keys/server.key
+@@ -0,0 +1,5 @@
+++-----BEGIN RSA PRIVATE KEY-----
+++MIIEowIBAAKCAQEA0Y...
+++-----END RSA PRIVATE KEY-----
+EOF
+run_check --dir "$R_DIFF" --diff "$PATCH_FILE"
+check diff-privkey-rc "$CODE" 3 "exit 3 on private key in diff"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(private_key, "*".agy/runs/$RUN_ID_DIFF/REVIEW_DIFF.patch:6)"*)
+    ok diff-privkey-status "reported SECRETS_FOUND in diff" ;;
+  *) bad diff-privkey-status "unexpected output: $OUT" ;;
+esac
+
+# --- 10. phase.sh refusing without invoking a worker -------------------------
+R_PHASE="$(new_repo phase-refuse)"
+RUN_ID_PHASE="$(cat "$R_PHASE/.agy/current")"
+BRIEF_LEAK="$R_PHASE/.agy/runs/$RUN_ID_PHASE/phases/IMPLEMENT/brief.md"
+mkdir -p "$(dirname "$BRIEF_LEAK")"
+SECRET_PHASE="AKIA999988887777ZZZZ"
+cat > "$BRIEF_LEAK" <<EOF
+# Phase 1: Implementation
+Goal: implement with API key $SECRET_PHASE
+
+Rules:
+- Do not run shell commands.
+- Do not touch git. No commits.
+- Write nothing outside this repo.
+
+Output Contract:
+Write your one-line verdict to .agy/runs/$RUN_ID_PHASE/phases/IMPLEMENT/verdict, and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+CALLED_LOG="$R_PHASE/worker_called.log"
+rm -f "$CALLED_LOG"
+
+PHASE_OUT="$(STUB_PHASE=IMPLEMENT STUB_CALLED_FILE="$CALLED_LOG" AGY_BIN="$STUB" \
+  /bin/bash "$PHASE_SH" --phase IMPLEMENT --run "$RUN_ID_PHASE" --brief "$BRIEF_LEAK" --dir "$R_PHASE" --no-preflight 2>/dev/null)"
+PHASE_RC=$?
+
+check phase-refuse-rc "$PHASE_RC" 3 "phase.sh exited 3 on secret detection"
+case "$PHASE_OUT" in
+  *"STATUS: SECRETS_FOUND(aws_access_key, "*":2)"*)
+    ok phase-refuse-status "phase.sh reported SECRETS_FOUND" ;;
+  *) bad phase-refuse-status "unexpected phase.sh output: $PHASE_OUT" ;;
+esac
+
+# Check that worker was never called
+if [ -f "$CALLED_LOG" ]; then
+  bad phase-worker-not-called "worker was invoked despite secret detection"
+else
+  ok phase-worker-not-called "worker was not invoked"
+fi
+
+# Check that secret value was not printed by phase.sh
+case "$PHASE_OUT" in
+  *"$SECRET_PHASE"*) bad phase-no-echo "phase.sh output contained secret value" ;;
+  *) ok phase-no-echo "phase.sh output did not contain secret value" ;;
+esac
+
+# --- 11. --no-secret-scan dispatching anyway ---------------------------------
+PHASE_BYPASS_OUT="$(STUB_PHASE=IMPLEMENT STUB_CALLED_FILE="$CALLED_LOG" AGY_BIN="$STUB" \
+  /bin/bash "$PHASE_SH" --phase IMPLEMENT --run "$RUN_ID_PHASE" --brief "$BRIEF_LEAK" --dir "$R_PHASE" --no-preflight --no-secret-scan 2>/dev/null)"
+PHASE_BYPASS_RC=$?
+
+check phase-bypass-rc "$PHASE_BYPASS_RC" 0 "phase.sh exited 0 with --no-secret-scan"
+if [ -f "$CALLED_LOG" ]; then
+  ok phase-bypass-called "worker was invoked with --no-secret-scan"
+else
+  bad phase-bypass-called "worker was not invoked with --no-secret-scan"
+fi
+
+# --- 12. SECRETS_UNCHECKED when no files provided ----------------------------
+R_EMPTY="$(new_repo unchecked-case)"
+run_check --dir "$R_EMPTY"
+check unchecked-rc "$CODE" 0 "exit 0 on SECRETS_UNCHECKED"
+case "$OUT" in
+  *"STATUS: SECRETS_UNCHECKED(no_files_scanned)"*)
+    ok unchecked-status "reported SECRETS_UNCHECKED" ;;
+  *) bad unchecked-status "unexpected output: $OUT" ;;
+esac
+
+# --- 13. Ordering: brief with both a secret and a lint violation -------------
+# A brief carrying both a credential and a lint violation (e.g. wrong phase verdict path)
+# must refuse on SECRETS_FOUND, not BRIEF_INVALID, because disclosure takes precedence.
+R_ORDER="$(new_repo order-test)"
+RUN_ID_ORDER="$(cat "$R_ORDER/.agy/current")"
+BRIEF_ORDER="$R_ORDER/.agy/runs/$RUN_ID_ORDER/phases/IMPLEMENT/brief.md"
+mkdir -p "$(dirname "$BRIEF_ORDER")"
+SECRET_ORDER="AKIA1111222233334444"
+cat > "$BRIEF_ORDER" <<EOF
+# Phase 1: Implementation
+Goal: do the work with key $SECRET_ORDER
+
+Rules:
+- Do not run shell commands.
+- Do not touch git. No commits.
+- Write nothing outside this repo.
+
+Output Contract:
+Write your one-line verdict to .agy/runs/$RUN_ID_ORDER/phases/WRONG_PHASE/verdict, and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+ORDER_LOG="$R_ORDER/worker_called.log"
+rm -f "$ORDER_LOG"
+ORDER_OUT="$(STUB_PHASE=IMPLEMENT STUB_CALLED_FILE="$ORDER_LOG" AGY_BIN="$STUB" \
+  /bin/bash "$PHASE_SH" --phase IMPLEMENT --run "$RUN_ID_ORDER" --brief "$BRIEF_ORDER" --dir "$R_ORDER" --no-preflight 2>/dev/null)"
+ORDER_RC=$?
+
+check order-rc "$ORDER_RC" 3 "phase.sh exited 3 on dual secret+lint violation"
+case "$ORDER_OUT" in
+  *"STATUS: SECRETS_FOUND(aws_access_key, "*":2)"*)
+    ok order-status "phase.sh reported SECRETS_FOUND instead of BRIEF_INVALID" ;;
+  *) bad order-status "unexpected phase.sh output: $ORDER_OUT" ;;
+esac
+
+printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+
