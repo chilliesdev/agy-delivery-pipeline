@@ -35,6 +35,9 @@ if [ "${1:-}" = "models" ]; then
   exit 0
 fi
 [ -n "${STUB_ARGV:-}" ] && printf '%s\n' "$@" > "$STUB_ARGV"
+if [ -n "${STUB_MUTATE_SCRIPT:-}" ] && [ -f "$STUB_MUTATE_SCRIPT" ]; then
+  printf '\nthis is a syntax error that would kill bash if executed mid-run: (\n' >> "$STUB_MUTATE_SCRIPT"
+fi
 if [ -f .agy/current ]; then
   CUR_RUN="$(cat .agy/current 2>/dev/null || true)"
   if [ -n "$CUR_RUN" ]; then
@@ -338,6 +341,69 @@ REPO="$(new_repo s-nonexistent-brief)"
 OUT="$(STUB_PHASE=TEST AGY_BIN="$STUB" \
   "$PHASE_SH" --phase TEST --brief "$REPO/missing_brief.md" --dir "$REPO" --no-brief-lint 2>/dev/null)"; CODE=$?
 check s-nonexistent-brief-rc "$CODE" 2 "missing brief dispatch exits 2"
+
+# --- self-snapshot execution when running from within target repo -----------
+
+# t. when the orchestrating script lives inside the target repo and the worker
+# rewrites the script mid-run, phase.sh completes normally: prints status line,
+# runs verification, and writes status file.
+REPO_T="$(new_repo t-self-snapshot)"
+mkdir -p "$REPO_T/scripts" "$REPO_T/drivers"
+cp -R "$HERE/../scripts/." "$REPO_T/scripts/"
+if [ -d "$HERE/../drivers" ]; then
+  cp -R "$HERE/../drivers/." "$REPO_T/drivers/"
+fi
+RUN_ID_T="$(run_dir_new --dir "$REPO_T" --task "self-modifying dispatch")"
+STDERR_T="$ROOT/stderr-self-snapshot"
+
+OUT="$(STUB_PHASE=TEST AGY_BIN="$STUB" STUB_MUTATE_SCRIPT="$REPO_T/scripts/phase.sh" \
+  "$REPO_T/scripts/phase.sh" --phase TEST --brief "$REPO_T/brief.md" --dir "$REPO_T" --run "$RUN_ID_T" --verify 'true' --no-brief-lint 2>"$STDERR_T")"
+CODE=$?
+
+check t-self-snapshot-rc "$CODE" 0 "self-modifying dispatch exits 0"
+case "$OUT" in
+  *"STATUS: DONE | File: CHANGES.md"*"Verify: ok"*) ok t-self-snapshot-status "status line reported with verify ok" ;;
+  *) bad t-self-snapshot-status "unexpected output from self-modifying dispatch: $OUT" ;;
+esac
+
+STATUS_CONTENT_T="$(cat "$REPO_T/.agy/runs/$RUN_ID_T/phases/TEST/status" 2>/dev/null)"
+check t-self-snapshot-status-file "$STATUS_CONTENT_T" "$OUT" "status file written correctly"
+
+VERIFY_LOG_T="$REPO_T/.agy/runs/$RUN_ID_T/phases/TEST/verify.log"
+[ -f "$VERIFY_LOG_T" ] && ok t-self-snapshot-verify-log "verify log was written" \
+  || bad t-self-snapshot-verify-log "verify log missing"
+
+case "$(cat "$STDERR_T" 2>/dev/null)" in
+  *"phase.sh: re-executing from snapshot"*) ok t-self-snapshot-stderr "re-execution diagnostic printed on stderr" ;;
+  *) bad t-self-snapshot-stderr "re-execution diagnostic missing from stderr" ;;
+esac
+
+# Check that the script file was indeed mutated
+case "$(tail -1 "$REPO_T/scripts/phase.sh" 2>/dev/null)" in
+  *"syntax error"*) ok t-self-snapshot-mutated "target script was mutated by worker mid-run" ;;
+  *) bad t-self-snapshot-mutated "target script was not mutated" ;;
+esac
+
+# Check that the temporary snapshot directory was removed on exit
+SNAP_DIR_T="$(sed -n 's/.*phase\.sh: re-executing from snapshot \([^[:space:]]*\).*/\1/p' "$STDERR_T" 2>/dev/null)"
+if [ -n "$SNAP_DIR_T" ] && [ ! -d "$SNAP_DIR_T" ]; then
+  ok t-self-snapshot-cleanup "snapshot directory cleaned up on exit"
+else
+  bad t-self-snapshot-cleanup "snapshot directory still exists: $SNAP_DIR_T"
+fi
+
+# u. negative case: when the script lives outside the target repo, no re-execution
+# happens and no diagnostic is printed.
+REPO_U="$(new_repo u-external-script)"
+STDERR_U="$ROOT/stderr-external-script"
+OUT="$(STUB_PHASE=TEST AGY_BIN="$STUB" \
+  "$PHASE_SH" --phase TEST --brief "$REPO_U/brief.md" --dir "$REPO_U" --no-brief-lint 2>"$STDERR_U")"
+CODE=$?
+check u-external-rc "$CODE" 0 "external script dispatch exits 0"
+case "$(cat "$STDERR_U" 2>/dev/null)" in
+  *re-executing*) bad u-external-no-reexec "unexpected re-execution diagnostic for external script" ;;
+  *) ok u-external-no-reexec "no re-execution diagnostic when script is outside target repo" ;;
+esac
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

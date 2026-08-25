@@ -56,6 +56,55 @@
 # touches, unasked, for a one-line change.
 set -uo pipefail
 
+if [ -n "${AGY_PHASE_SNAPSHOT:-}" ]; then
+  trap 'rm -rf "$AGY_PHASE_SNAPSHOT"' EXIT INT TERM
+else
+  _TARGET_DIR="$PWD"
+  _PREV=""
+  for _ARG in "$@"; do
+    if [ "$_PREV" = "--dir" ]; then
+      _TARGET_DIR="$_ARG"
+    fi
+    _PREV="$_ARG"
+  done
+
+  _SCRIPT_PATH="${BASH_SOURCE[0]}"
+  while [ -L "$_SCRIPT_PATH" ]; do
+    _LINK="$(readlink "$_SCRIPT_PATH" 2>/dev/null || true)"
+    [ -n "$_LINK" ] || break
+    case "$_LINK" in
+      /*) _SCRIPT_PATH="$_LINK" ;;
+      *)  _SCRIPT_PATH="$(dirname "$_SCRIPT_PATH")/$_LINK" ;;
+    esac
+  done
+  _SCRIPT_DIR="$(cd "$(dirname "$_SCRIPT_PATH")" 2>/dev/null && pwd -P || true)"
+  _RESOLVED_TARGET="$(cd "$_TARGET_DIR" 2>/dev/null && pwd -P || true)"
+
+  _INSIDE=""
+  if [ -n "$_RESOLVED_TARGET" ] && [ -n "$_SCRIPT_DIR" ]; then
+    if [ "$_RESOLVED_TARGET" = "/" ]; then
+      _INSIDE=1
+    elif [ "$_SCRIPT_DIR" = "$_RESOLVED_TARGET" ] || [ "${_SCRIPT_DIR#$_RESOLVED_TARGET/}" != "$_SCRIPT_DIR" ]; then
+      _INSIDE=1
+    fi
+  fi
+
+  if [ -n "$_INSIDE" ]; then
+    _SNAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agy-phase.XXXXXX")"
+    mkdir -p "$_SNAP_DIR/scripts"
+    cp -R "$_SCRIPT_DIR/." "$_SNAP_DIR/scripts/"
+    if [ -d "$_SCRIPT_DIR/../drivers" ]; then
+      mkdir -p "$_SNAP_DIR/drivers"
+      cp -R "$_SCRIPT_DIR/../drivers/." "$_SNAP_DIR/drivers/"
+    fi
+    _SCRIPT_NAME="$(basename "$_SCRIPT_PATH")"
+    chmod +x "$_SNAP_DIR/scripts/$_SCRIPT_NAME" 2>/dev/null || true
+    echo "phase.sh: re-executing from snapshot $_SNAP_DIR" >&2
+    export AGY_PHASE_SNAPSHOT="$_SNAP_DIR"
+    exec "$_SNAP_DIR/scripts/$_SCRIPT_NAME" "$@"
+  fi
+fi
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/run-dir.sh"
 . "$HERE/ledger.sh"
