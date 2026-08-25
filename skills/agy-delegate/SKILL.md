@@ -172,18 +172,42 @@ runs by `${CLAUDE_PLUGIN_ROOT}/scripts/report.sh`.
 
 ## The gate
 
-The worker's verdict is a claim. `--verify` makes part of the check mechanical;
-the rest is yours and cannot be delegated:
+The worker's verdict is a claim. `--verify` proves tests exited zero;
+`check-diff-integrity.sh` makes detecting gutted tests and scope creep
+mechanical. First capture the diff and inspect its integrity:
+
+```
+${CLAUDE_PLUGIN_ROOT}/scripts/capture-diff.sh --dir <repo>
+${CLAUDE_PLUGIN_ROOT}/scripts/check-diff-integrity.sh --dir <repo> \
+  --brief .agy/runs/$RUN_ID/phases/DELEGATE/brief.md
+```
+
+| STATUS | exit | means | do |
+|---|---|---|---|
+| `DIFF_CLEAN` | 0 | checks ran and found nothing; names what was checked | proceed to diff spot-check |
+| `DIFF_SUSPICIOUS(…)` | 0 | scope creep, falling assertions, or edited literals | inspect the flagged diff hunks |
+| `DIFF_TESTS_WEAKENED(…)` | 3 | deleted test file, added skip, or trivial assertion | **fail the gate** — fix or re-brief |
+| `DIFF_UNCHECKED(lang=…)` | 0 | no rules available for detected language(s) | human diff read is the whole gate |
+
+`DIFF_TESTS_WEAKENED` overrides a successful claim, exactly as a failing
+`--verify` does: deleted test files, added test skips (`@pytest.mark.skip`,
+`it.only`, `t.Skip`), or trivial assertions (`assert True`) fail the gate.
+`DIFF_SUSPICIOUS` flags scope creep (files touched outside the brief) or
+falling assertion counts for human inspection without overriding the verdict
+automatically. `DIFF_UNCHECKED` reports that the language has no rules,
+signalling that the diff was not analysed mechanically.
+
+Then inspect the diff yourself:
 
 ```
 git diff --stat
 git diff
 ```
 
-Read the diff for the two things a passing test suite does not catch: **tests
-weakened or deleted** to make things green, and **APIs invented** that do not
-exist in this codebase. Also check it did what was asked and not more — an
-unrequested refactor riding along in the same diff is a finding, not a bonus.
+Read the diff for what static pattern checks cannot catch: **invented APIs**,
+subtle semantic bugs, and any languages reported as unchecked. Also check it did
+what was asked and not more — an unrequested refactor riding along in the same
+diff is a finding, not a bonus.
 
 If the diff is empty, the phase did nothing regardless of what it claimed.
 
@@ -197,6 +221,7 @@ Short, and honest about what was checked mechanically versus by eye:
 - what was delegated, and the tier
 - `git diff --stat` — the real one
 - the test command, and whether it passed through `--verify` or was skipped
+- the diff integrity status (`DIFF_CLEAN`, `DIFF_SUSPICIOUS`, `DIFF_UNCHECKED`)
 - what you found reading the diff
 - anything you took over yourself, and why
 
