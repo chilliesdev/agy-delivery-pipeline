@@ -229,8 +229,8 @@ check bad-dir "$CODE" 2 "exit 2 on a missing --dir"
 # from reappearing alongside decomposed base files.
 for name in code-review qa release; do
   count=0
-  [ -s "$VENDORED/$name.md" ] && count=$((count + 1))
-  [ -s "$VENDORED/$name/base.md" ] && count=$((count + 1))
+  [ -e "$VENDORED/$name.md" ] && count=$((count + 1))
+  [ -e "$VENDORED/$name/base.md" ] && count=$((count + 1))
   check "single-source-$name" "$count" 1 "exactly one vendored source for $name"
 done
 
