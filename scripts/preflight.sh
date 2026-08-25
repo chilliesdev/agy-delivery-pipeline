@@ -32,11 +32,23 @@
 # The fetch is bounded because phase.sh runs this before *every* dispatch, and a
 # hang there stalls the pipeline with nothing an orchestrator can act on — no
 # STATUS line, no worker log, no retry file. One real fetch sat for ten minutes
-# while three immediate re-runs answered in three seconds. macOS ships no
-# timeout(1) or gtimeout(1), so the bound is the same hand-rolled watchdog
-# check-test-command.sh runs: `set -m` gives the fetch its own process group,
-# the watchdog TERMs that group and then KILLs it, and a marker file records
-# that it fired. --timeout 0 disables it and restores the old, unbounded wait.
+# while three immediate re-runs answered in three seconds.
+#
+# The watchdog is hand-rolled here and in check-test-command.sh rather than
+# using timeout(1). macOS ships no timeout(1) and no gtimeout(1), so a
+# timeout-based path could only ever be the second implementation, never the
+# only one. Two implementations of a timeout means the platform that runs in CI
+# most often is not the platform most users are on, and the less-travelled
+# branch is the one that breaks. This repo has already been bitten by a
+# rarely-taken branch — the release phase's first-version path — and by a
+# workaround that existed only in prose. Furthermore, the hand-rolled watchdog
+# does something timeout(1) does not: `set -m` gives the fetch its own process
+# group, and the watchdog TERMs that whole group and then KILLs it, so a process
+# that spawned children does not leave them running. That is a real difference,
+# not a workaround. The cost is that process-group semantics differ across
+# platforms — which is precisely why it now runs on both in CI on every push.
+# A marker file records that it fired. --timeout 0 disables it and restores the
+# old, unbounded wait.
 #
 # 7 for that timeout rather than 5 or 6: phase.sh exits with this script's code
 # verbatim, and 5 and 6 are already its own VERIFY_FAILED and RETRY_CAP_REACHED.

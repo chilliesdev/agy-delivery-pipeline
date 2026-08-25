@@ -383,6 +383,49 @@ this one — and a broken agy install would brick the session. Ambient routing i
 judgement call about what counts as non-trivial, and a skill that Claude can
 decline is the right shape for a judgement call.
 
+## Platforms
+
+| platform | status |
+|---|---|
+| macOS, bash 3.2 | supported, exercised in CI on every push |
+| Linux, bash 5 | supported, exercised in CI on every push |
+| Windows via WSL | expected to work, **not tested** |
+| Windows Git Bash | **not supported** |
+
+Observed CI environments passing all test suites:
+- `macos-latest` — GNU bash 3.2.57(1)-release (arm64-apple-darwin25)
+- `ubuntu-latest` — GNU bash 5.2.21(1)-release (x86_64-pc-linux-gnu)
+
+Git Bash is not supported: `git worktree`, `.git/info/exclude`, and path
+handling all differ, and phase dispatch (#31) depends on worktrees. Note that
+run-scoped state deliberately uses hyphens rather than colons in run ids, and
+plain files rather than symlinks for `current` and `last`, precisely so the
+layout is not the thing that breaks — the groundwork exists even though the
+platform is untested and unsupported.
+
+### Watchdog and timeout portability
+
+The timeout watchdog in `scripts/preflight.sh` and
+`scripts/check-test-command.sh` is hand-rolled everywhere rather than using
+`timeout(1)` or `gtimeout(1)`. macOS ships neither, so a `timeout`-based path
+could only ever be a second implementation. Maintaining two timeout
+mechanisms would mean the branch run most often in CI differs from what macOS
+users execute, risking quiet divergence. Furthermore, the hand-rolled
+watchdog uses `set -m` and process groups to TERM and KILL whole process trees,
+preventing orphaned child processes that `timeout(1)` leaves running.
+
+### Known unknowns
+
+- **`~/.local/bin` on PATH:** `scripts/preflight.sh` exit 127 suggests adding
+  `~/.local/bin` to PATH, which matches standard macOS installs but may differ
+  on some Linux distributions or shell setups.
+- **Locales, spaces, and case sensitivity:** Non-UTF-8 locales, paths
+  containing spaces, and case-sensitive filesystems have not been exhaustively
+  tested with `--dir` or the criteria-copy step.
+- **Git version floor:** `git add -N`, `git for-each-ref`, and `git worktree`
+  are required across scripts. A strict minimum version floor is unestablished;
+  Ubuntu CI pins a recent version incidentally.
+
 ## Tests
 
 ```
