@@ -162,6 +162,7 @@ Read it, not the log.
 | `STATUS: DONE …` | the worker finished and the check held | gate it below |
 | `STATUS: BLOCKED …` | it could not proceed | read the reason, then take the work over yourself |
 | `BRIEF_INVALID(…)` | brief violates contract rules | fix the brief and re-dispatch (zero token cost) |
+| `SECRETS_FOUND(…)` | secret detected in brief or diff | remove secret and re-dispatch (or --no-secret-scan) |
 | `VERIFY_FAILED(rc=N)` | it claimed success; the tests disagree | read `VerifyLog:`, then fix it yourself or re-brief once |
 | `WORKER_FAILED(rc=N)` | agy died | check the brief path and the criteria, then retry once |
 | `PREFLIGHT_FAILED(…)` | setup broke mid-session | report the cause, do the work yourself |

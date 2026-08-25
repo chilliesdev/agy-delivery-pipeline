@@ -4,9 +4,9 @@
 #   phase.sh --phase <NAME> --brief <file> [--tier low|medium|high]
 #            [--dir <repo>] [--run <id|current|new>] [--task <string>]
 #            [--mode accept-edits|plan|full] [--timeout 30m]
-#            [--sandbox] [--no-preflight] [--no-brief-lint] [--allow-shell]
-#            [--verify '<command>'] [--retry-cap <n>] [--reset-retries]
-#            [--ignore-via gitignore|exclude]
+#            [--sandbox] [--no-preflight] [--no-brief-lint] [--no-secret-scan]
+#            [--allow-shell] [--verify '<command>'] [--retry-cap <n>]
+#            [--reset-retries] [--ignore-via gitignore|exclude]
 #
 # Reads:   R/phases/<PHASE>/verdict      the verdict the worker wrote itself
 #          R/phases/<PHASE>/retries      retries this phase's cycle has spent
@@ -35,6 +35,9 @@
 # Prices change, differ per model and account, and a stale number presented as a cost
 # is worse than no number.
 #
+# check-secrets.sh scans the brief and diff for secrets before dispatch,
+# refusing on SECRETS_FOUND without invoking the worker. --no-secret-scan bypasses.
+#
 # check-brief.sh lints the brief before dispatch, refusing on BRIEF_INVALID
 # without invoking the worker. --no-brief-lint bypasses the check.
 #
@@ -62,6 +65,7 @@ STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
 SKIP_BRIEF_LINT="${AGY_SKIP_BRIEF_LINT:-}"
+SKIP_SECRET_SCAN="${AGY_SKIP_SECRET_SCAN:-}"
 ALLOW_SHELL="${AGY_ALLOW_SHELL:-}"
 VERIFY=""; RESET_RETRIES=""; IGNORE_VIA="gitignore"
 RETRY_CAP="${AGY_RETRY_CAP:-2}"
@@ -88,8 +92,9 @@ while [ $# -gt 0 ]; do
     --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
     --no-preflight) SKIP_PREFLIGHT=1; shift ;;
     --no-brief-lint) SKIP_BRIEF_LINT=1; shift ;;
+    --no-secret-scan) SKIP_SECRET_SCAN=1; shift ;;
     --allow-shell) ALLOW_SHELL=1; shift ;;
-    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,56p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -220,10 +225,20 @@ strip_ansi() { LC_ALL=C sed -e "s/${ESC}\[[0-9;?]*[a-zA-Z]//g" -e "s/${CR}//g"; 
 trim_claim() { LC_ALL=C sed -e 's/^[[:space:]*#>_`-]*//' -e 's/[[:space:]*`]*$//'; }
 
 # Copy the brief into R/phases/<PHASE>/brief.md before dispatch.
-cp -f "$BRIEF" "$PHASE_DIR/brief.md" 2>/dev/null || {
-  echo "phase.sh: could not copy brief to $PHASE_DIR/brief.md" >&2
-  exit 2
-}
+# Skip the copy when the source is already that file (the normal case for a
+# brief written in place): cp would fail copying a file onto itself.
+# When the copy genuinely fails for another reason — an unwritable directory,
+# a missing source — refuse, because a run directory that does not contain the
+# brief it ran with cannot be diagnosed later.
+BRIEF_ABS="$(cd "$(dirname "$BRIEF")" && pwd)/$(basename "$BRIEF")"
+DEST_ABS="$(cd "$PHASE_DIR" && pwd)/brief.md"
+if [ "$BRIEF_ABS" != "$DEST_ABS" ]; then
+  cp -f "$BRIEF" "$PHASE_DIR/brief.md" 2>/dev/null || {
+    echo "phase.sh: could not copy brief to $PHASE_DIR/brief.md" >&2
+    exit 2
+  }
+fi
+
 
 # The retry cap SKILL.md asks for, made mechanical. R/phases/<PHASE>/retries holds
 # how many *retries* — dispatches beyond the first — this cycle has spent; the
@@ -292,6 +307,49 @@ if [ -n "$BUDGET_TOKENS" ]; then
       ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
     exit 7
   fi
+fi
+
+# Scan brief and diff for secrets before dispatch unless --no-secret-scan or AGY_SKIP_SECRET_SCAN=1.
+# Secret scan runs before brief lint: a malformed brief costs a wasted dispatch,
+# and a brief carrying a credential is a disclosure. When both are true the
+# disclosure is the one the person needs to be told about, because it is the one
+# with consequences outside this machine — and a credential does not stop
+# needing rotation because the brief that carried it also had the wrong verdict
+# path.
+SECRETS_FIELD=""
+if [ -z "$SKIP_SECRET_SCAN" ]; then
+  SECRETS_ARGS=(--brief "$BRIEF" --dir "$DIR" --run "$RUN_ID" --phase "$PHASE")
+  if [ -f "$R/REVIEW_DIFF.patch" ]; then
+    SECRETS_ARGS=("${SECRETS_ARGS[@]+"${SECRETS_ARGS[@]}"}" --diff "$R/REVIEW_DIFF.patch")
+  fi
+  SECRETS_OUT="$("$HERE/check-secrets.sh" "${SECRETS_ARGS[@]}" 2>/dev/null)"
+  SECRETS_RC=$?
+  if [ "$SECRETS_RC" -ne 0 ]; then
+    printf '%s\n' "$SECRETS_OUT$GITIGNORE_FIELD" | tee "$STATUS_FILE"
+    TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
+    [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
+    SECRETS_STATUS="$(printf '%s' "${SECRETS_OUT#STATUS: }" | awk '{print $1}')"
+    ledger_append "$DIR" \
+      "run=$RUN_ID" \
+      "phase=$PHASE" \
+      "attempt=$((SPENT + 1))" \
+      "tier=$TIER" \
+      "model=$MODEL" \
+      "backend=agy" \
+      "started=$STARTED_TS" \
+      "status=$SECRETS_STATUS" \
+      "retries_spent=$SPENT" \
+      "retries_refunded=0" \
+      "verify_ran=false" \
+      ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
+    exit "$SECRETS_RC"
+  fi
+  case "$SECRETS_OUT" in
+    *"SECRETS_UNCHECKED"*)
+      SECRETS_STATUS="$(printf '%s' "${SECRETS_OUT#STATUS: }" | awk '{print $1}')"
+      SECRETS_FIELD=" | Secrets: $SECRETS_STATUS"
+      ;;
+  esac
 fi
 
 # Lint brief before dispatch unless --no-brief-lint or AGY_SKIP_BRIEF_LINT=1.
@@ -442,7 +500,7 @@ fi
 if [ -n "$VERIFY" ] && [ "$VRC" -eq 0 ] && [ "$RC" -eq 0 ]; then
   LINE="$LINE | Verify: ok | VerifyLog: $VERIFY_LOG"
 fi
-LINE="$LINE$JSON_FALLBACK_FIELD$GITIGNORE_FIELD"
+LINE="$LINE$JSON_FALLBACK_FIELD$SECRETS_FIELD$GITIGNORE_FIELD"
 
 # Record the phase outcome in run.json
 FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | awk '{print $1}')"

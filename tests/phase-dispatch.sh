@@ -294,5 +294,51 @@ esac
 check p-valid-brief-worker-invoked "$(count "$STUB_ARGV_FILE" '^--add-dir$')" "1" \
   "worker was invoked on valid brief"
 
+# --- brief placement and copy handling --------------------------------------
+
+# q. a dispatch whose --brief is <run-dir>/phases/<PHASE>/brief.md succeeds, and
+# the brief is still there afterwards with its content intact
+REPO="$(new_repo q-inplace-brief)"
+RUN_ID_Q="$(run_dir_new --dir "$REPO" --task "inplace brief dispatch")"
+PHASE_DIR_Q="$REPO/.agy/runs/$RUN_ID_Q/phases/TEST"
+mkdir -p "$PHASE_DIR_Q"
+BRIEF_CONTENT="Phase TEST brief written directly into run directory."
+printf '%s\n' "$BRIEF_CONTENT" > "$PHASE_DIR_Q/brief.md"
+STUB_ARGV_FILE="$ROOT/argv-inplace-brief"
+OUT="$(STUB_PHASE=TEST STUB_ARGV="$STUB_ARGV_FILE" AGY_BIN="$STUB" \
+  "$PHASE_SH" --phase TEST --brief "$PHASE_DIR_Q/brief.md" --dir "$REPO" --run "$RUN_ID_Q" --no-brief-lint 2>/dev/null)"; CODE=$?
+check q-inplace-brief-rc "$CODE" 0 "inplace brief dispatch exits 0"
+case "$OUT" in
+  *"STATUS: DONE | File: CHANGES.md"*) ok q-inplace-brief-status "inplace brief dispatch succeeds" ;;
+  *) bad q-inplace-brief-status "unexpected output on inplace brief: $OUT" ;;
+esac
+check q-inplace-brief-content "$(cat "$PHASE_DIR_Q/brief.md" 2>/dev/null)" "$BRIEF_CONTENT" \
+  "brief content intact after inplace dispatch"
+check q-inplace-brief-worker-invoked "$(count "$STUB_ARGV_FILE" '^--add-dir$')" "1" \
+  "worker was invoked on inplace brief"
+
+# r. a dispatch whose --brief is elsewhere still copies it in, and the copy matches the original
+REPO="$(new_repo r-external-brief)"
+RUN_ID_R="$(run_dir_new --dir "$REPO" --task "external brief dispatch")"
+EXT_BRIEF="$ROOT/external_brief.md"
+EXT_CONTENT="External brief to be copied into phase dir."
+printf '%s\n' "$EXT_CONTENT" > "$EXT_BRIEF"
+STUB_ARGV_FILE="$ROOT/argv-external-brief"
+OUT="$(STUB_PHASE=TEST STUB_ARGV="$STUB_ARGV_FILE" AGY_BIN="$STUB" \
+  "$PHASE_SH" --phase TEST --brief "$EXT_BRIEF" --dir "$REPO" --run "$RUN_ID_R" --no-brief-lint 2>/dev/null)"; CODE=$?
+check r-external-brief-rc "$CODE" 0 "external brief dispatch exits 0"
+COPIED_BRIEF="$REPO/.agy/runs/$RUN_ID_R/phases/TEST/brief.md"
+[ -f "$COPIED_BRIEF" ] && ok r-external-brief-copied "brief was copied into phase dir" \
+  || bad r-external-brief-copied "brief was not copied into phase dir"
+check r-external-brief-match "$(cat "$COPIED_BRIEF" 2>/dev/null)" "$EXT_CONTENT" \
+  "copied brief matches original content"
+
+# s. a dispatch whose --brief does not exist still refuses
+REPO="$(new_repo s-nonexistent-brief)"
+OUT="$(STUB_PHASE=TEST AGY_BIN="$STUB" \
+  "$PHASE_SH" --phase TEST --brief "$REPO/missing_brief.md" --dir "$REPO" --no-brief-lint 2>/dev/null)"; CODE=$?
+check s-nonexistent-brief-rc "$CODE" 2 "missing brief dispatch exits 2"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
+
