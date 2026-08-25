@@ -103,6 +103,7 @@ _run_json_serialize() {
   local tmp_out="${out_file}.tmp.$$"
 
   local run_val="" task_val="" backend_val="agy" branch_val="" base_val=""
+  local worktree_val="" worktree_set=0
   local started_val="" finished_val="" outcome_val=""
 
   while IFS= read -r line || [ -n "$line" ]; do
@@ -114,6 +115,7 @@ _run_json_serialize() {
       backend) backend_val="$v" ;;
       branch) branch_val="$v" ;;
       base) base_val="$v" ;;
+      worktree) worktree_val="$v"; worktree_set=1 ;;
       started) started_val="$v" ;;
       finished) finished_val="$v" ;;
       outcome) outcome_val="$v" ;;
@@ -127,6 +129,9 @@ _run_json_serialize() {
     printf '  "backend": "%s",\n' "$(_run_dir_escape "$backend_val")"
     printf '  "branch": "%s",\n' "$(_run_dir_escape "$branch_val")"
     printf '  "base": "%s",\n' "$(_run_dir_escape "$base_val")"
+    if [ $worktree_set -eq 1 ] && [ -n "$worktree_val" ]; then
+      printf '  "worktree": "%s",\n' "$(_run_dir_escape "$worktree_val")"
+    fi
     printf '  "started": "%s",\n' "$(_run_dir_escape "$started_val")"
     printf '  "finished": "%s",\n' "$(_run_dir_escape "$finished_val")"
     printf '  "outcome": "%s",\n' "$(_run_dir_escape "$outcome_val")"
@@ -197,7 +202,7 @@ _run_json_to_flat() {
     fi
 
     if [ $in_phases -eq 0 ]; then
-      for top_key in run task backend branch base started finished outcome; do
+      for top_key in run task backend branch base worktree started finished outcome; do
         local prefix="\"$top_key\":"
         case "$trimmed" in
           "$prefix"*)
@@ -551,7 +556,7 @@ run_dir_get() {
     phases.*)
       return 1 2>/dev/null || exit 1
       ;;
-    run|task|backend|branch|base|started|finished|outcome)
+    run|task|backend|branch|base|worktree|started|finished|outcome)
       _run_json_get_top "$run_dir/run.json" "$key"
       return $?
       ;;

@@ -62,6 +62,26 @@ _ledger_spent_tokens() {
   return 0
 }
 
+_ledger_repo_spent_tokens() {
+  local dir="${1:-$PWD}"
+  [ -d "$dir" ] || { printf '0\n'; return 0; }
+  dir="$(cd "$dir" 2>/dev/null && pwd || echo "$dir")"
+  local ledger="$dir/.agy/ledger.jsonl"
+  [ -f "$ledger" ] || { printf '0\n'; return 0; }
+
+  local sum=0
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    local tt
+    tt="$(printf '%s\n' "$line" | sed -n 's/.*"total_tokens":\([0-9][0-9]*\).*/\1/p' 2>/dev/null || true)"
+    if [ -n "$tt" ]; then
+      sum=$((sum + tt))
+    fi
+  done < "$ledger"
+  printf '%s\n' "$sum"
+  return 0
+}
+
 _ledger_extract_diff() {
   local dir="${1:-}"
   local run_target="${2:-}"
