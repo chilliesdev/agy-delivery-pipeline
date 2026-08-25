@@ -4,8 +4,8 @@
 #   phase.sh --phase <NAME> --brief <file> [--tier low|medium|high]
 #            [--dir <repo>] [--run <id|current|new>] [--task <string>]
 #            [--mode accept-edits|plan|full] [--timeout 30m]
-#            [--sandbox] [--no-preflight] [--verify '<command>']
-#            [--retry-cap <n>] [--reset-retries]
+#            [--sandbox] [--no-preflight] [--no-brief-lint] [--allow-shell]
+#            [--verify '<command>'] [--retry-cap <n>] [--reset-retries]
 #            [--ignore-via gitignore|exclude]
 #
 # Reads:   R/phases/<PHASE>/verdict      the verdict the worker wrote itself
@@ -35,6 +35,9 @@
 # Prices change, differ per model and account, and a stale number presented as a cost
 # is worse than no number.
 #
+# check-brief.sh lints the brief before dispatch, refusing on BRIEF_INVALID
+# without invoking the worker. --no-brief-lint bypasses the check.
+#
 # preflight.sh runs first unless --no-preflight or AGY_SKIP_PREFLIGHT=1.
 #
 # If this dispatch had to tell git to ignore .agy/, the STATUS line carries a
@@ -58,6 +61,8 @@ STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
+SKIP_BRIEF_LINT="${AGY_SKIP_BRIEF_LINT:-}"
+ALLOW_SHELL="${AGY_ALLOW_SHELL:-}"
 VERIFY=""; RESET_RETRIES=""; IGNORE_VIA="gitignore"
 RETRY_CAP="${AGY_RETRY_CAP:-2}"
 BUDGET_TOKENS="${AGY_BUDGET_TOKENS:-}"
@@ -82,7 +87,9 @@ while [ $# -gt 0 ]; do
     --ignore-via) IGNORE_VIA="$2"; shift 2 ;;
     --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
     --no-preflight) SKIP_PREFLIGHT=1; shift ;;
-    -h|--help) sed -n '2,43p' "$0"; exit 0 ;;
+    --no-brief-lint) SKIP_BRIEF_LINT=1; shift ;;
+    --allow-shell) ALLOW_SHELL=1; shift ;;
+    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
     *) echo "phase.sh: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -284,6 +291,36 @@ if [ -n "$BUDGET_TOKENS" ]; then
       "verify_ran=false" \
       ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
     exit 7
+  fi
+fi
+
+# Lint brief before dispatch unless --no-brief-lint or AGY_SKIP_BRIEF_LINT=1.
+if [ -z "$SKIP_BRIEF_LINT" ]; then
+  LINT_SHELL_ARGS=()
+  if [ -n "$ALLOW_SHELL" ] || [ "$MODE" = "full" ] || [ "$PHASE" = "QA" ]; then
+    LINT_SHELL_ARGS=(--allow-shell)
+  fi
+  LINT_OUT="$("$HERE/check-brief.sh" --phase "$PHASE" --brief "$BRIEF" --dir "$DIR" --run "$RUN_ID" ${LINT_SHELL_ARGS[@]+"${LINT_SHELL_ARGS[@]}"} 2>/dev/null)"
+  LINT_RC=$?
+  if [ "$LINT_RC" -ne 0 ]; then
+    printf '%s\n' "$LINT_OUT$GITIGNORE_FIELD" | tee "$STATUS_FILE"
+    TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
+    [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
+    LINT_STATUS="$(printf '%s' "${LINT_OUT#STATUS: }" | awk '{print $1}')"
+    ledger_append "$DIR" \
+      "run=$RUN_ID" \
+      "phase=$PHASE" \
+      "attempt=$((SPENT + 1))" \
+      "tier=$TIER" \
+      "model=$MODEL" \
+      "backend=agy" \
+      "started=$STARTED_TS" \
+      "status=$LINT_STATUS" \
+      "retries_spent=$SPENT" \
+      "retries_refunded=0" \
+      "verify_ran=false" \
+      ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
+    exit "$LINT_RC"
   fi
 fi
 
