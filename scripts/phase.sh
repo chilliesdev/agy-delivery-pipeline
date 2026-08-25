@@ -5,6 +5,7 @@
 #            [--dir <repo>] [--run <id|current|new>] [--task <string>]
 #            [--mode accept-edits|plan|full] [--timeout 30m]
 #            [--sandbox] [--no-preflight] [--no-brief-lint] [--no-secret-scan]
+#            [--no-diff-integrity]
 #            [--allow-shell] [--verify '<command>'] [--retry-cap <n>]
 #            [--budget-tokens <n>] [--repo-budget-tokens <n>] [--max-workers <n>]
 #            [--reset-retries] [--ignore-via gitignore|exclude]
@@ -46,6 +47,9 @@
 # actively running worker processes. If already at or past the cap, phase.sh
 # refuses to dispatch, returning STATUS: WORKER_CAP_EXCEEDED(running=N, cap=M),
 # exit 8.
+#
+# check-diff-integrity.sh checks worker changes for weakened tests and scope creep.
+# --no-diff-integrity bypasses.
 #
 # check-secrets.sh scans the brief and diff for secrets before dispatch,
 # refusing on SECRETS_FOUND without invoking the worker. --no-secret-scan bypasses.
@@ -165,6 +169,7 @@ DRIVER="${AGY_DRIVER:-}"
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
 SKIP_BRIEF_LINT="${AGY_SKIP_BRIEF_LINT:-}"
 SKIP_SECRET_SCAN="${AGY_SKIP_SECRET_SCAN:-}"
+SKIP_DIFF_INTEGRITY="${AGY_SKIP_DIFF_INTEGRITY:-}"
 ALLOW_SHELL="${AGY_ALLOW_SHELL:-}"
 VERIFY=""; RESET_RETRIES=""; IGNORE_VIA="gitignore"
 RETRY_CAP="${AGY_RETRY_CAP:-2}"
@@ -197,6 +202,7 @@ while [ $# -gt 0 ]; do
     --no-preflight) SKIP_PREFLIGHT=1; shift ;;
     --no-brief-lint) SKIP_BRIEF_LINT=1; shift ;;
     --no-secret-scan) SKIP_SECRET_SCAN=1; shift ;;
+    --no-diff-integrity) SKIP_DIFF_INTEGRITY=1; shift ;;
     --allow-shell) ALLOW_SHELL=1; shift ;;
     --quiet|-q)    QUIET=1; shift ;;
     -h|--help)     sed -n '2,68p' "$0"; exit 0 ;;
@@ -791,6 +797,29 @@ fi
 # survives to say so.
 printf '%s\n' "$NEXT" > "$RETRY_FILE" 2>/dev/null
 
+# Take a snapshot of the working tree before dispatch to isolate what the worker changed,
+# even if the working tree was already dirty before dispatch.
+TREE_BEFORE=""
+if [ -z "$SKIP_DIFF_INTEGRITY" ]; then
+  if GITROOT="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null)" \
+     && [ "$(git -C "$DIR" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] \
+     && [ -n "$GITROOT" ]; then
+    _TREE_WORK="$(mktemp -d "${TMPDIR:-/tmp}/phase-tree.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$_TREE_WORK" ] && [ -d "$_TREE_WORK" ]; then
+      _TREE_IDX="$_TREE_WORK/index"
+      _REAL_IDX="$(git -C "$GITROOT" rev-parse --git-path index 2>/dev/null)"
+      if [ -n "$_REAL_IDX" ] && [ -f "$GITROOT/$_REAL_IDX" ]; then
+        cp -f "$GITROOT/$_REAL_IDX" "$_TREE_IDX" 2>/dev/null || true
+      elif [ -n "$_REAL_IDX" ] && [ -f "$_REAL_IDX" ]; then
+        cp -f "$_REAL_IDX" "$_TREE_IDX" 2>/dev/null || true
+      fi
+      ( cd "$GITROOT" && GIT_INDEX_FILE="$_TREE_IDX" git add -A -- . ) >/dev/null 2>&1 || true
+      TREE_BEFORE="$(cd "$GITROOT" && GIT_INDEX_FILE="$_TREE_IDX" git write-tree 2>/dev/null || true)"
+      rm -rf "$_TREE_WORK" 2>/dev/null || true
+    fi
+  fi
+fi
+
 START_EPOCH=$(date +%s)
 
 MONITOR_PID=""
@@ -935,6 +964,34 @@ if [ -n "$VERIFY" ] && [ "$RC" -eq 0 ]; then
   printf -- '--- phase.sh: verify rc=%s ---\n' "$VRC" >> "$VERIFY_LOG" 2>/dev/null
 fi
 
+# Run diff integrity check over the changes the worker made
+INTEGRITY_FIELD=""
+INTEGRITY_RC=0
+
+if [ -n "$SKIP_DIFF_INTEGRITY" ]; then
+  INTEGRITY_FIELD=" | Integrity: skipped"
+elif [ "$RC" -eq 0 ]; then
+  if [ -n "$TREE_BEFORE" ]; then
+    DISPATCH_PATCH="$PHASE_DIR/DISPATCH_DIFF.patch"
+    DISPATCH_STAT="$PHASE_DIR/DISPATCH_DIFF.stat"
+    CAPTURE_OUT="$("$HERE/capture-diff.sh" --dir "$DIR" --base "$TREE_BEFORE" --into "$PHASE_DIR" --name "DISPATCH_DIFF" 2>/dev/null)"
+    CAPTURE_RC=$?
+    if [ "$CAPTURE_RC" -eq 0 ] || [ "$CAPTURE_RC" -eq 3 ]; then
+      INTEGRITY_OUT="$("$HERE/check-diff-integrity.sh" --dir "$DIR" --patch "$DISPATCH_PATCH" --stat "$DISPATCH_STAT" --brief "$PHASE_DIR/brief.md" 2>/dev/null)"
+      INTEGRITY_RC=$?
+      INTEGRITY_STATUS="$(printf '%s\n' "$INTEGRITY_OUT" | sed -e 's/^STATUS:[[:space:]]*//' -e 's/[[:space:]]*|.*//')"
+      [ -z "$INTEGRITY_STATUS" ] && INTEGRITY_STATUS="DIFF_UNCHECKED(empty_output)"
+      INTEGRITY_FIELD=" | Integrity: $INTEGRITY_STATUS"
+    else
+      INTEGRITY_STATUS="DIFF_UNCHECKED(capture_failed)"
+      INTEGRITY_FIELD=" | Integrity: $INTEGRITY_STATUS"
+    fi
+  else
+    INTEGRITY_STATUS="DIFF_UNCHECKED(no_tree_snapshot)"
+    INTEGRITY_FIELD=" | Integrity: $INTEGRITY_STATUS"
+  fi
+fi
+
 # Trust the claim only as a claim — the orchestrator still verifies the artifacts
 # on disk. rc=0 with no claim at all is not a failure and not a pass; say so.
 if [ "$RC" -ne 0 ]; then
@@ -951,7 +1008,7 @@ fi
 if [ -n "$VERIFY" ] && [ "$VRC" -eq 0 ] && [ "$RC" -eq 0 ]; then
   LINE="$LINE | Verify: ok | VerifyLog: $VERIFY_LOG"
 fi
-LINE="$LINE$FALLBACK_FIELD$JSON_FALLBACK_FIELD$SECRETS_FIELD$GITIGNORE_FIELD"
+LINE="$LINE$INTEGRITY_FIELD$FALLBACK_FIELD$JSON_FALLBACK_FIELD$SECRETS_FIELD$GITIGNORE_FIELD"
 
 # Record the phase outcome in run.json
 FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | awk '{print $1}')"
@@ -964,7 +1021,7 @@ run_dir_record_phase "$R" "$PHASE" "status=$FINAL_STATUS" "verdict=${FINAL_VERDI
 # every phase uses for "I could not". NO_STATUS_REPORTED is not clean: it is
 # unresolved, and an unresolved round is exactly what the cap is counting.
 CLEAN=0
-if [ "$RC" -eq 0 ] && [ "$VRC" -eq 0 ] && [ -n "$CLAIM" ]; then
+if [ "$RC" -eq 0 ] && [ "$VRC" -eq 0 ] && [ "$INTEGRITY_RC" -eq 0 ] && [ -n "$CLAIM" ]; then
   WORD="$(printf '%s' "${CLAIM#STATUS: }" | awk '{print $1}' \
     | tr -d '|' | tr '[:lower:]' '[:upper:]')"
   case "$WORD" in
@@ -1060,4 +1117,5 @@ ledger_append "$DIR" "${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" 2>/dev/null || echo
 printf '%s\n' "$LINE" | tee "$STATUS_FILE"
 [ "$RC" -eq 0 ] || exit "$RC"
 [ "$VRC" -eq 0 ] || exit 5
+[ "$INTEGRITY_RC" -eq 0 ] || exit "$INTEGRITY_RC"
 exit 0
