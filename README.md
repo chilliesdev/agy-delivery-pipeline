@@ -155,7 +155,7 @@ sorted.
 Every gate in this repository was added in response to a single incident. That
 is a sound way to *find* a gate and a poor way to *keep* one. Nothing here would
 ever have told you that a rule had stopped earning its place, or that a
-paragraph added to `criteria/code-review.md` made reviews better rather than
+paragraph added to `criteria/code-review/base.md` made reviews better rather than
 merely longer.
 
 `REVIEW_THIN` is the standing example: it exists because one review came back as

@@ -68,10 +68,10 @@ IS_OVERRIDE=0
 if [ -f "$DIR/.claude/criteria/$NAME.md" ]; then
   SOURCE="$(cd "$DIR/.claude/criteria" && pwd)/$NAME.md"
   IS_OVERRIDE=1
+elif [ -f "$HERE/../criteria/$NAME/base.md" ]; then
+  SOURCE="$(cd "$HERE/../criteria/$NAME" && pwd)/base.md"
 elif [ -f "$HERE/../criteria/$NAME.md" ]; then
   SOURCE="$(cd "$HERE/../criteria" && pwd)/$NAME.md"
-elif [ "$NAME" = "code-review" ] && [ -f "$HERE/../criteria/code-review/base.md" ]; then
-  SOURCE="$(cd "$HERE/../criteria/code-review" && pwd)/base.md"
 fi
 
 [ -n "$SOURCE" ] || { echo "resolve-criteria: no criteria file found for $NAME" >&2; exit 1; }
@@ -343,7 +343,6 @@ fi
 
 # 3. Assemble composed criteria document
 BASE_FILE="$HERE/../criteria/code-review/base.md"
-[ -f "$BASE_FILE" ] || BASE_FILE="$HERE/../criteria/code-review.md"
 [ -f "$BASE_FILE" ] || { echo "resolve-criteria: base criteria not found" >&2; exit 1; }
 
 COMPOSED_FILES=("$BASE_FILE")
