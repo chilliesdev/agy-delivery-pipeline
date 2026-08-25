@@ -59,10 +59,12 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/run-dir.sh"
 . "$HERE/ledger.sh"
+. "$HERE/resolve-model.sh"
 
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 PHASE=""; BRIEF=""; TIER=""; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m"
+DRIVER="${AGY_DRIVER:-}"
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
 SKIP_BRIEF_LINT="${AGY_SKIP_BRIEF_LINT:-}"
 SKIP_SECRET_SCAN="${AGY_SKIP_SECRET_SCAN:-}"
@@ -79,6 +81,7 @@ while [ $# -gt 0 ]; do
     --phase)   PHASE="$2";   shift 2 ;;
     --brief)   BRIEF="$2";   shift 2 ;;
     --tier)    TIER="$2";    shift 2 ;;
+    --driver)  DRIVER="$2";  shift 2 ;;
     --dir)     DIR="$2";     shift 2 ;;
     --run)     RUN_TARGET="$2"; shift 2 ;;
     --task)    TASK="$2";    shift 2 ;;
@@ -117,6 +120,82 @@ case "$IGNORE_VIA" in
 esac
 
 DIR="$(cd "$DIR" && pwd)"
+
+# Resolve driver from agy.toml if not passed on CLI
+if [ -z "$DRIVER" ]; then
+  if CONFIG_FILE="$(resolve_config_path "$DIR" 2>/dev/null)"; then
+    PARSED_CONFIG="$(_resolve_model_parse_toml "$CONFIG_FILE" 2>/dev/null || true)"
+    if [ -n "$PARSED_CONFIG" ]; then
+      CFG_DRIVER="$(_resolve_model_get_val "driver.name" "$PARSED_CONFIG")"
+      [ -z "$CFG_DRIVER" ] && CFG_DRIVER="$(_resolve_model_get_val "driver.default" "$PARSED_CONFIG")"
+      [ -z "$CFG_DRIVER" ] && CFG_DRIVER="$(_resolve_model_get_val "driver.driver" "$PARSED_CONFIG")"
+      [ -n "$CFG_DRIVER" ] && DRIVER="$CFG_DRIVER"
+    fi
+  fi
+fi
+DRIVER="${DRIVER:-agy}"
+
+_list_available_drivers() {
+  local dirs=()
+  [ -n "${AGY_DRIVERS_DIR:-}" ] && [ -d "${AGY_DRIVERS_DIR:-}" ] && dirs=("${dirs[@]+"${dirs[@]}"}" "$AGY_DRIVERS_DIR")
+  [ -d "$HERE/../drivers" ] && dirs=("${dirs[@]+"${dirs[@]}"}" "$HERE/../drivers")
+  [ -d "$DIR/drivers" ] && dirs=("${dirs[@]+"${dirs[@]}"}" "$DIR/drivers")
+
+  local names=""
+  for d in "${dirs[@]+"${dirs[@]}"}"; do
+    for f in "$d"/*.sh; do
+      [ -f "$f" ] || continue
+      local base
+      base="$(basename "$f" .sh)"
+      if [ -z "$names" ]; then
+        names="$base"
+      else
+        local match=0
+        for existing in $(printf '%s' "$names" | tr '|' ' '); do
+          if [ "$existing" = "$base" ]; then
+            match=1
+            break
+          fi
+        done
+        if [ "$match" -eq 0 ]; then
+          names="$names|$base"
+        fi
+      fi
+    done
+  done
+  printf '%s' "${names:-agy}"
+}
+
+DRIVER_PATH=""
+if [ -n "${AGY_DRIVERS_DIR:-}" ] && [ -f "$AGY_DRIVERS_DIR/$DRIVER.sh" ]; then
+  DRIVER_PATH="$AGY_DRIVERS_DIR/$DRIVER.sh"
+elif [ -f "$HERE/../drivers/$DRIVER.sh" ]; then
+  DRIVER_PATH="$HERE/../drivers/$DRIVER.sh"
+elif [ -f "$DIR/drivers/$DRIVER.sh" ]; then
+  DRIVER_PATH="$DIR/drivers/$DRIVER.sh"
+elif [ -f "$DRIVER" ]; then
+  DRIVER_PATH="$DRIVER"
+elif [ -f "$DRIVER.sh" ]; then
+  DRIVER_PATH="$DRIVER.sh"
+fi
+
+if [ -z "$DRIVER_PATH" ] || [ ! -f "$DRIVER_PATH" ]; then
+  echo "phase.sh: unknown driver '$DRIVER' (want $(_list_available_drivers))" >&2
+  exit 2
+fi
+
+. "$DRIVER_PATH"
+
+if ! command -v driver_run >/dev/null 2>&1 || ! command -v driver_capabilities >/dev/null 2>&1; then
+  echo "phase.sh: driver '$DRIVER' does not implement driver interface" >&2
+  exit 2
+fi
+
+DRIVER_CAPS="$(driver_capabilities 2>/dev/null || true)"
+DRIVER_SHELL="$(printf '%s\n' "$DRIVER_CAPS" | sed -n 's/^shell=//p' | head -1)"
+if [ "$DRIVER_SHELL" = "yes" ]; then
+  ALLOW_SHELL=1
+fi
 
 RESOLVE_ARGS=()
 if [ -n "$TIER" ]; then
@@ -287,7 +366,7 @@ if [ "$SPENT" -ge "$RETRY_CAP" ]; then
     "attempt=$((SPENT + 1))" \
     "tier=$TIER" \
     "model=$MODEL" \
-    "backend=agy" \
+    "backend=$DRIVER" \
     "started=$STARTED_TS" \
     "status=RETRY_CAP_REACHED(n=$SPENT, cap=$RETRY_CAP)" \
     "retries_spent=$SPENT" \
@@ -312,7 +391,7 @@ if [ -n "$BUDGET_TOKENS" ]; then
       "attempt=$((SPENT + 1))" \
       "tier=$TIER" \
       "model=$MODEL" \
-      "backend=agy" \
+      "backend=$DRIVER" \
       "started=$STARTED_TS" \
       "status=BUDGET_EXCEEDED(spent=$SPENT_TOKENS, budget=$BUDGET_TOKENS)" \
       "retries_spent=$SPENT" \
@@ -349,7 +428,7 @@ if [ -z "$SKIP_SECRET_SCAN" ]; then
       "attempt=$((SPENT + 1))" \
       "tier=$TIER" \
       "model=$MODEL" \
-      "backend=agy" \
+      "backend=$DRIVER" \
       "started=$STARTED_TS" \
       "status=$SECRETS_STATUS" \
       "retries_spent=$SPENT" \
@@ -385,7 +464,7 @@ if [ -z "$SKIP_BRIEF_LINT" ]; then
       "attempt=$((SPENT + 1))" \
       "tier=$TIER" \
       "model=$MODEL" \
-      "backend=agy" \
+      "backend=$DRIVER" \
       "started=$STARTED_TS" \
       "status=$LINT_STATUS" \
       "retries_spent=$SPENT" \
@@ -433,7 +512,7 @@ if [ -z "$SKIP_PREFLIGHT" ]; then
       "attempt=$((SPENT + 1))" \
       "tier=$TIER" \
       "model=$MODEL" \
-      "backend=agy" \
+      "backend=$DRIVER" \
       "started=$STARTED_TS" \
       "status=PREFLIGHT_FAILED($REASON)" \
       "retries_spent=$SPENT" \
@@ -458,7 +537,7 @@ fi
 printf '%s\n' "$NEXT" > "$RETRY_FILE" 2>/dev/null
 
 START_EPOCH=$(date +%s)
-"$HERE/agy-run.sh" --brief "$BRIEF" --dir "$DIR" --log "$LOG" \
+driver_run --brief "$BRIEF" --dir "$DIR" --log "$LOG" \
   --model "$MODEL" --mode "$MODE" --timeout "$TIMEOUT" \
   ${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"} >/dev/null 2>&1
 RC=$?
@@ -582,7 +661,7 @@ LEDGER_ARGS=(
   "attempt=$((SPENT + 1))"
   "tier=$TIER"
   "model=$MODEL"
-  "backend=agy"
+  "backend=$DRIVER"
   "started=$STARTED_TS"
   "elapsed_s=$ELAPSED_S"
   "worker_rc=$RC"

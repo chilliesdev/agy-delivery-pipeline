@@ -41,11 +41,11 @@ jobs:
       # Issue #39 walks the warnings to zero and then raises the blocking severity
       # to warning.
       - name: Run shellcheck (errors - blocking)
-        run: shellcheck -S error scripts/*.sh tests/*.sh
+        run: shellcheck -S error scripts/*.sh tests/*.sh drivers/*.sh
 
       - name: Run shellcheck (style/advisory - non-blocking)
         continue-on-error: true
-        run: shellcheck -S style scripts/*.sh tests/*.sh || true
+        run: shellcheck -S style scripts/*.sh tests/*.sh drivers/*.sh || true
 
   manifests:
     name: manifests
