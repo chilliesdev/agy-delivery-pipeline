@@ -36,14 +36,21 @@ if [ "${1:-}" = "models" ]; then
   printf 'gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\ngemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n'
   exit 0
 fi
+[ -n "${STUB_RAN:-}" ] && printf 'ran\n' >> "$STUB_RAN"
 if [ -f .agy/current ]; then
   CUR_RUN="$(cat .agy/current 2>/dev/null || true)"
-  if [ -n "$CUR_RUN" ]; then
+  if [ -n "$CUR_RUN" ] && [ -z "${STUB_NO_VERDICT_FILE:-}" ]; then
     mkdir -p ".agy/runs/$CUR_RUN/phases/$STUB_PHASE"
     printf '%s\n' "${STUB_VERDICT:-STATUS: PASSED | File: CHANGES.md}" > ".agy/runs/$CUR_RUN/phases/$STUB_PHASE/verdict"
   fi
 fi
-printf '%s\n' "${STUB_VERDICT:-STATUS: PASSED | File: CHANGES.md}"
+if [ -n "${STUB_OUTPUT:-}" ]; then
+  printf '%s\n' "$STUB_OUTPUT"
+elif [ -n "${STUB_VERDICT:-}" ]; then
+  printf '%s\n' "$STUB_VERDICT"
+else
+  printf '{"conversation_id":"c-123","status":"SUCCESS","response":"STATUS: PASSED | File: CHANGES.md\\n","duration_seconds":1.5,"num_turns":1,"usage":{"input_tokens":16813,"output_tokens":1,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":16814}}\n'
+fi
 exit "${STUB_RC:-0}"
 STUB_EOF
 chmod +x "$STUB"
@@ -65,7 +72,9 @@ new_repo() {
 run_phase() {
   local repo="$1"
   shift
-  STUB_PHASE="${STUB_PHASE:-TEST}" STUB_VERDICT="${STUB_VERDICT:-}" AGY_BIN="$STUB" \
+  STUB_PHASE="${STUB_PHASE:-TEST}" STUB_VERDICT="${STUB_VERDICT:-}" \
+  STUB_OUTPUT="${STUB_OUTPUT:-}" STUB_RAN="${STUB_RAN:-}" STUB_NO_VERDICT_FILE="${STUB_NO_VERDICT_FILE:-}" \
+  AGY_BIN="$STUB" \
     /bin/bash "$PHASE_SH" --phase TEST --brief "$repo/brief.md" --dir "$repo" "$@" 2>/dev/null
 }
 
@@ -339,6 +348,169 @@ if printf '%s\n' "$LINE10_CAP" | grep -q '"worker_rc"'; then
   bad retry-cap-no-worker-rc "worker_rc should be absent on RETRY_CAP_REACHED"
 else
   ok retry-cap-no-worker-rc "worker_rc absent on RETRY_CAP_REACHED"
+fi
+
+# --- 13. stub agy emitting JSON produces record with usage object intact ---
+
+R11="$(new_repo json-usage)"
+run_phase "$R11" --task "json usage test" >/dev/null
+LINE11="$(cat "$R11/.agy/ledger.jsonl" 2>/dev/null)"
+
+if printf '%s\n' "$LINE11" | grep -q '"usage":{"input_tokens":16813,"output_tokens":1,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":16814}'; then
+  ok json-usage-intact "ledger record carries full usage object"
+else
+  bad json-usage-intact "usage object missing or wrong: $LINE11"
+fi
+
+if printf '%s\n' "$LINE11" | grep -q '"num_turns":1' \
+   && printf '%s\n' "$LINE11" | grep -q '"agy_status":"SUCCESS"'; then
+  ok json-metadata-intact "num_turns and agy_status recorded"
+else
+  bad json-metadata-intact "num_turns or agy_status missing: $LINE11"
+fi
+
+# --- 14. stub emitting no usage key produces record with no usage object ---
+
+R12="$(new_repo json-no-usage)"
+STUB_OUTPUT='{"conversation_id":"c-no-usage","status":"SUCCESS","response":"STATUS: PASSED | File: CHANGES.md\n","duration_seconds":1.0,"num_turns":1}' \
+  run_phase "$R12" --task "no usage test" >/dev/null
+LINE12="$(cat "$R12/.agy/ledger.jsonl" 2>/dev/null)"
+
+if printf '%s\n' "$LINE12" | grep -q '"usage"'; then
+  bad no-usage-absent-not-zero "usage key present when agy emitted no usage"
+else
+  ok no-usage-absent-not-zero "usage key absent when agy emitted no usage"
+fi
+
+# --- 15. malformed JSON yields usable dispatch with text fallback note ----
+
+R13="$(new_repo malformed-json)"
+OUT13="$(STUB_OUTPUT='{"status":"SUCCESS", broken json' run_phase "$R13" --task "malformed json test")"
+LINE13="$(cat "$R13/.agy/ledger.jsonl" 2>/dev/null)"
+
+case "$OUT13" in
+  *"STATUS: PASSED | File: CHANGES.md"*) ok malformed-json-usable "malformed JSON yielded usable dispatch" ;;
+  *) bad malformed-json-usable "malformed JSON dispatch failed: $OUT13" ;;
+esac
+
+case "$OUT13" in
+  *"Note: worker output was not valid JSON; fell back to raw text"*)
+    ok malformed-json-status-note "status line notes fallback to text" ;;
+  *) bad malformed-json-status-note "status line missing fallback note: $OUT13" ;;
+esac
+
+if printf '%s\n' "$LINE13" | grep -q '"usage"'; then
+  bad malformed-json-no-usage "usage key should not exist on malformed JSON"
+else
+  ok malformed-json-no-usage "usage key omitted on malformed JSON"
+fi
+
+# --- 16. printed-line verdict fallback inside JSON response ----------------
+
+R14="$(new_repo json-verdict-fallback)"
+STUB_OUTPUT='{"conversation_id":"c-fb","status":"SUCCESS","response":"Some thinking...\nSTATUS: PASSED | File: CHANGES.md\n","duration_seconds":2.0,"num_turns":1,"usage":{"input_tokens":100,"output_tokens":10,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":110}}' \
+  STUB_NO_VERDICT_FILE=1 run_phase "$R14" --task "verdict fallback test" >/dev/null
+LINE14="$(cat "$R14/.agy/ledger.jsonl" 2>/dev/null)"
+
+if printf '%s\n' "$LINE14" | grep -q '"verdict":"PASSED"' \
+   && printf '%s\n' "$LINE14" | grep -q '"status":"PASSED"'; then
+  ok json-verdict-fallback "verdict extracted from inside JSON response field without verdict file"
+else
+  bad json-verdict-fallback "failed to extract verdict from JSON response: $LINE14"
+fi
+
+# --- 17. --budget-tokens refuses before dispatch when spent exceeds ceiling -
+
+R15="$(new_repo budget-refusal)"
+RAN15="$R15/ran.txt"
+
+# First dispatch: spends 16,814 tokens
+STUB_RAN="$RAN15" run_phase "$R15" --task "budget test" >/dev/null
+
+BEFORE15="$(count_lines "$RAN15")"
+check budget-first-dispatched "$BEFORE15" "1" "first dispatch executed worker"
+
+# Second dispatch with budget lower than spent (e.g. 10000 tokens < 16814 spent)
+OUT15="$(STUB_RAN="$RAN15" run_phase "$R15" --run current --budget-tokens 10000)"; RC15=$?
+check budget-exceeded-rc "$RC15" 7 "budget exceeded exits 7"
+
+case "$OUT15" in
+  *"STATUS: BUDGET_EXCEEDED(spent=16814, budget=10000)"*)
+    ok budget-exceeded-status "STATUS line reports BUDGET_EXCEEDED with spent and budget" ;;
+  *) bad budget-exceeded-status "unexpected STATUS line: $OUT15" ;;
+esac
+
+AFTER15="$(count_lines "$RAN15")"
+check budget-exceeded-no-dispatch "$AFTER15" "$BEFORE15" "worker was never invoked on budget refusal"
+
+LINE15_BUDGET="$(tail -1 "$R15/.agy/ledger.jsonl")"
+if printf '%s\n' "$LINE15_BUDGET" | grep -q '"status":"BUDGET_EXCEEDED(spent=16814, budget=10000)"'; then
+  ok budget-exceeded-ledger-recorded "BUDGET_EXCEEDED recorded in ledger"
+else
+  bad budget-exceeded-ledger-recorded "BUDGET_EXCEEDED missing in ledger: $LINE15_BUDGET"
+fi
+
+if printf '%s\n' "$LINE15_BUDGET" | grep -q '"usage"'; then
+  bad budget-exceeded-no-usage "usage key must be absent on budget refusal"
+else
+  ok budget-exceeded-no-usage "usage key absent on budget refusal"
+fi
+
+# Third dispatch under budget (budget 50000 > 16814) succeeds and dispatches
+OUT15_OK="$(STUB_RAN="$RAN15" run_phase "$R15" --run current --budget-tokens 50000)"; RC15_OK=$?
+check budget-under-rc "$RC15_OK" 0 "under budget dispatch succeeds"
+check budget-under-dispatched "$(count_lines "$RAN15")" "$((BEFORE15 + 1))" "worker invoked when under budget"
+
+# --- 18. report.sh separates dead WORKER_FAILED round from real spend -------
+
+R16="$(new_repo report-spend-separation)"
+mkdir -p "$R16/.agy"
+
+# Record 1: live IMPLEMENT round, 10,000 tokens
+ledger_append "$R16" run=run-1 phase=IMPLEMENT attempt=1 tier=medium model=m backend=agy \
+  started=2026-08-24T10:00:00Z elapsed_s=10 worker_rc=0 verdict=PASSED verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 \
+  usage='{"input_tokens":8000,"output_tokens":2000,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":10000}'
+# Record 2: dead IMPLEMENT round (WORKER_FAILED, retries_refunded=1), 1,000 tokens
+ledger_append "$R16" run=run-1 phase=IMPLEMENT attempt=2 tier=medium model=m backend=agy \
+  started=2026-08-24T10:05:00Z elapsed_s=2 worker_rc=1 status='WORKER_FAILED(rc=1)' \
+  retries_spent=0 retries_refunded=1 verify_ran=false \
+  usage='{"input_tokens":900,"output_tokens":100,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":1000}'
+# Record 3: live REVIEW round, 5,000 tokens
+ledger_append "$R16" run=run-1 phase=REVIEW attempt=1 tier=high model=m backend=agy \
+  started=2026-08-24T10:10:00Z elapsed_s=15 worker_rc=0 verdict=PASSED verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 \
+  usage='{"input_tokens":4000,"output_tokens":1000,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":5000}'
+
+REPORT16="$(/bin/bash "$REPORT_SH" --dir "$R16")"
+
+# Check IMPLEMENT tokens reported as 10000 (not 11000)
+if printf '%s\n' "$REPORT16" | grep "IMPLEMENT:" | grep -q "10000 tokens"; then
+  ok report-phase-excludes-dead "live IMPLEMENT spend reported as 10,000 tokens (excludes dead round)"
+else
+  bad report-phase-excludes-dead "IMPLEMENT tokens incorrect in report: $REPORT16"
+fi
+
+# Check dead rounds reported separately
+if printf '%s\n' "$REPORT16" | grep -q "1 dead dispatch(es), 1000 tokens" \
+   && printf '%s\n' "$REPORT16" | grep -q "excluded from phase spend"; then
+  ok report-dead-rounds-separate "dead rounds reported separately with refunded tokens"
+else
+  bad report-dead-rounds-separate "dead rounds missing or incorrect: $REPORT16"
+fi
+
+# Check rates pricing when provided
+REPORT16_RATES="$(/bin/bash "$REPORT_SH" --dir "$R16" --price-in 3.00 --price-out 15.00)"
+if printf '%s\n' "$REPORT16_RATES" | grep -qF '$'; then
+  ok report-rates-printed "report prints dollar figures when rates supplied"
+else
+  bad report-rates-printed "dollar figures missing with rates: $REPORT16_RATES"
+fi
+
+if printf '%s\n' "$REPORT16" | grep -qF '$'; then
+  bad report-rates-absent "report should not print dollar figures when rates not supplied"
+else
+  ok report-rates-absent "report omits dollar figures when rates not supplied"
 fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

@@ -28,6 +28,13 @@
 # that ends WORKER_FAILED or PREFLIGHT_FAILED is refunded: neither is a worker
 # failing to converge, which is the only thing the cap is there to catch.
 #
+# --budget-tokens <n> enforces a spend ceiling: before dispatching, sum
+# total_tokens across every ledger record for this run. If already at or past
+# the budget, phase.sh refuses to dispatch, returning STATUS: BUDGET_EXCEEDED(spent=N, budget=M),
+# exit 7. Budget in tokens, not dollars — do not hardcode a price per token anywhere.
+# Prices change, differ per model and account, and a stale number presented as a cost
+# is worse than no number.
+#
 # preflight.sh runs first unless --no-preflight or AGY_SKIP_PREFLIGHT=1.
 #
 # If this dispatch had to tell git to ignore .agy/, the STATUS line carries a
@@ -53,6 +60,7 @@ PHASE=""; BRIEF=""; TIER="medium"; DIR="$PWD"; MODE="accept-edits"; TIMEOUT="30m
 SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
 VERIFY=""; RESET_RETRIES=""; IGNORE_VIA="gitignore"
 RETRY_CAP="${AGY_RETRY_CAP:-2}"
+BUDGET_TOKENS="${AGY_BUDGET_TOKENS:-}"
 RUN_TARGET=""
 TASK=""
 SANDBOX_ARGS=()   # array, so the flag is never word-split out of an unquoted scalar
@@ -69,6 +77,7 @@ while [ $# -gt 0 ]; do
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --verify)  VERIFY="$2";  shift 2 ;;
     --retry-cap) RETRY_CAP="$2"; shift 2 ;;
+    --budget-tokens) BUDGET_TOKENS="$2"; shift 2 ;;
     --reset-retries) RESET_RETRIES=1; shift ;;
     --ignore-via) IGNORE_VIA="$2"; shift 2 ;;
     --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
@@ -81,6 +90,14 @@ done
 [ -f "$BRIEF" ] || { echo "phase.sh: brief not found: $BRIEF" >&2; exit 2; }
 case "$RETRY_CAP" in
   ''|*[!0-9]*) echo "phase.sh: --retry-cap wants a whole number, got '$RETRY_CAP'" >&2; exit 2 ;;
+esac
+case "$BUDGET_TOKENS" in
+  ""|*[!0-9]*)
+    if [ -n "$BUDGET_TOKENS" ]; then
+      echo "phase.sh: --budget-tokens wants a whole number, got '$BUDGET_TOKENS'" >&2
+      exit 2
+    fi
+    ;;
 esac
 case "$IGNORE_VIA" in
   gitignore|exclude) ;;
@@ -244,6 +261,32 @@ if [ "$SPENT" -ge "$RETRY_CAP" ]; then
   exit 6
 fi
 
+# At the budget ceiling, refuse before anything is spent — no preflight fetch,
+# no worker, no cleared verdict.
+if [ -n "$BUDGET_TOKENS" ]; then
+  SPENT_TOKENS="$(_ledger_spent_tokens "$DIR" "$RUN_ID")"
+  if [ "$SPENT_TOKENS" -ge "$BUDGET_TOKENS" ]; then
+    printf '%s\n' "STATUS: BUDGET_EXCEEDED(spent=$SPENT_TOKENS, budget=$BUDGET_TOKENS) | Phase: $PHASE | Run: $RUN_ID | Note: the token budget for this run is spent — increase --budget-tokens to continue | Log: $LOG$GITIGNORE_FIELD" \
+      | tee "$STATUS_FILE"
+    TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
+    [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
+    ledger_append "$DIR" \
+      "run=$RUN_ID" \
+      "phase=$PHASE" \
+      "attempt=$((SPENT + 1))" \
+      "tier=$TIER" \
+      "model=$MODEL" \
+      "backend=agy" \
+      "started=$STARTED_TS" \
+      "status=BUDGET_EXCEEDED(spent=$SPENT_TOKENS, budget=$BUDGET_TOKENS)" \
+      "retries_spent=$SPENT" \
+      "retries_refunded=0" \
+      "verify_ran=false" \
+      ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
+    exit 7
+  fi
+fi
+
 # The same phase name is re-run by the Phase 2 review loop, so a verdict left by
 # the previous round would otherwise be read as this round's answer.
 rm -f "$VERDICT_FILE"
@@ -300,6 +343,21 @@ START_EPOCH=$(date +%s)
 RC=$?
 ELAPSED_S=$(( $(date +%s) - START_EPOCH ))
 
+RESULT_JSON="$PHASE_DIR/result.json"
+JSON_FALLBACK_FIELD=""
+USAGE_OBJ=""
+NUM_TURNS_VAL=""
+AGY_STATUS_VAL=""
+
+if [ -f "$RESULT_JSON" ] && [ -s "$RESULT_JSON" ]; then
+  RES_LINE="$(cat "$RESULT_JSON" 2>/dev/null || true)"
+  USAGE_OBJ="$(printf '%s\n' "$RES_LINE" | sed -n 's/.*"usage":\({[^}]*}\).*/\1/p' 2>/dev/null || true)"
+  NUM_TURNS_VAL="$(printf '%s\n' "$RES_LINE" | sed -n 's/.*"num_turns":\([0-9][0-9]*\).*/\1/p' 2>/dev/null || true)"
+  AGY_STATUS_VAL="$(printf '%s\n' "$RES_LINE" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p' 2>/dev/null || true)"
+elif [ "$RC" -eq 0 ]; then
+  JSON_FALLBACK_FIELD=" | Note: worker output was not valid JSON; fell back to raw text"
+fi
+
 # Primary: the verdict the worker wrote to R/phases/<PHASE>/verdict — first non-empty
 # line, no transcript involved. Fallback: the last transcript line that *starts*
 # with STATUS:, so prose like "I will end with STATUS: PASSED" cannot match.
@@ -347,7 +405,7 @@ fi
 if [ -n "$VERIFY" ] && [ "$VRC" -eq 0 ] && [ "$RC" -eq 0 ]; then
   LINE="$LINE | Verify: ok | VerifyLog: $VERIFY_LOG"
 fi
-LINE="$LINE$GITIGNORE_FIELD"
+LINE="$LINE$JSON_FALLBACK_FIELD$GITIGNORE_FIELD"
 
 # Record the phase outcome in run.json
 FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | awk '{print $1}')"
@@ -429,6 +487,18 @@ fi
 
 if [ -n "$TASK_TO_RECORD" ]; then
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "task=$TASK_TO_RECORD")
+fi
+
+if [ -n "$USAGE_OBJ" ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "usage=$USAGE_OBJ")
+fi
+
+if [ -n "$NUM_TURNS_VAL" ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "num_turns=$NUM_TURNS_VAL")
+fi
+
+if [ -n "$AGY_STATUS_VAL" ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "agy_status=$AGY_STATUS_VAL")
 fi
 
 if DIFF_OBJ="$(_ledger_extract_diff "$R")"; then

@@ -137,10 +137,17 @@ The two Phase 2 helpers have their own suites,
 ### The run ledger
 
 Every dispatch automatically appends one summary line to `.agy/ledger.jsonl`.
+Spend and token usage are recorded automatically. `--budget-tokens <n>` is
+available for a run that must not exceed a spend ceiling, refusing before
+dispatch if the run's accumulated spend already reaches the limit. The tier
+assignments — discovery `low`, implementation `medium`, review `high` — are a
+reasonable guess that nobody has ever checked, which this data now makes
+checkable.
+
 The orchestrator does not need to read or maintain the ledger during a run — its
 context stays lean by design, and recording is a side effect handled entirely
 underneath. When questions arise between runs about pipeline behaviour, pass
-rates, retry convergence, or verification gate overrides, query the ledger with
+rates, retry convergence, or token spend, query the ledger with
 `${CLAUDE_PLUGIN_ROOT}/scripts/report.sh`.
 
 ## Preflight

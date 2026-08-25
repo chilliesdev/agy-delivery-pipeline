@@ -169,11 +169,15 @@ And the number that matters most: **how often `--verify` overrides a worker's
 nobody knew it.
 
 A record holds dispatch metadata, timings, exit codes, gate verdicts, retry
-counters, and diff/review summaries:
+counters, token usage, turn counts, agy status, and diff/review summaries:
 
 ```json
-{"run":"2026-08-24T09-51-03Z-a4f1","phase":"REVIEW","attempt":1,"tier":"high","model":"gemini-3.7-flash-high","backend":"agy","started":"2026-08-24T09:51:20Z","elapsed_s":42,"worker_rc":0,"verdict":"PASSED","verify_ran":true,"verify_rc":0,"status":"PASSED","retries_spent":0,"retries_refunded":0,"task_id":"b3f81e62a1c0","diff":{"files":3,"insertions":45,"deletions":12,"truncated":false},"review":{"anchors":4,"status":"REVIEW_EVIDENCED"}}
+{"run":"2026-08-24T09-51-03Z-a4f1","phase":"REVIEW","attempt":1,"tier":"high","model":"gemini-3.7-flash-high","backend":"agy","started":"2026-08-24T09:51:20Z","elapsed_s":42,"worker_rc":0,"verdict":"PASSED","verify_ran":true,"verify_rc":0,"status":"PASSED","retries_spent":0,"retries_refunded":0,"task_id":"b3f81e62a1c0","usage":{"input_tokens":8000,"output_tokens":2000,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":10000},"num_turns":1,"agy_status":"SUCCESS","diff":{"files":3,"insertions":45,"deletions":12,"truncated":false},"review":{"anchors":4,"status":"REVIEW_EVIDENCED"}}
 ```
+
+Records carry `usage` — `input_tokens`, `output_tokens`, `thinking_tokens`,
+`cache_read_tokens`, `total_tokens` — alongside `num_turns` and agy's own
+`agy_status`.
 
 **The privacy stance, plainly.** The task string is recorded as a 12-character
 hash by default (`git hash-object`, requiring no extra dependencies). Setting
@@ -191,6 +195,7 @@ Query summary metrics across recorded runs with `scripts/report.sh`:
 
 ```
 scripts/report.sh [--dir <repo>] [--since <date>] [--phase <NAME>] [--run <id>]
+                  [--price-in <usd-per-mtok>] [--price-out <usd-per-mtok>]
 ```
 
 It parses the JSONL records in portable bash 3.2 (no `jq` or Python required)
@@ -199,9 +204,26 @@ and prints:
 - dispatch counts and pass rates by phase
 - retry convergence distribution (rounds 1, 2, 3+, and unresolved cap hits)
 - median and max elapsed wall-clock times per phase
+- token spend per phase, with dead rounds (refunded worker failures) separated
+- average token efficiency per successful task
 - gate and verification outcomes, including `--verify` overrides and missing
   worker statuses
 - corrupt or unparseable line counts
+
+### Token budgets and pricing
+
+`scripts/phase.sh --budget-tokens <n>` enforces a spend ceiling for a run.
+Before dispatching, it sums `total_tokens` across all ledger records for the
+run. If already at or past the ceiling, it refuses to dispatch, returning
+`STATUS: BUDGET_EXCEEDED(spent=N, budget=M)` (exit 7) — the same shape as
+`RETRY_CAP_REACHED`, and refused **before** the dispatch so an over-budget run
+costs nothing more.
+
+**Budgets are in tokens, not dollars.** Prices change, differ per model and per
+account, and a stale number presented as a cost is worse than no number. Rates
+can be supplied to `scripts/report.sh` via `--price-in` and `--price-out` (USD
+per million tokens) for a derived dollar figure; without them, the report says
+nothing about money.
 
 ## Running a phase by hand
 
@@ -229,6 +251,20 @@ around them:
   brief rather than the mode.
 - **agy hangs when its stdout is a plain file**, and **drains stdin before it
   answers**, so anything reading it uses a pipe and `</dev/null`.
+- **agy reports token usage, but only under `--output-format json`.** The
+  default text output carries none. The JSON object also carries
+  `duration_seconds`, `num_turns`, a `conversation_id`, and agy's own `status`.
+  Two flag details worth stating because both cost time to find: `-p` takes the
+  next argument as its prompt, so the prompt must be attached as `-p='…'` with
+  `--output-format` elsewhere on the command line; and every existing
+  constraint still holds — stdout must be a pipe rather than a plain file, and
+  stdin must be `</dev/null`.
+
+  Switching to JSON moved the worker's text inside a `response` field, so the
+  **printed-line verdict route** now has to be extracted from JSON before a
+  `STATUS:` line can be found in it. The file route was unaffected. That is the
+  verdict contract's two routes earning their keep — one of them changed shape
+  entirely and the other did not notice.
 
 ## Design stance
 
