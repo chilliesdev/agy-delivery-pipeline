@@ -4,6 +4,10 @@
 #   check-phase-range.sh --from <0-4> [--to <0-4>] [--dir <repo>]
 #                        [--run <id|current|last>]
 #
+# Writes:  a refusal record in the run ledger on RANGE_REFUSED, so a gate that
+#          fires outside a dispatch is not reported as never firing
+#          (AGY_SKIP_LEDGER=1 keeps this script read-only)
+#
 # Exit codes:
 #     0  every artifact the range needs is on disk and recorded as passed
 #     1  at least one is missing — the names and their producing phase are
@@ -35,6 +39,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/run-dir.sh"
+. "$HERE/ledger.sh"
 
 FROM=""; TO="4"; DIR="$PWD"
 RUN_TARGET="current"
@@ -68,6 +73,7 @@ if [ "$FROM" -gt 0 ]; then
   TASK="$(run_dir_get "$R" "task" 2>/dev/null || true)"
   if [ -z "$TASK" ]; then
     echo "STATUS: RANGE_REFUSED(from=$FROM) | Note: run has no recorded task | Next: pass --task '<task>' to record the task, or start the range at 0"
+    ledger_record_refusal "$DIR" "$(run_dir_get "$R" "run" 2>/dev/null || basename "$R")" "RANGE" "RANGE_REFUSED(from=$FROM)"
     exit 1
   fi
 fi
@@ -144,6 +150,7 @@ if [ -n "$MISSING" ]; then
     echo "  missing: $ART — written by $(producer "$ART")"
   done
   echo "  fix: run the earlier phases, or start the range at 0"
+  ledger_record_refusal "$DIR" "$(run_dir_get "$R" "run" 2>/dev/null || basename "$R")" "RANGE" "RANGE_REFUSED(from=$FROM)"
   exit 1
 fi
 

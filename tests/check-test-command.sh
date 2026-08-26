@@ -197,5 +197,56 @@ R="$(new_repo bad-arg)"
 run "$R" --bogus
 check bad-arg "$CODE" 2 "exit 2 on an unknown argument"
 
+# 14. a refusal reaches the ledger, and a pass does not.
+#
+# This gate runs in the orchestrator's hands rather than a dispatch's, so
+# nothing else records it. Counted at zero, report.sh calls it dead code.
+
+R="$(new_repo ledger-failed)"
+run "$R" --command 'echo "1 failing"; exit 1'
+LG="$R/.agy/ledger.jsonl"
+if [ -f "$LG" ] && grep -q '"status":"TEST_COMMAND_FAILED' "$LG"; then
+  ok ledger-failed-recorded "a red suite is recorded in the run ledger"
+else
+  bad ledger-failed-recorded "no TEST_COMMAND_FAILED record: $(cat "$LG" 2>/dev/null)"
+fi
+if grep -q '"dispatched":false' "$LG" 2>/dev/null; then
+  ok ledger-failed-not-dispatch "the record says no worker ran"
+else
+  bad ledger-failed-not-dispatch "record missing dispatched=false: $(cat "$LG" 2>/dev/null)"
+fi
+
+R="$(new_repo ledger-not-runnable)"
+run "$R" --command 'definitely-not-a-real-binary-xyz'
+LG="$R/.agy/ledger.jsonl"
+if grep -q '"status":"TEST_COMMAND_NOT_RUNNABLE' "$LG" 2>/dev/null; then
+  ok ledger-not-runnable-recorded "a wrong command is recorded separately from a red suite"
+else
+  bad ledger-not-runnable-recorded "no TEST_COMMAND_NOT_RUNNABLE record: $(cat "$LG" 2>/dev/null)"
+fi
+
+R="$(new_repo ledger-ok)"
+run "$R" --command 'echo "1 passing"; exit 0'
+if [ -s "$R/.agy/ledger.jsonl" ]; then
+  bad ledger-ok-not-recorded "TEST_COMMAND_OK wrote a record: $(cat "$R/.agy/ledger.jsonl")"
+else
+  ok ledger-ok-not-recorded "a command that worked writes nothing — the ledger records events, not checks"
+fi
+
+R="$(new_repo ledger-skip)"
+AGY_SKIP_LEDGER=1 /bin/bash "$CHECK" --dir "$R" --command 'exit 1' >/dev/null 2>&1
+if [ -s "$R/.agy/ledger.jsonl" ]; then
+  bad ledger-skip "AGY_SKIP_LEDGER=1 still wrote: $(cat "$R/.agy/ledger.jsonl")"
+else
+  ok ledger-skip "AGY_SKIP_LEDGER=1 keeps the checker read-only"
+fi
+
+# Recording must never change the answer.
+R="$(new_repo ledger-readonly)"
+chmod 500 "$R/.agy"
+run "$R" --command 'echo "1 failing"; exit 1'
+chmod 700 "$R/.agy"
+check ledger-readonly-rc "$CODE" 4 "an unwritable ledger does not change the exit code"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

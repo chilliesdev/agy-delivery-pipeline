@@ -144,5 +144,54 @@ case "$OUT_ET" in "STATUS: RANGE_REFUSED(from=2) | Note: run has no recorded tas
   *) bad h-empty-task-from-2-note "unexpected output: $OUT_ET" ;;
 esac
 
+# i. a refusal reaches the ledger.
+#
+# This gate refuses in the orchestrator's hands, not a dispatch's, so nothing
+# else writes it down. Uncounted, report.sh lists it as never having fired, and
+# a reader acting on that would delete a working gate.
+
+REPO_LEDGER="$(new_repo i-ledger)"
+rc "$REPO_LEDGER" --from 3 >/dev/null
+LEDGER_I="$REPO_LEDGER/.agy/ledger.jsonl"
+if [ -f "$LEDGER_I" ] && grep -q '"status":"RANGE_REFUSED(from=3)"' "$LEDGER_I"; then
+  ok i-refusal-recorded "a refusal is recorded in the run ledger"
+else
+  bad i-refusal-recorded "no RANGE_REFUSED record in the ledger: $(cat "$LEDGER_I" 2>/dev/null)"
+fi
+
+if grep -q '"dispatched":false' "$LEDGER_I" 2>/dev/null; then
+  ok i-refusal-not-a-dispatch "the record says no worker ran, so it stays out of dispatch counts and spend"
+else
+  bad i-refusal-not-a-dispatch "refusal record missing dispatched=false: $(cat "$LEDGER_I" 2>/dev/null)"
+fi
+
+REPO_OK="$(new_repo i-ledger-ok DISCOVERY.md TEST_COMMAND CHANGES.md)"
+rc "$REPO_OK" --from 2 >/dev/null
+if [ -s "$REPO_OK/.agy/ledger.jsonl" ]; then
+  bad i-pass-not-recorded "RANGE_OK wrote a ledger record: $(cat "$REPO_OK/.agy/ledger.jsonl")"
+else
+  ok i-pass-not-recorded "a gate that did not refuse writes nothing — the ledger records events, not checks"
+fi
+
+REPO_SKIP="$(new_repo i-ledger-skip)"
+AGY_SKIP_LEDGER=1 "$CHECK" --dir "$REPO_SKIP" --from 3 >/dev/null 2>&1
+if [ -s "$REPO_SKIP/.agy/ledger.jsonl" ]; then
+  bad i-skip-ledger "AGY_SKIP_LEDGER=1 still wrote: $(cat "$REPO_SKIP/.agy/ledger.jsonl")"
+else
+  ok i-skip-ledger "AGY_SKIP_LEDGER=1 keeps the checker read-only"
+fi
+
+# Recording must never change the answer: an unwritable .agy still refuses with
+# the same status and the same exit code.
+REPO_RO="$(new_repo i-ledger-readonly)"
+chmod 500 "$REPO_RO/.agy"
+RO_OUT="$("$CHECK" --dir "$REPO_RO" --from 3 2>/dev/null)"; RO_RC=$?
+chmod 700 "$REPO_RO/.agy"
+check i-readonly-rc "$RO_RC" "1" "an unwritable ledger does not change the refusal's exit code"
+case "$RO_OUT" in "STATUS: RANGE_REFUSED(from=3)"*)
+    ok i-readonly-status "an unwritable ledger does not change the refusal's status line" ;;
+  *) bad i-readonly-status "unexpected output: $RO_OUT" ;;
+esac
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

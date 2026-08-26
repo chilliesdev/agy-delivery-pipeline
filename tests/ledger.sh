@@ -254,7 +254,7 @@ else
   bad report-fixture-verify-overrides "verify overrides count incorrect: $REPORT8"
 fi
 
-if printf '%s\n' "$REPORT8" | grep -q "No status reported dispatches:[[:space:]]*1"; then
+if printf '%s\n' "$REPORT8" | grep -q "No status reported:[[:space:]]*1"; then
   ok report-fixture-no-status "NO_STATUS_REPORTED count is exactly 1"
 else
   bad report-fixture-no-status "NO_STATUS_REPORTED count incorrect: $REPORT8"
@@ -268,7 +268,7 @@ fi
 
 # Test filter --phase REVIEW
 REPORT8_PHASE="$(/bin/bash "$REPORT_SH" --dir "$R8" --phase REVIEW)"
-if printf '%s\n' "$REPORT8_PHASE" | grep -q "3 valid record(s) read"; then
+if printf '%s\n' "$REPORT8_PHASE" | grep -q "3 with dispatch context"; then
   ok report-filter-phase "filtering by --phase matches only matching records"
 else
   bad report-filter-phase "phase filter count unexpected: $REPORT8_PHASE"
@@ -672,6 +672,154 @@ if printf '%s\n' "$LINE19_DISP_PRINT" | grep -q '"verdict_route":"print"'; then
   ok phase-dispatch-verdict-route-print "phase dispatch with printed route records verdict_route=print"
 else
   bad phase-dispatch-verdict-route-print "phase dispatch with printed route missing verdict_route=print: $LINE19_DISP_PRINT"
+fi
+
+
+# --- 20. the dispatched field, and refusals that reach the ledger ------------
+#
+# A gate that refuses before the dispatch is a real event with a real cause and
+# belongs in the ledger — but it is not a model call, and anything counting
+# dispatches or averaging spend has to be able to tell the two apart.
+
+R20="$(new_repo dispatched-field)"
+
+ledger_append "$R20" run=r20 phase=TEST status=BRIEF_INVALID dispatched=false
+L20_REFUSAL="$(tail -1 "$R20/.agy/ledger.jsonl")"
+if printf '%s\n' "$L20_REFUSAL" | grep -q '"dispatched":false'; then
+  ok dispatched-false-recorded "dispatched=false is written as a JSON boolean"
+else
+  bad dispatched-false-recorded "dispatched=false missing: $L20_REFUSAL"
+fi
+
+ledger_append "$R20" run=r20 phase=TEST status=DONE dispatched=true
+L20_DISPATCH="$(tail -1 "$R20/.agy/ledger.jsonl")"
+if printf '%s\n' "$L20_DISPATCH" | grep -q '"dispatched":true'; then
+  ok dispatched-true-recorded "dispatched=true is written as a JSON boolean"
+else
+  bad dispatched-true-recorded "dispatched=true missing: $L20_DISPATCH"
+fi
+
+ledger_append "$R20" run=r20 phase=TEST status=DONE
+L20_ABSENT="$(tail -1 "$R20/.agy/ledger.jsonl")"
+if printf '%s\n' "$L20_ABSENT" | grep -q '"dispatched"'; then
+  bad dispatched-omitted "dispatched written when not supplied: $L20_ABSENT"
+else
+  ok dispatched-omitted "dispatched is omitted entirely when not supplied, so old records stay readable"
+fi
+
+# The git-state keys. phase.sh has passed these since --check-git-state landed,
+# and ledger.sh did not know them — so every dispatch that used the flag lost
+# its *whole* record to an unknown-key refusal, silently, behind 2>/dev/null.
+# The gate fired and the ledger went blank, which is the exact failure the
+# dispatched field exists to prevent.
+ledger_append "$R20" run=r20 phase=TEST status=DONE git_state_ran=true git_state_rc=0
+RC20_GS=$?
+check git-state-keys-rc "$RC20_GS" 0 "ledger accepts the git_state keys phase.sh passes"
+L20_GS="$(tail -1 "$R20/.agy/ledger.jsonl")"
+if printf '%s\n' "$L20_GS" | grep -q '"git_state_ran":true' \
+   && printf '%s\n' "$L20_GS" | grep -q '"git_state_rc":0'; then
+  ok git-state-keys-recorded "git_state_ran and git_state_rc reach the record"
+else
+  bad git-state-keys-recorded "git_state keys missing: $L20_GS"
+fi
+
+# ledger_record_refusal: the helper the gates outside phase.sh use.
+R20B="$(new_repo refusal-helper)"
+ledger_record_refusal "$R20B" "r20b" "RANGE" "RANGE_REFUSED(from=3)"
+L20B="$(tail -1 "$R20B/.agy/ledger.jsonl" 2>/dev/null)"
+if printf '%s\n' "$L20B" | grep -q '"status":"RANGE_REFUSED(from=3)"' \
+   && printf '%s\n' "$L20B" | grep -q '"dispatched":false' \
+   && printf '%s\n' "$L20B" | grep -q '"phase":"RANGE"'; then
+  ok refusal-helper-record "ledger_record_refusal writes phase, status and dispatched=false"
+else
+  bad refusal-helper-record "refusal record unexpected: $L20B"
+fi
+
+if printf '%s\n' "$L20B" | grep -q '"usage"' || printf '%s\n' "$L20B" | grep -q '"elapsed_s"'; then
+  bad refusal-helper-no-spend "refusal record carries spend fields: $L20B"
+else
+  ok refusal-helper-no-spend "a refusal record carries no usage and no elapsed_s — nothing was spent"
+fi
+
+L20B_BEFORE="$(wc -l < "$R20B/.agy/ledger.jsonl")"
+AGY_SKIP_LEDGER=1 ledger_record_refusal "$R20B" "r20b" "RANGE" "RANGE_REFUSED(from=3)"
+L20B_AFTER="$(wc -l < "$R20B/.agy/ledger.jsonl")"
+check refusal-helper-skippable "$L20B_AFTER" "$L20B_BEFORE" "AGY_SKIP_LEDGER=1 keeps a checker read-only"
+
+# A refusal must never change the answer the checker gives, so recording it is
+# best-effort: an unwritable .agy still returns 0.
+R20C="$(new_repo refusal-unwritable)"
+mkdir -p "$R20C/.agy" && chmod 500 "$R20C/.agy"
+ledger_record_refusal "$R20C" "r20c" "RANGE" "RANGE_REFUSED(from=3)"
+check refusal-helper-best-effort "$?" 0 "a ledger that cannot be written does not fail the gate"
+chmod 700 "$R20C/.agy"
+
+# --- 21. a pre-dispatch refusal through phase.sh -----------------------------
+
+R21="$(new_repo refusal-through-phase)"
+printf 'no verdict path here\n' > "$R21/brief.md"
+STUB_PHASE=TEST AGY_BIN="$STUB" /bin/bash "$PHASE_SH" \
+  --phase TEST --brief "$R21/brief.md" --dir "$R21" --task "lint refusal" >/dev/null 2>&1
+L21="$(tail -1 "$R21/.agy/ledger.jsonl" 2>/dev/null)"
+if printf '%s\n' "$L21" | grep -q '"status":"BRIEF_INVALID' \
+   && printf '%s\n' "$L21" | grep -q '"dispatched":false'; then
+  ok phase-lint-refusal-marked "a brief-lint refusal is recorded with dispatched=false"
+else
+  bad phase-lint-refusal-marked "lint refusal record unexpected: $L21"
+fi
+
+# And the same run's real dispatch is marked the other way.
+run_phase "$R21" --task "real dispatch" >/dev/null
+L21_OK="$(tail -1 "$R21/.agy/ledger.jsonl" 2>/dev/null)"
+if printf '%s\n' "$L21_OK" | grep -q '"dispatched":true'; then
+  ok phase-dispatch-marked "a dispatch that ran a worker is recorded with dispatched=true"
+else
+  bad phase-dispatch-marked "dispatch record missing dispatched=true: $L21_OK"
+fi
+
+# The report must count the refusal as a gate that fired, and must not count it
+# as a dispatch. Reporting it as a dispatch understates the worker's pass rate;
+# reporting zero for the gate would have someone delete working code.
+REP21="$(bash "$REPORT_SH" --dir "$R21")"
+if printf '%s\n' "$REP21" | grep -qE '^Dispatches: 1 ' \
+   && printf '%s\n' "$REP21" | grep -qE '^Refusals:   1 '; then
+  ok report-splits-refusals "report counts the dispatch and the refusal separately"
+else
+  bad report-splits-refusals "report header unexpected: $REP21"
+fi
+
+if printf '%s\n' "$REP21" | grep -qE 'Brief invalid:[[:space:]]+1'; then
+  ok report-counts-refused-gate "a gate that refused before the dispatch still counts as fired"
+else
+  bad report-counts-refused-gate "brief invalid count unexpected: $REP21"
+fi
+
+if printf '%s\n' "$REP21" | sed -n '/Never-Fired Gates:/,$p' | grep -q '^  - Brief invalid$'; then
+  bad report-refused-gate-not-dead "a gate that fired is listed as never having fired: $REP21"
+else
+  ok report-refused-gate-not-dead "a gate that fired is kept out of the never-fired list"
+fi
+
+# --- 22. a dispatch under --check-git-state still reaches the ledger ---------
+#
+# The flag makes phase.sh pass git_state_ran and git_state_rc. An unknown key is
+# refused by ledger_append, and the refusal discards the *whole* record — so for
+# a week every dispatch using this flag wrote nothing at all, silently, behind
+# a 2>/dev/null. Nothing exercised the two together, which is why.
+
+R22="$(new_repo git-state-ledger)"
+run_phase "$R22" --task "dispatch under git state check" --check-git-state >/dev/null
+if [ -s "$R22/.agy/ledger.jsonl" ]; then
+  ok git-state-dispatch-recorded "a dispatch under --check-git-state reaches the ledger at all"
+else
+  bad git-state-dispatch-recorded "--check-git-state dispatch wrote no ledger record"
+fi
+L22="$(tail -1 "$R22/.agy/ledger.jsonl" 2>/dev/null)"
+if printf '%s\n' "$L22" | grep -q '"git_state_ran":true' \
+   && printf '%s\n' "$L22" | grep -q '"dispatched":true'; then
+  ok git-state-dispatch-fields "the record carries the git-state fields and is marked dispatched"
+else
+  bad git-state-dispatch-fields "record unexpected: $L22"
 fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

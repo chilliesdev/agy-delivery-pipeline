@@ -8,6 +8,7 @@
 # 6. Multi-run aggregation, verify overrides, and CLI error handling
 # 7. Worker Error and Printed Fallback Counts
 # 8. Gate Firing Counts and Never-Fired Gates
+# 9. Refusals: gates that fire before any dispatch
 #
 #   tests/report.sh
 #
@@ -81,7 +82,7 @@ check col-report-rc "$RC_COL" 0 "report.sh exits 0 on column integrity fixture"
 # Column 1 (run): verify run is parsed and filterable via --run, and aggregated in task efficiency
 REP_COL_RUN="$(bash "$REPORT_SH" --dir "$R_COL" --run r-col-integ)"
 REP_COL_OTHER="$(bash "$REPORT_SH" --dir "$R_COL" --run r-other)"
-if printf '%s\n' "$REP_COL_RUN" | grep -q "Dispatches: 1 valid record(s)" && \
+if printf '%s\n' "$REP_COL_RUN" | grep -q "1 with dispatch context" && \
    printf '%s\n' "$REP_COL_OTHER" | grep -q "No dispatches matched the specified criteria." && \
    printf '%s\n' "$REPORT_COL" | grep -q "Successful tasks (runs):[[:space:]]*1 / 1 (100%)"; then
   ok col-run "run correctly parsed and filterable without column shift"
@@ -114,7 +115,7 @@ fi
 # Column 6 (verdict): verdict is stored in ledger/TSV for audit/review records
 # but is not rendered individually in the summary report. Assert that the record
 # containing verdict parses cleanly as a valid dispatch without unparseable errors.
-if printf '%s\n' "$REPORT_COL" | grep -q "Dispatches: 1 valid record(s) read" && \
+if printf '%s\n' "$REPORT_COL" | grep -q "1 with dispatch context" && \
    printf '%s\n' "$REPORT_COL" | grep -q "Unparseable records skipped:[[:space:]]*0"; then
   ok col-verdict "record containing verdict field parsed without data corruption"
 else
@@ -132,7 +133,7 @@ fi
 # Column 8 (started): timestamp parsed and filterable via --since
 REP_COL_SINCE="$(bash "$REPORT_SH" --dir "$R_COL" --since 2026-08-25T11:00:00Z)"
 REP_COL_FUTURE="$(bash "$REPORT_SH" --dir "$R_COL" --since 2026-08-25T12:00:00Z)"
-if printf '%s\n' "$REP_COL_SINCE" | grep -q "Dispatches: 1 valid record(s)" && \
+if printf '%s\n' "$REP_COL_SINCE" | grep -q "1 with dispatch context" && \
    printf '%s\n' "$REP_COL_FUTURE" | grep -q "No dispatches matched the specified criteria."; then
   ok col-started "started timestamp correctly parsed and filterable via --since"
 else
@@ -266,7 +267,7 @@ ledger_append "$R_FILT" run=run-beta phase=QA attempt=1 tier=m model=m backend=a
 
 # Test --run filter
 REP_RUN="$(bash "$REPORT_SH" --dir "$R_FILT" --run run-alpha)"
-if printf '%s\n' "$REP_RUN" | grep -q "Dispatches: 2 valid record(s)" && \
+if printf '%s\n' "$REP_RUN" | grep -q "2 with dispatch context" && \
    printf '%s\n' "$REP_RUN" | grep -q "Live Total:[[:space:]]*3000 tokens" && \
    ! printf '%s\n' "$REP_RUN" | grep -q "QA:"; then
   ok filter-run "--run narrows to specified run"
@@ -276,7 +277,7 @@ fi
 
 # Test --phase filter
 REP_PHASE="$(bash "$REPORT_SH" --dir "$R_FILT" --phase IMPLEMENT)"
-if printf '%s\n' "$REP_PHASE" | grep -q "Dispatches: 2 valid record(s)" && \
+if printf '%s\n' "$REP_PHASE" | grep -q "2 with dispatch context" && \
    printf '%s\n' "$REP_PHASE" | grep -q "IMPLEMENT:[[:space:]]*2 dispatches" && \
    ! printf '%s\n' "$REP_PHASE" | grep -q "REVIEW:" && \
    ! printf '%s\n' "$REP_PHASE" | grep -q "QA:"; then
@@ -287,7 +288,7 @@ fi
 
 # Test --since filter
 REP_SINCE="$(bash "$REPORT_SH" --dir "$R_FILT" --since 2026-08-25T09:30:00Z)"
-if printf '%s\n' "$REP_SINCE" | grep -q "Dispatches: 2 valid record(s)" && \
+if printf '%s\n' "$REP_SINCE" | grep -q "2 with dispatch context" && \
    printf '%s\n' "$REP_SINCE" | grep -q "Live Total:[[:space:]]*7000 tokens"; then
   ok filter-since "--since narrows to records at or after date"
 else
@@ -296,7 +297,7 @@ fi
 
 # Test combined --run and --phase filter
 REP_COMB="$(bash "$REPORT_SH" --dir "$R_FILT" --run run-beta --phase QA)"
-if printf '%s\n' "$REP_COMB" | grep -q "Dispatches: 1 valid record(s)" && \
+if printf '%s\n' "$REP_COMB" | grep -q "1 with dispatch context" && \
    printf '%s\n' "$REP_COMB" | grep -q "QA:[[:space:]]*4000 tokens"; then
   ok filter-combined "combined --run and --phase filters narrow correctly"
 else
@@ -332,14 +333,15 @@ EOF
 REPORT_MAL="$(bash "$REPORT_SH" --dir "$R_MAL")"; RC_MAL=$?
 check malformed-rc "$RC_MAL" 0 "report.sh exits 0 when malformed lines are present"
 
-if printf '%s\n' "$REPORT_MAL" | grep -q "Dispatches: 1 valid record(s) read (total lines read: 6, unparseable skipped: 5)"; then
-  ok malformed-header-counts "header correctly counts total lines, valid records, and unparseable skipped"
+if printf '%s\n' "$REPORT_MAL" | grep -q "Records:    6 line(s) read — 1 with dispatch context, 3 without, 2 unparseable"; then
+  ok malformed-header-counts "header separates unparseable lines from well-formed ones carrying no dispatch context"
 else
   bad malformed-header-counts "header counts unexpected: $REPORT_MAL"
 fi
 
-if printf '%s\n' "$REPORT_MAL" | grep -q "Unparseable records skipped:[[:space:]]*5"; then
-  ok malformed-integrity-section "Data Integrity section reports exact unparseable count"
+if printf '%s\n' "$REPORT_MAL" | grep -q "Unparseable records skipped:[[:space:]]*2" && \
+   printf '%s\n' "$REPORT_MAL" | grep -q "Records with no dispatch context:[[:space:]]*3"; then
+  ok malformed-integrity-section "Data Integrity counts unparseable and no-context records separately"
 else
   bad malformed-integrity-section "Data Integrity section unexpected: $REPORT_MAL"
 fi
@@ -436,7 +438,7 @@ else
   bad report-verify-overrides "verify gate overrides unexpected: $REPORT_MULTI"
 fi
 
-if printf '%s\n' "$REPORT_MULTI" | grep -q "No status reported dispatches:[[:space:]]*1"; then
+if printf '%s\n' "$REPORT_MULTI" | grep -q "No status reported:[[:space:]]*1"; then
   ok report-no-status "no status reported dispatches counted accurately"
 else
   bad report-no-status "no status reported unexpected: $REPORT_MULTI"
@@ -581,7 +583,7 @@ for gate_label in \
   "Diff suspicious:[[:space:]]*1" \
   "Secrets found:[[:space:]]*1" \
   "Brief invalid:[[:space:]]*1" \
-  "No status reported dispatches:[[:space:]]*1" \
+  "No status reported:[[:space:]]*1" \
   "Retry cap reached:[[:space:]]*1" \
   "Brief impossible:[[:space:]]*1" \
   "Git state changed:[[:space:]]*1"; do
@@ -612,7 +614,7 @@ REPORT_NONE="$(bash "$REPORT_SH" --dir "$R_NO_GATES")"; RC_NONE=$?
 check gate-none-rc "$RC_NONE" 0 "report.sh exits 0 on no-gates fixture"
 
 NEVER_SECTION_NONE="$(printf '%s\n' "$REPORT_NONE" | sed -n '/Never-Fired Gates:/,/Data Integrity:/p')"
-if printf '%s\n' "$NEVER_SECTION_NONE" | grep -q "This gate has never fired — either nothing has triggered it yet, or it is dead code."; then
+if printf '%s\n' "$NEVER_SECTION_NONE" | grep -q "Nothing in the filtered ledger triggered these"; then
   ok gate-none-expl-line "never-fired section carries explanation line"
 else
   bad gate-none-expl-line "never-fired explanation line missing: $NEVER_SECTION_NONE"
@@ -624,7 +626,7 @@ for gate_name in \
   "Diff suspicious" \
   "Secrets found" \
   "Brief invalid" \
-  "No status reported dispatches" \
+  "No status reported" \
   "Retry cap reached" \
   "Brief impossible" \
   "Git state changed"; do
@@ -671,7 +673,7 @@ for absent_gate in \
   "Diff tests weakened" \
   "Diff suspicious" \
   "Brief invalid" \
-  "No status reported dispatches" \
+  "No status reported" \
   "Brief impossible" \
   "Git state changed"; do
   if printf '%s\n' "$NEVER_SECTION_MIXED" | grep -q -- "- $absent_gate"; then
@@ -727,6 +729,189 @@ else
   bad gate-filt-since "--since gate counts unexpected: $REP_FILT_SN"
 fi
 
+
+
+# =============================================================================
+# 9. Refusals: gates that fire before any dispatch
+# =============================================================================
+#
+# A gate that refuses before the worker runs costs no model call. It is still a
+# real event with a real cause, so it belongs in the ledger — but counting it as
+# a dispatch understates the worker's pass rate and pollutes spend averages, and
+# not counting it as a gate has someone delete working code.
+
+R_REF="$(new_repo refusals)"
+ledger_append "$R_REF" run=r-ref phase=IMPLEMENT status=BRIEF_INVALID'(missing_verdict_path)' \
+  dispatched=false attempt=1 started=2026-08-25T10:00:00Z
+ledger_append "$R_REF" run=r-ref phase=IMPLEMENT status=SECRETS_FOUND dispatched=false \
+  attempt=1 started=2026-08-25T10:01:00Z
+ledger_append "$R_REF" run=r-ref phase=IMPLEMENT status=DONE dispatched=true attempt=1 \
+  started=2026-08-25T10:02:00Z elapsed_s=30 \
+  usage='{"input_tokens":800,"output_tokens":200,"thinking_tokens":0,"total_tokens":1000}'
+
+REP_REF="$(bash "$REPORT_SH" --dir "$R_REF")"
+
+if printf '%s\n' "$REP_REF" | grep -qE '^Dispatches: 1 '; then
+  ok refusal-dispatch-count "only the record that ran a worker counts as a dispatch"
+else
+  bad refusal-dispatch-count "dispatch count unexpected: $REP_REF"
+fi
+
+if printf '%s\n' "$REP_REF" | grep -qE '^Refusals:   2 '; then
+  ok refusal-count "both refusals are counted, and counted separately"
+else
+  bad refusal-count "refusal count unexpected: $REP_REF"
+fi
+
+# 1 of 1 rather than 1 of 3: a gate that fired before the dispatch is not a
+# worker that failed.
+if printf '%s\n' "$REP_REF" | grep -qE 'IMPLEMENT:[[:space:]]+1 dispatches,[[:space:]]+1 passed \(100%\),[[:space:]]+2 refused'; then
+  ok refusal-pass-rate "refusals are excluded from the pass rate and reported beside it"
+else
+  bad refusal-pass-rate "pass rate line unexpected: $REP_REF"
+fi
+
+if printf '%s\n' "$REP_REF" | grep -qE 'Live Total:[[:space:]]+1000 tokens'; then
+  ok refusal-no-spend "a refusal contributes nothing to spend"
+else
+  bad refusal-no-spend "spend unexpected: $REP_REF"
+fi
+
+for G in "Brief invalid" "Secrets found"; do
+  SLUG="$(printf '%s' "$G" | tr ' ' '-')"
+  if printf '%s\n' "$REP_REF" | grep -qE "$G:[[:space:]]+1"; then
+    ok "refusal-gate-$SLUG" "$G is counted as a gate that fired"
+  else
+    bad "refusal-gate-$SLUG" "$G not counted: $REP_REF"
+  fi
+  if printf '%s\n' "$REP_REF" | sed -n '/Never-Fired Gates:/,$p' | grep -q "^  - $G\$"; then
+    bad "refusal-notdead-$SLUG" "$G fired but is listed as never having fired"
+  else
+    ok "refusal-notdead-$SLUG" "$G is kept out of the never-fired list"
+  fi
+done
+
+# A run whose every record is a refusal never reached a worker, so there is no
+# efficiency to measure and no failed task to report.
+R_REFRUN="$(new_repo refusal-only-run)"
+ledger_append "$R_REFRUN" run=r-ok phase=IMPLEMENT status=DONE dispatched=true attempt=1 \
+  usage='{"input_tokens":800,"output_tokens":200,"thinking_tokens":0,"total_tokens":1000}'
+ledger_append "$R_REFRUN" run=r-refused-only phase=IMPLEMENT status=BRIEF_INVALID dispatched=false attempt=1
+REP_REFRUN="$(bash "$REPORT_SH" --dir "$R_REFRUN")"
+if printf '%s\n' "$REP_REFRUN" | grep -qE 'Successful tasks \(runs\):[[:space:]]+1 / 1 \(100%\)'; then
+  ok refusal-run-excluded "a run that never dispatched is left out of the successful-task rate"
+else
+  bad refusal-run-excluded "task rate unexpected: $REP_REFRUN"
+fi
+if printf '%s\n' "$REP_REFRUN" | grep -qE 'Runs refused before dispatch:[[:space:]]+1'; then
+  ok refusal-run-named "the excluded run is named rather than silently dropped"
+else
+  bad refusal-run-named "excluded-run line missing: $REP_REFRUN"
+fi
+
+# A record written before the dispatched field existed cannot be classified, and
+# saying so is better than guessing either way.
+R_UNM="$(new_repo unmarked)"
+ledger_append "$R_UNM" run=r-unm phase=IMPLEMENT status=DONE attempt=1
+REP_UNM="$(bash "$REPORT_SH" --dir "$R_UNM")"
+if printf '%s\n' "$REP_UNM" | grep -qE '^Unmarked:   1 '; then
+  ok unmarked-named "a record with no dispatched field is named rather than guessed at"
+else
+  bad unmarked-named "unmarked line missing: $REP_UNM"
+fi
+if printf '%s\n' "$REP_UNM" | grep -qE '^Refusals:   0 '; then
+  ok unmarked-not-refusal "an unmarked record is not silently counted as a refusal"
+else
+  bad unmarked-not-refusal "refusal count unexpected: $REP_UNM"
+fi
+
+# The gates that only ever fire outside a dispatch — the phase-range check, the
+# test-command check, the release check — and the preflight and cap refusals
+# that phase.sh makes before spending anything.
+R_ALL="$(new_repo every-gate)"
+i=0
+for ST in RANGE_REFUSED TEST_COMMAND_FAILED TEST_COMMAND_NOT_RUNNABLE TEST_COMMAND_TIMEOUT \
+          RELEASE_BLOCKED RELEASE_FAILED PREFLIGHT_FAILED BUDGET_EXCEEDED \
+          REPO_BUDGET_EXCEEDED WORKER_CAP_EXCEEDED RETRY_CAP_REACHED; do
+  i=$((i + 1))
+  ledger_append "$R_ALL" run=r-all phase=GATE "status=$ST" dispatched=false attempt=1
+done
+REP_ALL="$(bash "$REPORT_SH" --dir "$R_ALL")"
+GATE_MISSING=0
+for LBL in "Phase range refused" "Test command failed" "Test command not runnable" \
+           "Test command timed out" "Release blocked" "Release failed" "Preflight failed" \
+           "Run budget exceeded" "Repo budget exceeded" "Worker cap exceeded" "Retry cap reached"; do
+  printf '%s\n' "$REP_ALL" | grep -qE "$LBL:[[:space:]]+1" || {
+    bad "gate-counted-$(printf '%s' "$LBL" | tr ' ' '-')" "$LBL is not counted at 1"
+    GATE_MISSING=$((GATE_MISSING + 1))
+  }
+done
+check every-gate-counted "$GATE_MISSING" "0" "every refusal gate has a firing count of its own"
+
+# REPO_BUDGET_EXCEEDED must not be swallowed by the BUDGET_EXCEEDED count, and a
+# status carrying its reason in parentheses must still match its gate.
+R_PFX="$(new_repo gate-prefixes)"
+ledger_append "$R_PFX" run=r-pfx phase=GATE 'status=REPO_BUDGET_EXCEEDED(spent=9, budget=8)' dispatched=false
+REP_PFX="$(bash "$REPORT_SH" --dir "$R_PFX")"
+if printf '%s\n' "$REP_PFX" | grep -qE 'Repo budget exceeded:[[:space:]]+1' \
+   && printf '%s\n' "$REP_PFX" | grep -qE 'Run budget exceeded:[[:space:]]+0'; then
+  ok gate-prefix-distinct "a reason in parentheses matches its gate, and the two budget gates stay apart"
+else
+  bad gate-prefix-distinct "budget gate counts unexpected: $REP_PFX"
+fi
+
+# The Phase 2 review verdict rides in the nested review object rather than in
+# status, and was never counted as a gate at all.
+R_REV="$(new_repo review-gate)"
+ledger_append "$R_REV" run=r-rev phase=REVIEW status=DONE dispatched=true attempt=1 \
+  review='{"anchors":0,"status":"REVIEW_THIN"}'
+REP_REV="$(bash "$REPORT_SH" --dir "$R_REV")"
+if printf '%s\n' "$REP_REV" | grep -qE 'Review thin:[[:space:]]+1'; then
+  ok review-gate-counted "a review verdict in the nested object counts as a gate that fired"
+else
+  bad review-gate-counted "review gate not counted: $REP_REV"
+fi
+if printf '%s\n' "$REP_REV" | grep -qE 'Review absent:[[:space:]]+0'; then
+  ok review-gate-distinct "REVIEW_THIN is not counted as REVIEW_ABSENT"
+else
+  bad review-gate-distinct "review gate counts unexpected: $REP_REV"
+fi
+
+# The firing counts and the never-fired list are two views of one table. Kept by
+# hand they drift, and a gate ends up counted in one and missing from the other.
+GATES_LISTED="$(printf '%s\n' "$REP_REV" | sed -n '/^Gate Firing Counts:/,/^$/p' \
+  | sed -n 's/^  \(.*\):[[:space:]]*[0-9][0-9]*$/\1/p' | sort)"
+GATES_ZERO="$(printf '%s\n' "$REP_REV" | sed -n '/^Gate Firing Counts:/,/^$/p' \
+  | sed -n 's/^  \(.*\):[[:space:]]*0$/\1/p' | sort)"
+GATES_NEVER="$(printf '%s\n' "$REP_REV" | sed -n '/^Never-Fired Gates:/,/^$/p' \
+  | sed -n 's/^  - //p' | sort)"
+check gate-lists-agree "$GATES_NEVER" "$GATES_ZERO" \
+  "the never-fired list is exactly the gates counted at zero"
+GATES_N="$(printf '%s\n' "$GATES_LISTED" | grep -c . || true)"
+if [ "${GATES_N:-0}" -ge 20 ]; then
+  ok gate-table-complete "the report counts $GATES_N gates, not just the handful that had counters"
+else
+  bad gate-table-complete "only $GATES_N gates counted — the table has shrunk"
+fi
+
+# _extract_bool read booleans with a BRE alternation, which BSD sed does not
+# support: every boolean in the ledger read as absent on macOS, silently.
+R_BOOL="$(new_repo bool-extract)"
+ledger_append "$R_BOOL" run=r-bool phase=IMPLEMENT status=DONE dispatched=true verify_ran=true attempt=1
+ledger_append "$R_BOOL" run=r-bool phase=IMPLEMENT status=BRIEF_INVALID dispatched=false verify_ran=false attempt=1
+REP_BOOL="$(bash "$REPORT_SH" --dir "$R_BOOL")"
+if printf '%s\n' "$REP_BOOL" | grep -qE '^Dispatches: 1 ' \
+   && printf '%s\n' "$REP_BOOL" | grep -qE '^Refusals:   1 ' \
+   && printf '%s\n' "$REP_BOOL" | grep -qE '^Unmarked:' ; then
+  bad bool-extract "a boolean that is present read as absent: $REP_BOOL"
+else
+  if printf '%s\n' "$REP_BOOL" | grep -qE '^Dispatches: 1 ' \
+     && printf '%s\n' "$REP_BOOL" | grep -qE '^Refusals:   1 '; then
+    ok bool-extract "booleans are read on a sed whose basic regex has no alternation"
+  else
+    bad bool-extract "boolean read unexpected: $REP_BOOL"
+  fi
+fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

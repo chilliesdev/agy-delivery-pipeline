@@ -200,7 +200,12 @@ The Phase 2 helpers have their own suites,
 ### The run ledger
 
 Every dispatch automatically appends one summary line to `.agy/ledger.jsonl`.
-Spend and token usage are recorded automatically. `--budget-tokens <n>` is
+Spend and token usage are recorded automatically. So is every gate that refuses
+*before* a dispatch — a failed brief lint, a secret in the brief, a spent retry
+or token budget, a refused phase range — as a record carrying
+`"dispatched":false` and no spend. Nothing extra is asked of the orchestrator;
+the point is that `report.sh` can then say how often each gate fires without
+counting a refusal as a dispatch, or reporting a busy gate as dead code. `--budget-tokens <n>` is
 available for a run that must not exceed a spend ceiling, refusing before
 dispatch if the run's accumulated spend already reaches the limit. The tier
 assignments — discovery `low`, implementation `medium`, review `high` — are a

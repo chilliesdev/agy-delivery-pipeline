@@ -20,6 +20,16 @@
 # Task strings are hashed by default as task_id (first 12 chars of git hash-object)
 # for privacy; set AGY_LEDGER_TASK=plain to record literal task strings.
 # verdict_route: which route carried the verdict ("file" or "print") when known.
+#
+# dispatched: whether a worker was actually invoked for this record.
+# A gate that refuses before the dispatch — the brief lint, the secret scan, the
+# retry cap, either budget ceiling, the worker cap, preflight — is a real event
+# with a real cause and belongs in the ledger. It is not a model call, so it
+# carries no usage and no elapsed_s, and anything averaging spend or counting
+# dispatches has to be able to tell the two apart. That is what this field is for:
+# "dispatched":false means the gate fired and nothing was spent. Records written
+# before this field existed omit it, and a reader must treat absent as unknown
+# rather than as either answer.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -243,11 +253,13 @@ ledger_append() {
   local usage_val="" num_turns_val="" agy_status_val=""
   local issue_val=""
   local verdict_route_val=""
+  local dispatched_val="" git_state_ran_val="" git_state_rc_val=""
 
   local has_elapsed=0 has_worker_rc=0 has_verdict=0 has_verify_rc=0
   local has_diff=0 has_review=0 has_attempt=0 has_retries_spent=0 has_retries_refunded=0
   local has_verify_ran=0 has_usage=0 has_num_turns=0 has_agy_status=0
   local has_issue=0 has_verdict_route=0
+  local has_dispatched=0 has_git_state_ran=0 has_git_state_rc=0
 
   for pair in "$@"; do
     case "$pair" in
@@ -290,6 +302,9 @@ ledger_append() {
       agy_status) agy_status_val="$v"; has_agy_status=1 ;;
       issue) issue_val="$v"; has_issue=1 ;;
       verdict_route) verdict_route_val="$v"; has_verdict_route=1 ;;
+      dispatched) dispatched_val="$v"; has_dispatched=1 ;;
+      git_state_ran) git_state_ran_val="$v"; has_git_state_ran=1 ;;
+      git_state_rc) git_state_rc_val="$v"; has_git_state_rc=1 ;;
       *)
         echo "ledger: unknown key '$k'" >&2
         return 2 2>/dev/null || exit 2
@@ -348,7 +363,22 @@ ledger_append() {
   if [ $has_verify_rc -eq 1 ] && [ -n "$verify_rc_val" ]; then
     fields[${#fields[@]}]="\"verify_rc\":$verify_rc_val"
   fi
+  if [ $has_git_state_ran -eq 1 ]; then
+    case "$git_state_ran_val" in
+      true|TRUE|1) fields[${#fields[@]}]="\"git_state_ran\":true" ;;
+      *) fields[${#fields[@]}]="\"git_state_ran\":false" ;;
+    esac
+  fi
+  if [ $has_git_state_rc -eq 1 ] && [ -n "$git_state_rc_val" ]; then
+    fields[${#fields[@]}]="\"git_state_rc\":$git_state_rc_val"
+  fi
   [ -n "$status_val" ] && fields[${#fields[@]}]="\"status\":\"$(_run_dir_escape "$status_val")\""
+  if [ $has_dispatched -eq 1 ]; then
+    case "$dispatched_val" in
+      true|TRUE|1) fields[${#fields[@]}]="\"dispatched\":true" ;;
+      *) fields[${#fields[@]}]="\"dispatched\":false" ;;
+    esac
+  fi
   if [ $has_retries_spent -eq 1 ]; then
     fields[${#fields[@]}]="\"retries_spent\":${retries_spent_val:-0}"
   fi
@@ -399,6 +429,50 @@ ledger_append() {
     return 2 2>/dev/null || exit 2
   }
 
+  return 0
+}
+
+# Record a gate that refused before any worker ran.
+#
+#   ledger_record_refusal <repo> <run-id> <phase> <status>
+#
+# The gates that run outside phase.sh — the phase-range check, the test-command
+# check, the release check — refuse in the orchestrator's hands rather than in a
+# dispatch's, so nothing else writes their outcome down. Without a record they
+# are invisible to report.sh, which then reports them as never having fired: a
+# reader acting on that would delete a working gate.
+#
+# Written with "dispatched":false and no usage, so spend averages and dispatch
+# counts are unaffected. Best-effort by design: a checker's job is to answer the
+# caller, and failing to record the answer must never change the answer. Set
+# AGY_SKIP_LEDGER=1 to keep a checker read-only.
+ledger_record_refusal() {
+  local dir="${1:-}" run_id="${2:-}" phase="${3:-}" status="${4:-}"
+
+  [ "${AGY_SKIP_LEDGER:-0}" = "1" ] && return 0
+  [ -n "$dir" ] && [ -n "$status" ] || return 0
+  [ -d "$dir" ] || return 0
+  git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+  local args=()
+  [ -n "$run_id" ] && args[${#args[@]}]="run=$run_id"
+  [ -n "$phase" ] && args[${#args[@]}]="phase=$phase"
+  args[${#args[@]}]="status=$status"
+  args[${#args[@]}]="dispatched=false"
+  args[${#args[@]}]="verify_ran=false"
+  args[${#args[@]}]="started=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+
+  local task=""
+  if [ -n "$run_id" ]; then
+    local run_dir
+    run_dir="$(run_dir_resolve --dir "$dir" --run "$run_id" 2>/dev/null || true)"
+    if [ -n "$run_dir" ] && [ -d "$run_dir" ]; then
+      task="$(run_dir_get "$run_dir" "task" 2>/dev/null || true)"
+    fi
+  fi
+  [ -n "$task" ] && args[${#args[@]}]="task=$task"
+
+  ledger_append "$dir" "${args[@]+"${args[@]}"}" 2>/dev/null || true
   return 0
 }
 

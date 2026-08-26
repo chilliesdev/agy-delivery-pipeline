@@ -194,7 +194,10 @@ single stdout line and should not read the progress channel.
 task was underspecified or wants the pipeline. Take it over yourself and say so.
 
 Dispatches are recorded automatically to `.agy/ledger.jsonl` as an append-only
-ledger line tracking spend and token usage. `--budget-tokens <n>` is available
+ledger line tracking spend and token usage. A gate that refuses before the
+dispatch is recorded too, marked `"dispatched":false` and carrying no spend, so
+a refusal is neither counted as a dispatch nor reported as a gate that never
+fired. `--budget-tokens <n>` is available
 to cap spend across a run. The orchestrator does nothing with this during a run;
 questions about historical performance and token spend are answered between
 runs by `${CLAUDE_PLUGIN_ROOT}/scripts/report.sh`.

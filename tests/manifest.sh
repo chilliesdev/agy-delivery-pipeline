@@ -409,6 +409,95 @@ EOF
 done
 check skill-statuses-emittable "$BACKWARD_EXTRA" "0" "all $BACKWARD_CHECKED skill table statuses are emittable by script"
 
+# --- ledger key drift between the writers and ledger.sh ---------------------
+
+# Every key any script passes to ledger_append must be one ledger.sh accepts.
+# An unknown key is refused, and the refusal discards the *whole* record — so a
+# key added on one side and not the other does not lose a field, it loses the
+# dispatch. That happened: --check-git-state passed git_state_ran and
+# git_state_rc for a week, ledger.sh knew neither, and every dispatch using the
+# flag wrote nothing at all, silently, behind a 2>/dev/null.
+
+LEDGER_SCRIPT="$ROOT/scripts/ledger.sh"
+
+# The authority on which keys are accepted is ledger.sh itself, asked, not its
+# source read — the same rule the README's agy-behaviours section runs on.
+KEY_REPO="$(mktemp -d "${TMPDIR:-/tmp}/manifest-ledger.XXXXXX")"
+git -C "$KEY_REPO" init -q . 2>/dev/null
+
+ledger_accepts_key() {
+  bash "$LEDGER_SCRIPT" append --dir "$KEY_REPO" "$1=probe" >/dev/null 2>&1
+}
+
+# The keys a script passes: quoted `key=` arguments, but only inside a ledger
+# call or the argument array feeding one. A bare `"rc=$PRC"` in a message string
+# and a `"attempts=…"` bound for run_dir_record_phase are not ledger keys, and
+# reporting them here would train the reader to ignore this case.
+get_passed_ledger_keys() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  awk '
+    function emit(s,   n, i, parts) {
+      n = split(s, parts, "\"")
+      for (i = 2; i <= n; i += 2) {
+        if (match(parts[i], /^[a-z_]+=/)) {
+          print substr(parts[i], 1, RLENGTH - 1)
+        }
+      }
+    }
+    {
+      line = $0
+      sub(/^[[:space:]]*#.*/, "", line)
+
+      if (line ~ /ledger_append|ledger_record_refusal|LEDGER_ARGS=\(/) {
+        in_call = 1
+      }
+      if (!in_call) { next }
+
+      emit(line)
+
+      # The call ends at a line that neither continues with a backslash nor
+      # leaves an array literal open.
+      if (line ~ /\\[[:space:]]*$/) { next }
+      if (line ~ /LEDGER_ARGS=\(/ && line !~ /\)/) { next }
+      in_call = 0
+    }
+  ' "$f" 2>/dev/null | sort -u
+}
+
+check ledger-probe-known "$(ledger_accepts_key status && echo yes || echo no)" "yes" \
+  "the probe itself works — ledger.sh accepts a key it is known to know"
+check ledger-probe-unknown "$(ledger_accepts_key not_a_real_key && echo yes || echo no)" "no" \
+  "the probe itself works — ledger.sh refuses a key it does not know"
+
+KEY_DRIFT=0
+KEYS_CHECKED=0
+for S in "$ROOT"/scripts/*.sh; do
+  case "$(basename "$S")" in
+    ledger.sh|report.sh) continue ;;
+  esac
+  grep -q 'ledger_append\|ledger_record_refusal' "$S" 2>/dev/null || continue
+  while IFS= read -r K; do
+    [ -n "$K" ] || continue
+    KEYS_CHECKED=$((KEYS_CHECKED + 1))
+    if ledger_accepts_key "$K"; then
+      continue
+    fi
+    bad "ledger-key-$K" "scripts/$(basename "$S") passes '$K' to the ledger, which refuses it — the whole record is lost"
+    KEY_DRIFT=$((KEY_DRIFT + 1))
+  done <<EOF
+$(get_passed_ledger_keys "$S")
+EOF
+done
+rm -rf "$KEY_REPO"
+
+if [ "$KEYS_CHECKED" -gt 0 ]; then
+  ok ledger-keys-nonempty "found $KEYS_CHECKED ledger key use(s) across the scripts"
+else
+  bad ledger-keys-nonempty "no ledger keys found in any script — the extractor has drifted"
+fi
+check ledger-keys-accepted "$KEY_DRIFT" "0" "every ledger key the scripts pass is one ledger.sh accepts"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
 

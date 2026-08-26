@@ -579,6 +579,7 @@ if [ "$SPENT" -ge "$RETRY_CAP" ]; then
     "retries_spent=$SPENT" \
     "retries_refunded=0" \
     "verify_ran=false" \
+    "dispatched=false" \
     ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
   exit 6
 fi
@@ -604,6 +605,7 @@ if [ -n "$BUDGET_TOKENS" ]; then
       "retries_spent=$SPENT" \
       "retries_refunded=0" \
       "verify_ran=false" \
+      "dispatched=false" \
       ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
     exit 7
   fi
@@ -630,6 +632,7 @@ if [ -n "$REPO_BUDGET_TOKENS" ]; then
       "retries_spent=$SPENT" \
       "retries_refunded=0" \
       "verify_ran=false" \
+      "dispatched=false" \
       ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
     exit 9
   fi
@@ -663,6 +666,7 @@ if [ "$RUNNING_WORKERS" -ge "$MAX_WORKERS" ]; then
     "retries_spent=$SPENT" \
     "retries_refunded=0" \
     "verify_ran=false" \
+    "dispatched=false" \
     ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
   exit 8
 fi
@@ -707,6 +711,7 @@ if [ -z "$SKIP_SECRET_SCAN" ]; then
       "retries_spent=$SPENT" \
       "retries_refunded=0" \
       "verify_ran=false" \
+      "dispatched=false" \
       ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
     exit "$SECRETS_RC"
   fi
@@ -743,6 +748,7 @@ if [ -z "$SKIP_BRIEF_LINT" ]; then
       "retries_spent=$SPENT" \
       "retries_refunded=0" \
       "verify_ran=false" \
+      "dispatched=false" \
       ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
     exit "$LINT_RC"
   fi
@@ -791,6 +797,7 @@ if [ -z "$SKIP_PREFLIGHT" ]; then
       "retries_spent=$SPENT" \
       "retries_refunded=0" \
       "verify_ran=false" \
+      "dispatched=false" \
       ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
     exit "$PRC"
   fi
@@ -1134,6 +1141,7 @@ LEDGER_ARGS=(
   "worker_rc=$RC"
   "status=$FINAL_STATUS"
   "retries_spent=$SPENT"
+  "dispatched=true"
 )
 
 if [ -n "$FINAL_VERDICT" ]; then

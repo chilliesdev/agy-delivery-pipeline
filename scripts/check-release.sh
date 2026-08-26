@@ -7,6 +7,9 @@
 #                    [--first-version <v>] [--allow-dirty]
 #
 # Writes:  <run-dir>/RELEASE_FACTS.md   the same facts, for the worker to read
+#          a refusal record in the run ledger on RELEASE_BLOCKED and
+#          RELEASE_FAILED, so a gate that fires outside a dispatch is not
+#          reported as never firing (AGY_SKIP_LEDGER=1 suppresses it)
 # Prints:  the STATUS line only — stdout belongs to it alone, as everywhere else.
 #
 # Exit codes, one per outcome:
@@ -88,6 +91,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/run-dir.sh"
+. "$HERE/ledger.sh"
 
 DIR="$PWD"; INTO=""; RELEASE_BRANCH=""; BUMP="minor"
 FIRST_VERSION="v0.1.0"; ALLOW_DIRTY=""
@@ -137,8 +141,16 @@ GIT_ERR="$(mktemp "${TMPDIR:-/tmp}/check-release.XXXXXX")" \
 trap 'rm -f "$GIT_ERR"' EXIT INT TERM
 git_ro() { git -C "$ROOT" ${NOLOCK:+$NOLOCK} "$@" 2>"$GIT_ERR"; }
 
+# The run directory is resolved further down, so a refusal reached before that
+# records without a run rather than not at all.
+_release_run_id() {
+  [ -n "${R:-}" ] && [ -d "${R:-}" ] || return 0
+  run_dir_get "$R" "run" 2>/dev/null || basename "$R"
+}
+
 fail() {
   printf '%s\n' "STATUS: RELEASE_FAILED | Reason: ${1:-git refused} | Next: check git repository permissions and status | Dir: $ROOT"
+  ledger_record_refusal "$ROOT" "$(_release_run_id)" "RELEASE" "RELEASE_FAILED"
   exit 4
 }
 
@@ -387,6 +399,7 @@ BRANCH_FIELD="${BRANCH:-detached}"
 
 if [ -n "$BLOCKED" ]; then
   printf '%s\n' "STATUS: $STATUS | Branch: $BRANCH_FIELD | Note: $BLOCK_NOTE | Next: resolve the blocking git condition named here, or pass --allow-dirty if uncommitted changes are intended | Facts: $FACTS"
+  ledger_record_refusal "$ROOT" "$(_release_run_id)" "RELEASE" "$STATUS"
   exit 3
 fi
 

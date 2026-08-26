@@ -20,6 +20,13 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/issue-test.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 
+# issue.sh defaults --dir to $PWD, and a case that omits it silently appends a
+# record to *this* repository's ledger — one per suite run, forever. That is not
+# a stray file: it is the ledger the reports are read from, and this suite was
+# quietly filling it with records carrying no run and no phase.
+REPO_LEDGER="$HERE/../.agy/ledger.jsonl"
+REPO_LEDGER_BEFORE="$(wc -l < "$REPO_LEDGER" 2>/dev/null || echo 0)"
+
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS + 1)); printf '%-34s ok   %s\n' "$1" "$2"; }
 bad() { FAIL=$((FAIL + 1)); printf '%-34s FAIL %s\n' "$1" "$2"; }
@@ -330,7 +337,7 @@ DISPOSABLE_DIR="$ROOT/disposable"
 mkdir -p "$DISPOSABLE_DIR"
 export STUB_ISSUE_BODY="Disposable body"
 export STUB_ISSUE_TITLE="Disposable title"
-run_issue read --issue 77 --into "$DISPOSABLE_DIR"
+run_issue read --issue 77 --into "$DISPOSABLE_DIR" --dir "$R"
 check into-rc "$CODE" 0 "exit 0 with --into"
 [ -f "$DISPOSABLE_DIR/ISSUE.md" ] && ok into-file-created "ISSUE.md created in --into dir" || bad into-file-created "ISSUE.md missing in --into dir"
 
@@ -340,6 +347,11 @@ run_issue read --issue 10 --dir "$R"
 check missing-gh-rc "$CODE" 3 "exit 3 when gh binary not found"
 check missing-gh-status "$(verdict "$OUT")" "ISSUE_UNAVAILABLE" "missing gh reported as ISSUE_UNAVAILABLE"
 export AGY_GH="$STUB_GH"
+
+# 11. The suite wrote nothing into this repository.
+REPO_LEDGER_AFTER="$(wc -l < "$REPO_LEDGER" 2>/dev/null || echo 0)"
+check repo-ledger-untouched "$REPO_LEDGER_AFTER" "$REPO_LEDGER_BEFORE" \
+  "the suite appended nothing to this repository's own ledger"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

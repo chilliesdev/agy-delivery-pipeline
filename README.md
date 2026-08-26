@@ -152,6 +152,21 @@ to `.agy/ledger.jsonl`. It is a single append-only line per dispatch, spanning
 all runs in the repository. It is never rewritten, never truncated, and never
 sorted.
 
+**A gate that refuses before the dispatch is recorded too.** The brief lint, the
+secret scan, the retry cap, both budget ceilings, the worker cap and preflight
+all refuse without invoking a worker — deliberately, since the refusal costs no
+model call. So do the checks that run in the orchestrator's hands rather than a
+dispatch's: `check-phase-range.sh`, `check-test-command.sh` and
+`check-release.sh`. Each writes a record carrying `"dispatched":false`, no
+`usage` and no `elapsed_s`.
+
+That field is load-bearing. Without it, a refusal either vanishes — and
+`report.sh` lists the gate under *never fired*, which reads as *dead code* for a
+gate firing several times a week — or it counts as a dispatch, understating the
+worker's pass rate and polluting the spend average. Neither is a number worth
+having. Records written before the field existed carry neither value, and the
+report names them separately rather than guessing.
+
 Every gate in this repository was added in response to a single incident. That
 is a sound way to *find* a gate and a poor way to *keep* one. Nothing here would
 ever have told you that a rule had stopped earning its place, or that a
@@ -178,7 +193,20 @@ counters, token usage, turn counts, agy status, and diff/review summaries:
 
 Records carry `usage` — `input_tokens`, `output_tokens`, `thinking_tokens`,
 `cache_read_tokens`, `total_tokens` — alongside `num_turns` and agy's own
-`agy_status`.
+`agy_status`. A refusal record carries none of them:
+
+```json
+{"run":"2026-08-24T09-51-03Z-a4f1","phase":"IMPLEMENT","attempt":1,"tier":"high","model":"gemini-3.7-flash-high","backend":"agy","started":"2026-08-24T09:51:20Z","verify_ran":false,"status":"BRIEF_INVALID(missing_verdict_path)","dispatched":false,"retries_spent":0,"retries_refunded":0,"task_id":"b3f81e62a1c0"}
+```
+
+**Every key a record can hold must be one `ledger.sh` accepts.** An unrecognised
+key is refused, and the refusal discards the *whole* record rather than the one
+field — so a key added on one side and not the other does not lose a value, it
+loses the dispatch. That happened: `--check-git-state` passed `git_state_ran`
+and `git_state_rc` for a week, `ledger.sh` knew neither, and every dispatch
+using the flag wrote nothing at all, silently, behind a `2>/dev/null`.
+`tests/manifest.sh` now offers every key the scripts pass to a real append and
+fails on any the ledger will not take.
 
 **The privacy stance, plainly.** The task string is recorded as a 12-character
 hash by default (`git hash-object`, requiring no extra dependencies). Setting
@@ -202,14 +230,23 @@ scripts/report.sh [--dir <repo>] [--since <date>] [--phase <NAME>] [--run <id>]
 It parses the JSONL records in portable bash 3.2 (no `jq` or Python required)
 and prints:
 
-- dispatch counts and pass rates by phase
+- dispatch counts, refusal counts, and pass rates by phase — refusals excluded
+  from the rate, because a gate that fired before the dispatch is not a worker
+  that failed
 - retry convergence distribution (rounds 1, 2, 3+, and unresolved cap hits)
 - median and max elapsed wall-clock times per phase
 - token spend per phase, with dead rounds (refunded worker failures) separated
 - average token efficiency per successful task
 - gate and verification outcomes, including `--verify` overrides and missing
   worker statuses
-- corrupt or unparseable line counts
+- a firing count for every gate in the repository, and the ones sitting at zero
+- corrupt lines, counted apart from well-formed records that carry no dispatch
+  context (an issue marker is not a damaged ledger)
+
+The firing counts and the never-fired list come from one table in `report.sh`,
+so they cannot disagree about what a gate is. Every gate in it is
+ledger-visible: a zero means the gate did not fire, not that it could not be
+seen.
 
 ### Token budgets and pricing
 

@@ -355,5 +355,51 @@ mkdir -p "$ROOT/plain"
 OUT="$(/bin/bash "$CHECK" --dir "$ROOT/plain" 2>/dev/null)"; CODE=$?
 check not-a-repo "$CODE" 2 "exit 2 on a directory that is not a git work tree"
 
+# The refusal reaches the ledger.
+#
+# The release gate refuses in the orchestrator's hands, not a dispatch's. With
+# nothing recording it, report.sh counts it at zero and calls it dead code —
+# which for the least-travelled gate in the repository is the worst place to be
+# wrong.
+
+R="$(new_repo ledger-blocked)"
+printf 'wip\n' > "$R/wip.txt"
+run "$R"
+check ledger-blocked-rc "$CODE" 3 "the blocked case still exits 3"
+LG="$R/.agy/ledger.jsonl"
+if [ -f "$LG" ] && grep -q '"status":"RELEASE_BLOCKED(dirty_tree)"' "$LG"; then
+  ok ledger-blocked-recorded "RELEASE_BLOCKED is recorded in the run ledger, reason and all"
+else
+  bad ledger-blocked-recorded "no RELEASE_BLOCKED record: $(cat "$LG" 2>/dev/null)"
+fi
+if grep -q '"dispatched":false' "$LG" 2>/dev/null; then
+  ok ledger-blocked-not-dispatch "the record says no worker ran, so it stays out of dispatch counts and spend"
+else
+  bad ledger-blocked-not-dispatch "record missing dispatched=false: $(cat "$LG" 2>/dev/null)"
+fi
+
+# The gate must stay silent when it did not refuse — and it must not write git
+# state either, which is this script's whole promise.
+R="$(new_repo ledger-ready)"
+BEFORE="$(snapshot "$R")"
+run "$R"
+check ledger-ready-rc "$CODE" 0 "the ready case still exits 0"
+if [ -s "$R/.agy/ledger.jsonl" ]; then
+  bad ledger-ready-not-recorded "a passing check wrote a record: $(cat "$R/.agy/ledger.jsonl")"
+else
+  ok ledger-ready-not-recorded "a check that did not refuse writes nothing to the ledger"
+fi
+check ledger-ready-no-git-state "$(snapshot "$R")" "$BEFORE" \
+  "recording a refusal did not give this script a way to touch git state"
+
+R="$(new_repo ledger-skip)"
+printf 'wip\n' > "$R/wip.txt"
+AGY_SKIP_LEDGER=1 /bin/bash "$CHECK" --dir "$R" >/dev/null 2>&1
+if [ -s "$R/.agy/ledger.jsonl" ]; then
+  bad ledger-skip "AGY_SKIP_LEDGER=1 still wrote: $(cat "$R/.agy/ledger.jsonl")"
+else
+  ok ledger-skip "AGY_SKIP_LEDGER=1 keeps the checker read-only"
+fi
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

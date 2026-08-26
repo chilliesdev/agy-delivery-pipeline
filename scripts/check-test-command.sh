@@ -6,6 +6,9 @@
 #
 # Reads:   <run-dir>/TEST_COMMAND       the bare command discovery wrote, one line
 # Writes:  <run-dir>/TEST_COMMAND.log   the command's own output
+#          a refusal record in the run ledger on every non-zero outcome, so a
+#          gate that fires outside a dispatch is not reported as never firing
+#          (AGY_SKIP_LEDGER=1 keeps this script read-only)
 # Prints:  the STATUS line only — stdout belongs to it alone, as everywhere else.
 #
 # Exit codes, one per outcome:
@@ -56,6 +59,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/run-dir.sh"
+. "$HERE/ledger.sh"
 
 DIR="$PWD"; COMMAND=""; COMMAND_GIVEN=""; TIMEOUT="600"
 RUN_TARGET="current"
@@ -232,6 +236,11 @@ fi
 # something the command said.
 printf -- '--- check-test-command: rc=%s elapsed=%ss verdict=%s ---\n' \
   "$RC" "$ELAPSED" "$CODE" >> "$LOG" 2>/dev/null
+
+if [ "$CODE" -ne 0 ]; then
+  ledger_record_refusal "$DIR" "$(run_dir_get "$R" "run" 2>/dev/null || basename "$R")" \
+    "TEST_COMMAND" "$(printf '%s' "${LINE#STATUS: }" | awk '{print $1}')"
+fi
 
 printf '%s\n' "$LINE"
 exit "$CODE"
