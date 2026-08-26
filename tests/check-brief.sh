@@ -438,6 +438,106 @@ case "$OUT" in
   *) bad missing-dot-slash-status "unexpected output: $OUT" ;;
 esac
 
+# --- Check 4m: Slash-joined backticked words in prose are accepted (Issue #73) -
+REPO="$(new_repo slash-joined-backticks)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Use \`helper_a\`/\`helper_b\`/\`helper_c\` to coordinate the pipeline.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check slash-joined-backticks-rc "$CODE" 0 "exit 0 when prose joins three backticked words with slashes"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok slash-joined-backticks-status "reported BRIEF_VALID for slash-joined backticked words" ;;
+  *) bad slash-joined-backticks-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4n: Diagnostic line for existing file with line:column suffix (Issue #73) -
+REPO="$(new_repo diagnostic-existing)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+mkdir -p "$REPO/src"
+touch "$REPO/src/parser.sh"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Fix the issue reported by the linter:
+src/parser.sh:42:15: error: unquoted expansion
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check diagnostic-existing-rc "$CODE" 0 "exit 0 when diagnostic names existing file with line:column"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok diagnostic-existing-status "reported BRIEF_VALID for existing file diagnostic line" ;;
+  *) bad diagnostic-existing-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4o: Diagnostic line for nonexistent file with line:column suffix (Issue #73) -
+REPO="$(new_repo diagnostic-nonexistent)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Fix the issue reported by the linter:
+src/nonexistent.sh:10:5: error: syntax error
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check diagnostic-nonexistent-rc "$CODE" 3 "exit 3 when diagnostic names nonexistent file"
+case "$OUT" in
+  *"STATUS: BRIEF_INVALID(missing_input_file:src/nonexistent.sh)"*)
+    ok diagnostic-nonexistent-status "reported missing_input_file with stripped suffix for nonexistent file" ;;
+  *) bad diagnostic-nonexistent-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4p: Nonexistent path with no suffix is refused (Issue #73) ---------
+REPO="$(new_repo missing-path-no-suffix)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Read src/missing-module.sh before starting.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check missing-path-no-suffix-rc "$CODE" 3 "exit 3 when nonexistent path has no suffix"
+case "$OUT" in
+  *"STATUS: BRIEF_INVALID(missing_input_file:src/missing-module.sh)"*)
+    ok missing-path-no-suffix-status "reported missing_input_file for nonexistent path with no suffix" ;;
+  *) bad missing-path-no-suffix-status "unexpected output: $OUT" ;;
+esac
+
 # --- Check 5: Path outside repository (~/.claude/something) -----------------
 REPO="$(new_repo outside-tilde)"
 RUN_ID="$(cat "$REPO/.agy/current")"

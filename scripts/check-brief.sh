@@ -24,6 +24,8 @@
 #      unnecessary, and the flag is where that will plug in.
 #   4. Input files exist: input paths are verified only when they carry a
 #      directory component (every path named as an input exists inside the repo).
+#      Candidates containing backticks are discarded as prose; trailing line
+#      and column references (:10 or :10:20) are stripped before resolving.
 #   5. No outside paths: no paths outside the repo (~/... or absolute paths
 #      outside --dir) are referenced.
 #   6. Git prohibition: "do not touch git" / "do not commit" is present.
@@ -78,13 +80,31 @@ clean_candidate() {
   printf '%s' "$cand"
 }
 
+strip_line_suffix() {
+  local p="$1"
+  local i tail
+  for i in 1 2; do
+    case "$p" in
+      *:[0-9]*)
+        tail="${p##*:}"
+        case "$tail" in
+          *[!0-9]*) break ;;
+          *) p="${p%:"$tail"}" ;;
+        esac
+        ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$p"
+}
+
 should_discard_path() {
   local cand="$1"
   case "$cand" in
     http://*|https://*|mailto:*|\#*) return 0 ;;
     \~*|\~/*) return 0 ;;
     -*) return 0 ;;
-    *\**|*\?*|*\$*|*\<*|*\>*|*…*|*...*) return 0 ;;
+    *\**|*\?*|*\$*|*\<*|*\>*|*\`*|*…*|*...*) return 0 ;;
   esac
   [ -z "$cand" ] && return 0
 
@@ -321,6 +341,8 @@ fi
 # A bare filename with no directory is a generic mention in prose
 # (e.g. "the SKILL.md files", "a package.json", "your Makefile"), not an
 # assertion that a file exists at the repo root.
+# Tokens containing backticks are treated as prose, not paths.
+# Trailing line references (:10 or :10:20) are stripped before resolving.
 #
 # Classification:
 # 1. A path inside an ## Output Contract section is an output.
@@ -471,6 +493,7 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
     if [ -n "$CAND_LIST" ]; then
       for RAW_CAND in $CAND_LIST; do
         CAND="$(clean_candidate "$RAW_CAND")"
+        CAND="$(strip_line_suffix "$CAND")"
         if [ -z "$CAND" ] || should_discard_path "$CAND"; then
           continue
         fi
