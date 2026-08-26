@@ -34,6 +34,31 @@ ok()   { PASS=$((PASS + 1)); printf '%-35s ok   %s\n' "$1" "$2"; }
 bad()  { FAIL=$((FAIL + 1)); printf '%-35s FAIL %s\n' "$1" "$2"; }
 check() { if [ "$2" = "$3" ]; then ok "$1" "$4"; else bad "$1" "$4 (got '$2', want '$3')"; fi; }
 
+# Bounded wait ceiling in seconds. Set to thirty seconds because these waits are
+# on a machine that may be running several workers, and the ceiling is the point
+# at which we conclude the outcome is never coming, not the point at which we
+# expect it.
+WAIT_CEILING_SEC=30
+
+# wait_for <condition_eval_string> [ceiling_sec]
+# Polls every 50ms up to ceiling_sec (default $WAIT_CEILING_SEC) until condition exits 0.
+wait_for() {
+  local cond="$1"
+  local ceiling="${2:-$WAIT_CEILING_SEC}"
+  local attempts
+  attempts=$(( ceiling * 20 ))
+  [ "$attempts" -gt 0 ] || attempts=$(( WAIT_CEILING_SEC * 20 ))
+  local i=0
+  while [ "$i" -lt "$attempts" ]; do
+    if eval "$cond" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  eval "$cond" 2>/dev/null
+}
+
 # Helper to create a throwaway repo
 new_repo() {
   local name="$1"
@@ -112,9 +137,11 @@ AGY_BIN="$FAKE_SCRATCH" "$PHASE_SH" --phase TEST --brief "$BRIEF_SCRATCH" \
 CODE_SCRATCH=$?
 
 check scratch-add-dir-present-rc "$CODE_SCRATCH" 0 "phase succeeds when --add-dir is passed"
-[ -f "$REPO_SCRATCH/.agy/runs/$RUN_ID_SCRATCH/phases/TEST/verdict" ] \
-  && ok scratch-add-dir-verdict-written "verdict written to repository with --add-dir" \
-  || bad scratch-add-dir-verdict-written "verdict not written to repository"
+if wait_for '[ -f "$REPO_SCRATCH/.agy/runs/$RUN_ID_SCRATCH/phases/TEST/verdict" ]'; then
+  ok scratch-add-dir-verdict-written "verdict written to repository with --add-dir"
+else
+  bad scratch-add-dir-verdict-written "verdict not written to repository (waited ${WAIT_CEILING_SEC}s for $REPO_SCRATCH/.agy/runs/$RUN_ID_SCRATCH/phases/TEST/verdict)"
+fi
 
 # 3b. Without --add-dir, repository is not written to
 REPO_NO_ADD_DIR="$(new_repo scratch-write-absent)"
@@ -156,9 +183,11 @@ esac
 [ ! -f "$REPO_ABORT/.agy/runs/$RUN_ID_ABORT/phases/TEST/verdict" ] \
   && ok abort-shell-verdict-lost "verdict file was lost on abort" \
   || bad abort-shell-verdict-lost "verdict file was written despite abort"
-[ -f "$REPO_ABORT/SURVIVED.txt" ] \
-  && ok abort-shell-work-survived "work on disk survived the abort" \
-  || bad abort-shell-work-survived "work on disk was not preserved"
+if wait_for '[ -f "$REPO_ABORT/SURVIVED.txt" ]'; then
+  ok abort-shell-work-survived "work on disk survived the abort"
+else
+  bad abort-shell-work-survived "work on disk was not preserved (waited ${WAIT_CEILING_SEC}s for $REPO_ABORT/SURVIVED.txt)"
+fi
 
 # --- 5. deny-write-in-plan-mode ----------------------------------------------
 # Plan mode denies the worker writing its own verdict file to disk.

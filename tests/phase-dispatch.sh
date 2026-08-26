@@ -64,6 +64,31 @@ check() { if [ "$2" = "$3" ]; then ok "$1" "$4"; else bad "$1" "$4 (got '$2', wa
 # grep -c both prints 0 and exits 1 on no match, so `|| echo 0` would double up.
 count() { C="$(grep -c -- "$2" "$1" 2>/dev/null)"; printf '%s' "${C:-0}"; }
 
+# Bounded wait ceiling in seconds. Set to thirty seconds because these waits are
+# on a machine that may be running several workers, and the ceiling is the point
+# at which we conclude the outcome is never coming, not the point at which we
+# expect it.
+WAIT_CEILING_SEC=30
+
+# wait_for <condition_eval_string> [ceiling_sec]
+# Polls every 50ms up to ceiling_sec (default $WAIT_CEILING_SEC) until condition exits 0.
+wait_for() {
+  local cond="$1"
+  local ceiling="${2:-$WAIT_CEILING_SEC}"
+  local attempts
+  attempts=$(( ceiling * 20 ))
+  [ "$attempts" -gt 0 ] || attempts=$(( WAIT_CEILING_SEC * 20 ))
+  local i=0
+  while [ "$i" -lt "$attempts" ]; do
+    if eval "$cond" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  eval "$cond" 2>/dev/null
+}
+
 # new_repo <name> — a throwaway git repo with a brief in it; echoes its path.
 new_repo() {
   R="$ROOT/repos/$1"; mkdir -p "$R"
@@ -379,10 +404,11 @@ VERIFY_LOG_T="$REPO_T/.agy/runs/$RUN_ID_T/phases/TEST/verify.log"
 [ -f "$VERIFY_LOG_T" ] && ok t-self-snapshot-verify-log "verify log was written" \
   || bad t-self-snapshot-verify-log "verify log missing"
 
-case "$(cat "$STDERR_T" 2>/dev/null)" in
-  *"phase.sh: re-executing from snapshot"*) ok t-self-snapshot-stderr "re-execution diagnostic printed on stderr" ;;
-  *) bad t-self-snapshot-stderr "re-execution diagnostic missing from stderr" ;;
-esac
+if wait_for 'grep -q "phase\.sh: re-executing from snapshot" "$STDERR_T"'; then
+  ok t-self-snapshot-stderr "re-execution diagnostic printed on stderr"
+else
+  bad t-self-snapshot-stderr "re-execution diagnostic missing from stderr (waited ${WAIT_CEILING_SEC}s for diagnostic in $STDERR_T)"
+fi
 
 # Check that the script file was indeed mutated
 case "$(tail -1 "$REPO_T/scripts/phase.sh" 2>/dev/null)" in
@@ -392,10 +418,10 @@ esac
 
 # Check that the temporary snapshot directory was removed on exit
 SNAP_DIR_T="$(sed -n 's/.*phase\.sh: re-executing from snapshot \([^[:space:]]*\).*/\1/p' "$STDERR_T" 2>/dev/null)"
-if [ -n "$SNAP_DIR_T" ] && [ ! -d "$SNAP_DIR_T" ]; then
+if [ -n "$SNAP_DIR_T" ] && wait_for '[ ! -d "$SNAP_DIR_T" ]'; then
   ok t-self-snapshot-cleanup "snapshot directory cleaned up on exit"
 else
-  bad t-self-snapshot-cleanup "snapshot directory still exists: $SNAP_DIR_T"
+  bad t-self-snapshot-cleanup "snapshot directory still exists: ${SNAP_DIR_T:-unknown} (waited ${WAIT_CEILING_SEC}s for snapshot dir to be removed)"
 fi
 
 # u. negative case: when the script lives outside the target repo, no re-execution
@@ -421,8 +447,8 @@ RUN_ID_V2="$(run_dir_new --dir "$REPO_V" --task "concurrency test 2")"
 STUB_SLEEP_SEC=2 run_phase "$REPO_V" "$REPO_V" --run "$RUN_ID_V1" >/dev/null 2>&1 &
 PID_V1=$!
 
-# Wait briefly for background dispatch to enter its run
-sleep 0.3
+# Wait for background dispatch to enter its run
+wait_for '[ -d "$REPO_V/.agy/workers" ] && [ "$(ls -A "$REPO_V/.agy/workers" 2>/dev/null | grep -c .)" -ge 1 ]' || true
 
 OUT_V2="$(run_phase "$REPO_V" "$REPO_V" --run "$RUN_ID_V2" 2>/dev/null)"; RC_V2=$?
 check v-default-cap-refused-rc "$RC_V2" 8 "second concurrent dispatch is refused with exit 8"
@@ -456,7 +482,8 @@ PID_V2_1=$!
 STUB_SLEEP_SEC=2 run_phase "$REPO_V2" "$REPO_V2" --run "$RUN_ID_V2_2" --max-workers 3 >/dev/null 2>&1 &
 PID_V2_2=$!
 
-sleep 0.3
+# Wait for background dispatches to enter their runs
+wait_for '[ -d "$REPO_V2/.agy/workers" ] && [ "$(ls -A "$REPO_V2/.agy/workers" 2>/dev/null | grep -c .)" -ge 2 ]' || true
 
 OUT_V2_3="$(run_phase "$REPO_V2" "$REPO_V2" --run "$RUN_ID_V2_3" --max-workers 1 2>/dev/null)"; RC_V2_3=$?
 check v2-plural-cap-rc "$RC_V2_3" 8 "third dispatch with max-workers 1 refused with exit 8"
@@ -488,7 +515,8 @@ RUN_ID_W2="$(run_dir_new --dir "$REPO_W" --task "concurrency raised 2")"
 STUB_SLEEP_SEC=2 run_phase "$REPO_W" "$REPO_W" --run "$RUN_ID_W1" --max-workers 2 >/dev/null 2>&1 &
 PID_W1=$!
 
-sleep 0.3
+# Wait for background dispatch to enter its run
+wait_for '[ -d "$REPO_W/.agy/workers" ] && [ "$(ls -A "$REPO_W/.agy/workers" 2>/dev/null | grep -c .)" -ge 1 ]' || true
 
 OUT_W2="$(run_phase "$REPO_W" "$REPO_W" --run "$RUN_ID_W2" --max-workers 2 2>/dev/null)"; RC_W2=$?
 check w-raised-cap-rc "$RC_W2" 0 "second dispatch with --max-workers 2 succeeds (exit 0)"
@@ -679,7 +707,8 @@ RUN_ID_AD2="$(run_dir_new --dir "$REPO_AD" --task "env max workers 2")"
 STUB_SLEEP_SEC=2 AGY_MAX_WORKERS=2 run_phase "$REPO_AD" "$REPO_AD" --run "$RUN_ID_AD1" >/dev/null 2>&1 &
 PID_AD1=$!
 
-sleep 0.3
+# Wait for background dispatch to enter its run
+wait_for '[ -d "$REPO_AD/.agy/workers" ] && [ "$(ls -A "$REPO_AD/.agy/workers" 2>/dev/null | grep -c .)" -ge 1 ]' || true
 
 OUT_AD2="$(AGY_MAX_WORKERS=2 run_phase "$REPO_AD" "$REPO_AD" --run "$RUN_ID_AD2" 2>/dev/null)"; RC_AD2=$?
 check ad-env-max-workers-rc "$RC_AD2" 0 "second dispatch with AGY_MAX_WORKERS=2 succeeds (exit 0)"
