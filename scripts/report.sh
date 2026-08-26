@@ -68,7 +68,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/report-sh.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 VALID_TSV="$WORK/valid.tsv"
-> "$VALID_TSV"
+: > "$VALID_TSV"
 
 SKIPPED_COUNT=0
 TOTAL_READ=0
@@ -191,7 +191,6 @@ while IFS= read -r line || [ -n "$line" ]; do
   r_elapsed="$(_extract_num elapsed_s "$trimmed_top")"
   r_verdict="$(_extract_str verdict "$trimmed_top")"
   r_verify_ran="$(_extract_bool verify_ran "$trimmed_top")"
-  r_verify_rc="$(_extract_num verify_rc "$trimmed_top")"
   r_refunded="$(_extract_num retries_refunded "$trimmed_top")"
   r_issue="$(_extract_num issue "$trimmed_top")"
 
@@ -493,6 +492,7 @@ echo ""
 VERIFY_OVERRIDES=0
 NO_STATUS_COUNT=0
 
+# shellcheck disable=SC2034 # TSV columns read to match 15-column schema
 while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss; do
   _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss
   case "$r_st" in

@@ -295,6 +295,7 @@ worktree_list() {
   root="$(cd "$root" && pwd)"
 
   if [ -d "$root/.agy/runs" ]; then
+    # shellcheck disable=SC2045 # ls -1r needed for reverse-chronological ordering of runs
     for r in $(ls -1r "$root/.agy/runs" 2>/dev/null); do
       local rdir="$root/.agy/runs/$r"
       [ -d "$rdir" ] || continue

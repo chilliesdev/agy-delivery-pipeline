@@ -98,7 +98,6 @@ driver_run() {
   rm -f "$result_json"
 
   # Deliberately narrow parser for agy's known JSON output shape, not a general JSON parser.
-  local is_json=0
   local json_candidate
   json_candidate="$(printf '%s\n' "$raw_output" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -a '^{' | grep -a '}$' | head -1 || true)"
 
@@ -121,7 +120,6 @@ driver_run() {
 
     local resp_clean="${resp_escaped//\\\"/\"}"
     extracted_response="$(printf '%b' "$resp_clean")"
-    is_json=1
     printf '%s\n' "$json_candidate" > "$result_json" 2>/dev/null || true
   else
     extracted_response="$raw_output"

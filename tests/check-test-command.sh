@@ -17,6 +17,7 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$CHECK" ] || { echo "check-test-command-test: script not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "check-test-command-test: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/check-test-command.XXXXXX")"
@@ -37,7 +38,8 @@ new_repo() {
 
 pdir() {
   local repo="$1"
-  local id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
+  local id
+  id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
   [ -n "$id" ] && printf '%s/.agy/runs/%s' "$repo" "$id"
 }
 

@@ -17,6 +17,7 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$PHASE_SH" ] || { echo "phase-dispatch: phase.sh not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "phase-dispatch: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/phase-dispatch.XXXXXX")"
@@ -221,7 +222,6 @@ RUN1_VERDICT="$(cat "$RUN1_DIR/verdict" 2>/dev/null)"
 
 STUB_VERDICT="STATUS: DONE | File: RUN2.md" run_phase "$REPO" "$REPO" --run new >/dev/null
 RUN2_ID="$(cat "$REPO/.agy/current")"
-RUN2_DIR="$REPO/.agy/runs/$RUN2_ID/phases/TEST"
 
 [ "$RUN1_ID" != "$RUN2_ID" ] && ok j-runs-distinct "runs have distinct ids" || bad j-runs-distinct "run ids collided"
 check j-run1-status-preserved "$(cat "$RUN1_DIR/status" 2>/dev/null)" "$RUN1_STATUS" "first run status preserved"
@@ -518,7 +518,8 @@ mkdir -p "$REPO_X/.agy/workers"
 STALE_REC="$REPO_X/.agy/workers/stale_${DEAD_PID}.rec"
 printf 'pid=%s\nrun=stale-run\nphase=TEST\nstarted=2026-08-25T00:00:00Z\n' "$DEAD_PID" > "$STALE_REC"
 
-OUT_X="$(run_phase "$REPO_X" "$REPO_X" 2>/dev/null)"; RC_X=$?
+run_phase "$REPO_X" "$REPO_X" >/dev/null 2>&1
+RC_X=$?
 check x-stale-record-rc "$RC_X" 0 "dispatch with stale worker record succeeds (exit 0)"
 [ ! -f "$STALE_REC" ] && ok x-stale-record-cleaned "stale worker record was cleaned up" \
   || bad x-stale-record-cleaned "stale worker record was not removed"
@@ -788,7 +789,8 @@ mkdir -p "$REPO_AI/.agy/runs/$RUN_ID_AI"
 SENTINEL_DIFF="SENTINEL_REVIEW_DIFF_CONTENT_12345"
 printf '%s\n' "$SENTINEL_DIFF" > "$REPO_AI/.agy/runs/$RUN_ID_AI/REVIEW_DIFF.patch"
 
-OUT_AI="$(run_phase "$REPO_AI" "$REPO_AI" --run "$RUN_ID_AI" 2>/dev/null)"; RC_AI=$?
+run_phase "$REPO_AI" "$REPO_AI" --run "$RUN_ID_AI" >/dev/null 2>&1
+RC_AI=$?
 check ai-review-diff-rc "$RC_AI" 0 "dispatch completes with exit 0"
 check ai-review-diff-preserved "$(cat "$REPO_AI/.agy/runs/$RUN_ID_AI/REVIEW_DIFF.patch" 2>/dev/null)" \
   "$SENTINEL_DIFF" "REVIEW_DIFF.patch is preserved byte-for-byte and not overwritten"

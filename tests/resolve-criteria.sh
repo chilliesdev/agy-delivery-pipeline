@@ -17,6 +17,7 @@ VENDORED="$HERE/../criteria"
 [ -f "$RESOLVE" ] || { echo "resolve-criteria-test: script not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "resolve-criteria-test: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 # Normalised through `cd`, because $TMPDIR carries a trailing slash on macOS and
@@ -39,7 +40,8 @@ new_repo() {
 
 pdir() {
   local repo="$1"
-  local id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
+  local id
+  id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
   [ -n "$id" ] && printf '%s/.agy/runs/%s' "$repo" "$id"
 }
 
