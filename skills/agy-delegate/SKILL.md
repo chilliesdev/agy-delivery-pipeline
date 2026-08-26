@@ -181,6 +181,10 @@ single stdout line and should not read the progress channel.
 | `STATUS: BRIEF_IMPOSSIBLE(…)` | constraints and requirement collide | read the collision, fix the brief, re-dispatch — it did not cost a retry |
 | `BRIEF_INVALID(…)` | brief violates contract rules | fix the brief and re-dispatch (zero token cost) |
 | `SECRETS_FOUND(…)` | secret detected in brief or diff | remove secret and re-dispatch (or --no-secret-scan) |
+| `RETRY_CAP_REACHED(…)` | retry budget for this phase is spent | take the work over yourself, or pass --reset-retries to start a fresh cycle |
+| `BUDGET_EXCEEDED(…)` | token budget for this run is spent | increase --budget-tokens to continue, or inspect spend with report.sh |
+| `REPO_BUDGET_EXCEEDED(…)` | repository token budget is spent | increase --repo-budget-tokens to continue, or inspect spend with report.sh |
+| `WORKER_CAP_EXCEEDED(…)` | concurrent worker cap reached | wait for a running dispatch to finish, or increase --max-workers to continue |
 | `VERIFY_FAILED(rc=N)` | it claimed success; the tests disagree | read `VerifyLog:`, then fix it yourself or re-brief once |
 | `WORKER_FAILED(rc=N)` | agy died | check the brief path and the criteria, then retry once |
 | `PREFLIGHT_FAILED(…)` | setup broke mid-session | report the cause, do the work yourself |
