@@ -190,7 +190,7 @@ _run_json_to_flat() {
   local in_phases=0
   local current_phase=""
 
-  > "$flat_file"
+  : > "$flat_file"
 
   while IFS= read -r line || [ -n "$line" ]; do
     local trimmed="${line#"${line%%[! ]*}"}"
@@ -641,6 +641,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
         exit 4
       }
       if [ -d "$DIR/.agy/runs" ]; then
+        # shellcheck disable=SC2045 # ls -1r needed for reverse-chronological ordering of runs
         for R in $(ls -1r "$DIR/.agy/runs" 2>/dev/null); do
           [ -d "$DIR/.agy/runs/$R" ] && printf '%s\n' "$R"
         done

@@ -112,6 +112,23 @@ Read it, not the log. Progress heartbeats, liveness warnings, and failure log
 tails stream to stderr for the user's terminal — the orchestrator reads only
 the single stdout line and must not read the progress channel or log tails.
 
+| status | means | do |
+|---|---|---|
+| `STATUS: DONE …` | the worker finished and the check held | gate it below |
+| `STATUS: BLOCKED …` | it could not proceed | read the reason, ask the user (Phase 0) or handle the blocker |
+| `STATUS: BRIEF_IMPOSSIBLE(…)` | constraints and requirement collide | read the collision, fix the brief, re-dispatch — it did not cost a retry |
+| `BRIEF_INVALID(…)` | brief violates contract rules | fix the brief and re-dispatch (zero token cost) |
+| `SECRETS_FOUND(…)` | secret detected in brief or diff | remove secret and re-dispatch (or --no-secret-scan) |
+| `RETRY_CAP_REACHED(…)` | retry budget for this phase is spent | take the work over yourself, or pass --reset-retries to start a fresh cycle |
+| `BUDGET_EXCEEDED(…)` | token budget for this run is spent | increase --budget-tokens to continue, or inspect spend with report.sh |
+| `REPO_BUDGET_EXCEEDED(…)` | repository token budget is spent | increase --repo-budget-tokens to continue, or inspect spend with report.sh |
+| `WORKER_CAP_EXCEEDED(…)` | concurrent worker cap reached | wait for a running dispatch to finish, or increase --max-workers to continue |
+| `VERIFY_FAILED(rc=N)` | it claimed success; the tests disagree | read `VerifyLog:`, then fix it yourself or re-brief once |
+| `WORKER_FAILED(rc=N)` | agy died | check the brief path and the criteria, then retry once |
+| `PREFLIGHT_FAILED(…)` | setup broke mid-session | report the cause, do the work yourself |
+| `GIT_STATE_UNCHECKED(…)` | git-state check was requested but could not run | find out why the check could not run, fix that, and dispatch again |
+| `NO_STATUS_REPORTED` | rc=0, no verdict — neither pass nor fail | check the diff; it may well have worked |
+
 Underneath sits the worker driver ([drivers/agy.sh](../../drivers/agy.sh)), with
 [agy-run.sh](../../scripts/agy-run.sh) retained as a compatibility shim. Every
 phase runs through a driver; `agy` is the only one today, and the gates do not
@@ -133,6 +150,14 @@ end with STATUS: PASSED"* cannot be mistaken for the verdict. If neither route
 produces one, `phase.sh` reports `STATUS: NO_STATUS_REPORTED` — which is not a
 failure and not a pass; the phase may well have succeeded, so verify the artifact
 on disk before advancing or retrying.
+
+If the brief's constraints make its requirement impossible, the worker must stop
+**before editing anything**, name the specific constraint and the specific
+requirement that collide, and return the impossible verdict
+(`STATUS: BRIEF_IMPOSSIBLE(<what is in the way>)`). That is a successful round.
+A workaround that satisfies the assertion without satisfying the requirement is
+not. The orchestrator reads the collision, fixes the brief, and re-dispatches —
+it did not cost a retry.
 
 `.agy/runs/<run-id>/phases/<PHASE>/status` is `phase.sh`'s **own** output file.
 Briefs must tell the worker never to write it — the worker writes
@@ -516,11 +541,17 @@ standalone contract — the worker has none of your conversation:
 - "do not run shell commands; the orchestrator runs the checks"
 - "do not commit; leave changes in the working tree"
 - the closing verdict instruction — *"Write your one-line verdict —
-  `STATUS: DONE | File: .agy/runs/<run-id>/CHANGES.md` or
-  `STATUS: BLOCKED | File: .agy/runs/<run-id>/CHANGES.md` — to
+  `STATUS: DONE | File: .agy/runs/<run-id>/CHANGES.md`,
+  `STATUS: BLOCKED | File: .agy/runs/<run-id>/CHANGES.md`, or
+  `STATUS: BRIEF_IMPOSSIBLE(<what is in the way>)` (if constraints and
+  requirement collide, stop before editing anything and name the collision) — to
   `.agy/runs/<run-id>/phases/IMPLEMENT/verdict`, and print that same line as the
   last line of your output. Do not write
   `.agy/runs/<run-id>/phases/IMPLEMENT/status`."*
+
+When a brief commissions tests, name the function or script the test must call.
+Reaching inside the implementation or reconstructing its logic in the test is a
+failure of the round rather than a way to pass it.
 
 Worker writes a short summary to `.agy/runs/<run-id>/CHANGES.md`.
 
@@ -699,14 +730,15 @@ refusal happens before preflight and before the verdict is cleared, so
 hand over.
 
 **A round that never reviewed anything is refunded.** The counter is spent at
-dispatch, so that a round killed halfway still counts, but a `WORKER_FAILED` or
-`PREFLIGHT_FAILED` round gets it back — those are agy dying on its own
-configuration in seconds, not a reviewer failing to converge, and they leave no
+dispatch, so that a round killed halfway still counts, but a `WORKER_FAILED`,
+`PREFLIGHT_FAILED` or `BRIEF_IMPOSSIBLE` round gets it back — those are agy
+dying on its own configuration in seconds or a brief impossible as written, not
+a reviewer failing to converge, and they leave no
 `.agy/runs/<run-id>/REVIEW_FEEDBACK.md` to hand over either. Two of them in a row
 once came within one round of retiring a review phase that had never run.
 `FAILED`, `VERIFY_FAILED` and `NO_STATUS_REPORTED` all keep spending: each is a
 worker that ran and left the round unresolved, which is exactly what the cap
-counts. Fix the configuration and dispatch again — the budget is where it was.
+counts. Fix the configuration or brief and dispatch again — the budget is where it was.
 
 ### Phase 3 — QA (tier `medium`, `--mode full --sandbox`)
 
@@ -721,6 +753,19 @@ your one-line verdict — `STATUS: PASSED | File: .agy/runs/<run-id>/QA_REPORT.m
 or `STATUS: FAILED | File: .agy/runs/<run-id>/QA_REPORT.md` — to
 `.agy/runs/<run-id>/phases/QA/verdict`, and print that same line as the last
 line of your output. Do not write `.agy/runs/<run-id>/phases/QA/status`."*
+
+```
+${CLAUDE_PLUGIN_ROOT}/scripts/phase.sh --phase QA --run "$RUN_ID" \
+  --brief .agy/runs/$RUN_ID/phases/QA/brief.md --tier medium \
+  --no-preflight --mode full --sandbox --check-git-state
+```
+
+This phase dispatches with `--check-git-state`: this is the phase where the
+promise rests on the brief rather than on the driver refusing shell use, so the
+check is what makes the claim checkable. A QA round whose git state changed is
+not a pass whatever the verdict says; `phase.sh` reports
+`STATUS: GIT_STATE_CHANGED(...)`. The orchestrator stops, reports what moved,
+and does not advance to the next phase.
 
 This is the only phase that runs commands, so it needs `--mode full`, which turns
 off every permission prompt. Pair it with `--sandbox` for agy's terminal
@@ -744,8 +789,12 @@ and does not write `.agy/runs/<run-id>/phases/DOCS/status`.
 > Not a script, not a worker, not behind a flag, not as a default.
 > `check-release.sh` only reads. The release worker only writes files. The
 > orchestrator prints the commands and stops. **A person runs them**, having
-> read them first. Any future change here that makes an irreversible git command
-> reachable from an unattended run is a defect, whatever it is called.
+> read them first. In phases dispatched in edit-accepting mode, the guarantee is
+> enforced by the driver denying shell use. In the QA phase (which runs commands),
+> it rests on the brief plus a post-hoc git state check (`check-git-state.sh`),
+> which detects rather than prevents. Any future change here that makes an
+> irreversible git command reachable from an unattended run is a defect, whatever
+> it is called.
 
 Three steps, and it is worth being blunt about which is which:
 

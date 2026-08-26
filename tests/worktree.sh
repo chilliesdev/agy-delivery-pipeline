@@ -14,7 +14,9 @@ RUN_DIR_SCRIPT="$HERE/../scripts/run-dir.sh"
 [ -f "$WORKTREE_SCRIPT" ] || { echo "worktree-test: script not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SCRIPT" ] || { echo "worktree-test: run-dir script not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SCRIPT"
+# shellcheck source=../scripts/worktree.sh
 . "$WORKTREE_SCRIPT"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/worktree-test.XXXXXX")" && pwd)"
@@ -91,7 +93,8 @@ echo "edit in wt1" > "$WT1/change1.txt"
 
 # --- 5. worktree already exists for run (exit code 5) ----------------------
 
-DUP_OUT="$(worktree_add --dir "$R" --run "$ID1" 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_add --dir "$R" --run "$ID1" >/dev/null 2>&1 || CODE=$?
 check worktree-exists-rc "$CODE" 5 "adding existing worktree exits 5"
 
 # --- 6. branch already checked out elsewhere (exit code 6) -----------------
@@ -99,11 +102,13 @@ check worktree-exists-rc "$CODE" 5 "adding existing worktree exits 5"
 ID_BRANCH_CONFLICT="$(run_dir_new --dir "$R" --task "branch conflict task")"
 # Try checking out the main branch (already checked out in main repo)
 MAIN_BR="$(git -C "$R" rev-parse --abbrev-ref HEAD)"
-BR_OUT1="$(worktree_add --dir "$R" --run "$ID_BRANCH_CONFLICT" --branch "$MAIN_BR" 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_add --dir "$R" --run "$ID_BRANCH_CONFLICT" --branch "$MAIN_BR" >/dev/null 2>&1 || CODE=$?
 check branch-checked-out-main-rc "$CODE" 6 "adding worktree with main branch exits 6"
 
 # Try checking out the branch currently checked out in WT1
-BR_OUT2="$(worktree_add --dir "$R" --run "$ID_BRANCH_CONFLICT" --branch "$BRANCH_WT1" 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_add --dir "$R" --run "$ID_BRANCH_CONFLICT" --branch "$BRANCH_WT1" >/dev/null 2>&1 || CODE=$?
 check branch-checked-out-other-wt-rc "$CODE" 6 "adding worktree with another worktree branch exits 6"
 
 # --- 7. refusal 1: unfinished run (exit code 7, refuses even with force) ---
@@ -112,12 +117,14 @@ R_UNF="$(new_repo unfin-test)"
 ID_UNF="$(run_dir_new --dir "$R_UNF" --task "unfinished task")"
 WT_UNF="$(worktree_add --dir "$R_UNF" --run "$ID_UNF")"
 
-UNF_REM_OUT="$(worktree_remove --dir "$R_UNF" --run "$ID_UNF" 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_remove --dir "$R_UNF" --run "$ID_UNF" >/dev/null 2>&1 || CODE=$?
 check remove-unfinished-rc "$CODE" 7 "removing unfinished run exits 7"
 [ -d "$WT_UNF" ] && ok remove-unfinished-survives "unfinished worktree survives removal attempt" || bad remove-unfinished-survives "unfinished worktree removed"
 
 # Unfinished runs cannot be removed even with --force
-UNF_FORCE_OUT="$(worktree_remove --dir "$R_UNF" --run "$ID_UNF" --force 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_remove --dir "$R_UNF" --run "$ID_UNF" --force >/dev/null 2>&1 || CODE=$?
 check remove-unfinished-force-rc "$CODE" 7 "removing unfinished run with --force still exits 7"
 [ -d "$WT_UNF" ] && ok remove-unfinished-force-survives "unfinished worktree still survives with --force" || bad remove-unfinished-force-survives "unfinished worktree removed with force"
 
@@ -128,11 +135,13 @@ ID_FAIL="$(run_dir_new --dir "$R_FAIL" --task "failed task")"
 WT_FAIL="$(worktree_add --dir "$R_FAIL" --run "$ID_FAIL")"
 run_dir_finish "$R_FAIL/.agy/runs/$ID_FAIL" "FAILED"
 
-FAIL_REM_OUT="$(worktree_remove --dir "$R_FAIL" --run "$ID_FAIL" 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_remove --dir "$R_FAIL" --run "$ID_FAIL" >/dev/null 2>&1 || CODE=$?
 check remove-failed-rc "$CODE" 7 "removing failed run without --force exits 7"
 [ -d "$WT_FAIL" ] && ok remove-failed-survives "failed run worktree preserved as evidence" || bad remove-failed-survives "failed worktree removed without force"
 
-FAIL_FORCE_OUT="$(worktree_remove --dir "$R_FAIL" --run "$ID_FAIL" --force 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_remove --dir "$R_FAIL" --run "$ID_FAIL" --force >/dev/null 2>&1 || CODE=$?
 check remove-failed-force-rc "$CODE" 0 "removing failed run with --force exits 0"
 [ ! -d "$WT_FAIL" ] && ok remove-failed-force-removed "failed run worktree removed after --force" || bad remove-failed-force-removed "failed worktree still present"
 
@@ -145,11 +154,13 @@ WT_DIRTY1="$(worktree_add --dir "$R_DIRTY1" --run "$ID_DIRTY1")"
 run_dir_finish "$R_DIRTY1/.agy/runs/$ID_DIRTY1" "SUCCESS"
 
 echo "uncommitted edit" >> "$WT_DIRTY1/hello.txt"
-DIRTY1_REM_OUT="$(worktree_remove --dir "$R_DIRTY1" --run "$ID_DIRTY1" 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_remove --dir "$R_DIRTY1" --run "$ID_DIRTY1" >/dev/null 2>&1 || CODE=$?
 check remove-dirty-mod-rc "$CODE" 7 "removing worktree with modified file exits 7"
 [ -d "$WT_DIRTY1" ] && ok remove-dirty-mod-survives "dirty modified worktree preserved" || bad remove-dirty-mod-survives "dirty worktree removed without force"
 
-DIRTY1_FORCE_OUT="$(worktree_remove --dir "$R_DIRTY1" --run "$ID_DIRTY1" --force 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_remove --dir "$R_DIRTY1" --run "$ID_DIRTY1" --force >/dev/null 2>&1 || CODE=$?
 check remove-dirty-mod-force-rc "$CODE" 0 "removing dirty modified worktree with --force exits 0"
 [ ! -d "$WT_DIRTY1" ] && ok remove-dirty-mod-force-removed "dirty modified worktree removed with force" || bad remove-dirty-mod-force-removed "dirty worktree still present"
 
@@ -160,11 +171,13 @@ WT_DIRTY2="$(worktree_add --dir "$R_DIRTY2" --run "$ID_DIRTY2")"
 run_dir_finish "$R_DIRTY2/.agy/runs/$ID_DIRTY2" "SUCCESS"
 
 echo "untracked content" > "$WT_DIRTY2/untracked.txt"
-DIRTY2_REM_OUT="$(worktree_remove --dir "$R_DIRTY2" --run "$ID_DIRTY2" 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_remove --dir "$R_DIRTY2" --run "$ID_DIRTY2" >/dev/null 2>&1 || CODE=$?
 check remove-dirty-untracked-rc "$CODE" 7 "removing worktree with untracked file exits 7"
 [ -d "$WT_DIRTY2" ] && ok remove-dirty-untracked-survives "dirty untracked worktree preserved" || bad remove-dirty-untracked-survives "dirty worktree removed without force"
 
-DIRTY2_FORCE_OUT="$(worktree_remove --dir "$R_DIRTY2" --run "$ID_DIRTY2" --force 2>/dev/null)"; CODE=$?
+CODE=0
+worktree_remove --dir "$R_DIRTY2" --run "$ID_DIRTY2" --force >/dev/null 2>&1 || CODE=$?
 check remove-dirty-untracked-force-rc "$CODE" 0 "removing dirty untracked worktree with --force exits 0"
 [ ! -d "$WT_DIRTY2" ] && ok remove-dirty-untracked-force-removed "dirty untracked worktree removed with force" || bad remove-dirty-untracked-force-removed "dirty worktree still present"
 
@@ -229,21 +242,25 @@ esac
 # --- 13. standard error exit codes -----------------------------------------
 
 # Bad args (exit 2)
-BAD_ARG_OUT="$(/bin/bash "$WORKTREE_SCRIPT" add --bogus-arg 2>/dev/null)"; CODE=$?
+CODE=0
+/bin/bash "$WORKTREE_SCRIPT" add --bogus-arg >/dev/null 2>&1 || CODE=$?
 check exit-code-bad-arg "$CODE" 2 "bad argument exits 2"
 
 # Missing required --run (exit 2)
-MISSING_RUN_OUT="$(/bin/bash "$WORKTREE_SCRIPT" add --dir "$R" 2>/dev/null)"; CODE=$?
+CODE=0
+/bin/bash "$WORKTREE_SCRIPT" add --dir "$R" >/dev/null 2>&1 || CODE=$?
 check exit-code-missing-run "$CODE" 2 "missing --run flag exits 2"
 
 # Non-existent run (exit 3)
-NONEXIST_OUT="$(/bin/bash "$WORKTREE_SCRIPT" add --dir "$R" --run "nonexistent-run" 2>/dev/null)"; CODE=$?
+CODE=0
+/bin/bash "$WORKTREE_SCRIPT" add --dir "$R" --run "nonexistent-run" >/dev/null 2>&1 || CODE=$?
 check exit-code-nonexistent-run "$CODE" 3 "nonexistent run exits 3"
 
 # Non-git directory (exit 4)
 NON_GIT_DIR="$ROOT/not-a-repo"
 mkdir -p "$NON_GIT_DIR"
-NON_GIT_OUT="$(/bin/bash "$WORKTREE_SCRIPT" add --dir "$NON_GIT_DIR" --run "some-run" 2>/dev/null)"; CODE=$?
+CODE=0
+/bin/bash "$WORKTREE_SCRIPT" add --dir "$NON_GIT_DIR" --run "some-run" >/dev/null 2>&1 || CODE=$?
 check exit-code-non-git-dir "$CODE" 4 "non-git directory exits 4"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

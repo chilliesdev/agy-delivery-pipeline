@@ -18,6 +18,7 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$PHASE_SH" ] || { echo "check-secrets-test: phase.sh not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "check-secrets-test: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/check-secrets.XXXXXX")" && pwd)"
@@ -57,7 +58,8 @@ new_repo() {
   mkdir -p "$r"
   ( cd "$r" && git init -q . && git config user.email "test@example.com" \
       && git config user.name "Tester" && git commit -q --allow-empty -m "initial" )
-  local run_id="$(run_dir_new --dir "$r" --task "secret test $name")"
+  local run_id
+  run_id="$(run_dir_new --dir "$r" --task "secret test $name")"
   [ -n "$run_id" ] || { echo "check-secrets-test: run_dir_new failed for $name" >&2; exit 2; }
   printf '%s' "$r"
 }
@@ -286,8 +288,8 @@ case "$PHASE_OUT" in
 esac
 
 # --- 11. --no-secret-scan dispatching anyway ---------------------------------
-PHASE_BYPASS_OUT="$(STUB_PHASE=IMPLEMENT STUB_CALLED_FILE="$CALLED_LOG" AGY_BIN="$STUB" \
-  /bin/bash "$PHASE_SH" --phase IMPLEMENT --run "$RUN_ID_PHASE" --brief "$BRIEF_LEAK" --dir "$R_PHASE" --no-preflight --no-secret-scan 2>/dev/null)"
+STUB_PHASE=IMPLEMENT STUB_CALLED_FILE="$CALLED_LOG" AGY_BIN="$STUB" \
+  /bin/bash "$PHASE_SH" --phase IMPLEMENT --run "$RUN_ID_PHASE" --brief "$BRIEF_LEAK" --dir "$R_PHASE" --no-preflight --no-secret-scan >/dev/null 2>&1
 PHASE_BYPASS_RC=$?
 
 check phase-bypass-rc "$PHASE_BYPASS_RC" 0 "phase.sh exited 0 with --no-secret-scan"
@@ -446,6 +448,126 @@ case "$OUT" in
   *"STATUS: SECRETS_NONE"*)
     ok short-values-status "reported SECRETS_NONE for short values" ;;
   *) bad short-values-status "unexpected output: $OUT" ;;
+esac
+
+# --- 20. Diff editing pattern list inside scripts/check-secrets.sh ------------
+R_SELF="$(new_repo self-diff)"
+PATCH_SELF="$R_SELF/self.patch"
+cat > "$PATCH_SELF" <<'EOF'
+diff --git a/scripts/check-secrets.sh b/scripts/check-secrets.sh
+--- a/scripts/check-secrets.sh
++++ b/scripts/check-secrets.sh
+@@ -148,3 +148,3 @@
+-    *ghp_*|*gho_*|*ghu_*|*ghs_*|*ghr_*|*github_pat_*) ;;
++    *ghp_*|*gho_*|*ghu_*|*ghs_*|*ghr_*|*github_pat_*|*ghx_*) ;;
+     *) return 1 ;;
+EOF
+run_check --dir "$R_SELF" --diff "$PATCH_SELF"
+check self-diff-rc "$CODE" 0 "exit 0 on diff editing scanner pattern definitions"
+case "$OUT" in
+  *"STATUS: SECRETS_NONE"*"| Skipped: scripts/check-secrets.sh, tests/check-secrets.sh"*)
+    ok self-diff-status "reported SECRETS_NONE and named skipped scanner paths" ;;
+  *) bad self-diff-status "unexpected output: $OUT" ;;
+esac
+
+# --- 21. Diff adding credential-shaped line to other file still refused -------
+R_OTHER="$(new_repo other-file-diff)"
+PATCH_OTHER="$R_OTHER/other.patch"
+cat > "$PATCH_OTHER" <<'EOF'
+diff --git a/scripts/check-secrets.sh b/scripts/check-secrets.sh
+--- a/scripts/check-secrets.sh
++++ b/scripts/check-secrets.sh
+@@ -1,3 +1,3 @@
+-# check-secrets
++# check-secrets updated
+diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -0,0 +1,2 @@
++AWS_ACCESS_KEY_ID="AKIA1234567890ABCDEF"
+EOF
+run_check --dir "$R_OTHER" --diff "$PATCH_OTHER"
+check other-diff-rc "$CODE" 3 "exit 3 on credential added to other file in diff"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(aws_access_key, other.patch:11)"*)
+    ok other-diff-status "reported SECRETS_FOUND for other file" ;;
+  *) bad other-diff-status "unexpected output: $OUT" ;;
+esac
+
+# --- 22. Diff adding credential-shaped line to scripts/check-secrets.sh outside patterns
+# The entire scripts/check-secrets.sh file is exempted when scanning diffs to prevent
+# heuristic false-positives/bypasses; the skip is explicitly named on the status line.
+R_OUTSIDE="$(new_repo outside-patterns)"
+PATCH_OUTSIDE="$R_OUTSIDE/outside.patch"
+cat > "$PATCH_OUTSIDE" <<'EOF'
+diff --git a/scripts/check-secrets.sh b/scripts/check-secrets.sh
+--- a/scripts/check-secrets.sh
++++ b/scripts/check-secrets.sh
+@@ -2,2 +2,3 @@
++# Pre-dispatch secret scanner
++FALLBACK_KEY="AKIA1234567890ABCDEF"
+EOF
+run_check --dir "$R_OUTSIDE" --diff "$PATCH_OUTSIDE"
+check outside-diff-rc "$CODE" 0 "exit 0 on diff to scripts/check-secrets.sh (file-level skip)"
+case "$OUT" in
+  *"STATUS: SECRETS_NONE"*"| Skipped: scripts/check-secrets.sh, tests/check-secrets.sh"*)
+    ok outside-diff-status "reported SECRETS_NONE and named skipped scanner paths" ;;
+  *) bad outside-diff-status "unexpected output: $OUT" ;;
+esac
+
+# --- 23. --skip on arbitrary path exempts only that path and names it ---------
+R_SKIP="$(new_repo custom-skip)"
+PATCH_SKIP="$R_SKIP/custom.patch"
+cat > "$PATCH_SKIP" <<'EOF'
+diff --git a/fixtures/test_credentials.json b/fixtures/test_credentials.json
+--- a/fixtures/test_credentials.json
++++ b/fixtures/test_credentials.json
+@@ -0,0 +1,2 @@
++{"token": "ghp_1234567890abcdef1234567890abcdef12"}
+EOF
+run_check --dir "$R_SKIP" --diff "$PATCH_SKIP" --skip fixtures/test_credentials.json
+check custom-skip-rc "$CODE" 0 "exit 0 when exempted via --skip"
+case "$OUT" in
+  *"STATUS: SECRETS_NONE"*"| Skipped: scripts/check-secrets.sh, tests/check-secrets.sh, fixtures/test_credentials.json"*)
+    ok custom-skip-status "reported SECRETS_NONE and named custom skipped path" ;;
+  *) bad custom-skip-status "unexpected output: $OUT" ;;
+esac
+
+PATCH_SKIP_MULTI="$R_SKIP/multi.patch"
+cat > "$PATCH_SKIP_MULTI" <<'EOF'
+diff --git a/fixtures/test_credentials.json b/fixtures/test_credentials.json
+--- a/fixtures/test_credentials.json
++++ b/fixtures/test_credentials.json
+@@ -0,0 +1,2 @@
++{"token": "ghp_1234567890abcdef1234567890abcdef12"}
+diff --git a/src/secrets.py b/src/secrets.py
+--- a/src/secrets.py
++++ b/src/secrets.py
+@@ -0,0 +1,2 @@
++API_KEY = "AIzaSyA1234567890123456789012345678901"
+EOF
+run_check --dir "$R_SKIP" --diff "$PATCH_SKIP_MULTI" --skip fixtures/test_credentials.json
+check custom-skip-multi-rc "$CODE" 3 "exit 3 on unexempted file despite --skip on other file"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(google_api_key, multi.patch:10)"*)
+    ok custom-skip-multi-status "reported SECRETS_FOUND on non-exempted file" ;;
+  *) bad custom-skip-multi-status "unexpected output: $OUT" ;;
+esac
+
+# --- 24. Brief containing a credential is still refused unaffected ------------
+R_BRIEF_SEC="$(new_repo brief-secret-with-skip)"
+BRIEF_SEC="$R_BRIEF_SEC/brief_sec.md"
+cat > "$BRIEF_SEC" <<'EOF'
+# Task
+Deploy with secret token:
+GITHUB_TOKEN=ghp_1234567890abcdef1234567890abcdef12
+EOF
+run_check --dir "$R_BRIEF_SEC" --brief "$BRIEF_SEC" --skip "brief_sec.md"
+check brief-secret-rc "$CODE" 3 "exit 3 on brief with credential even if --skip specified"
+case "$OUT" in
+  *"STATUS: SECRETS_FOUND(github_token, brief_sec.md:3)"*)
+    ok brief-secret-status "reported SECRETS_FOUND for brief credential" ;;
+  *) bad brief-secret-status "unexpected output: $OUT" ;;
 esac
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

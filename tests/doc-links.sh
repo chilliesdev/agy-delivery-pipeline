@@ -110,7 +110,7 @@ resolve_path() {
   [ -z "$ref" ] && return 1
 
   case "$ref" in
-    *../*|../*)
+    *../*)
       printf '%s' "$doc_dir/$ref"
       return 0
       ;;

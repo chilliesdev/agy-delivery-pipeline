@@ -15,10 +15,11 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$PHASE_SH" ] || { echo "phase-status: phase.sh not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "phase-status: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/phase-status.XXXXXX")"
-trap 'rm -rf "$ROOT"' EXIT INT TERM
+trap 'chmod +x "$HERE/../scripts/check-git-state.sh" 2>/dev/null || true; rm -rf "$ROOT"' EXIT INT TERM
 
 # The stub agy: cwd is the repo agy-run.sh cd'd into. Behaviour comes from the
 # STUB_* environment. `agy models` is answered first and on its own terms — it is
@@ -32,6 +33,9 @@ if [ "${1:-}" = "models" ]; then
   printf 'gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\ngemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n'
   exit 0
 fi
+if [ -n "${STUB_ACTION:-}" ]; then
+  eval "$STUB_ACTION"
+fi
 if [ -f .agy/current ]; then
   CUR_RUN="$(cat .agy/current 2>/dev/null || true)"
   if [ -n "$CUR_RUN" ] && [ -n "${STUB_VERDICT:-}" ]; then
@@ -39,16 +43,27 @@ if [ -f .agy/current ]; then
     printf '%b' "$STUB_VERDICT" > ".agy/runs/$CUR_RUN/phases/$STUB_PHASE/verdict"
   fi
 fi
-[ -n "${STUB_TRANSCRIPT:-}" ] && printf '%b' "$STUB_TRANSCRIPT"
+if [ -n "${STUB_TRANSCRIPT_RAW:-}" ]; then
+  printf '%s\n' "$STUB_TRANSCRIPT_RAW"
+elif [ -n "${STUB_TRANSCRIPT:-}" ]; then
+  printf '%b' "$STUB_TRANSCRIPT"
+fi
 exit "${STUB_RC:-0}"
 STUB_EOF
 chmod +x "$STUB"
 
 PASS=0; FAIL=0
 
-# run_case <name> <expected substring> <transcript> <verdict> <rc> [stale verdict]
+# run_case <name> <expected substring> <transcript> <verdict> <rc> [stale verdict] \
+#          [raw transcript] [want_phase_rc] [extra phase.sh args...]
 run_case() {
-  NAME="$1"; WANT="$2"; TRANSCRIPT="$3"; VERDICT="$4"; WANT_RC="$5"; STALE="${6:-}"
+  NAME="$1"; WANT="$2"; TRANSCRIPT="$3"; VERDICT="$4"; WANT_RC="$5"; STALE="${6:-}"; RAW="${7:-}"; WANT_PHASE_RC="${8:-}"
+  # Anything past the eighth argument is passed through to phase.sh itself.
+  SHIFTED=0
+  while [ $# -gt 0 ] && [ "$SHIFTED" -lt 8 ]; do
+    shift
+    SHIFTED=$((SHIFTED + 1))
+  done
   REPO="$ROOT/repos/$NAME"
   mkdir -p "$REPO"
   ( cd "$REPO" && git init -q . )
@@ -62,9 +77,11 @@ run_case() {
 
   # Bypass brief lint: this suite tests verdict parsing and status extraction;
   # the brief is a stub by design, and brief validity has its own suite.
-  OUT="$(STUB_PHASE=TEST STUB_TRANSCRIPT="$TRANSCRIPT" STUB_VERDICT="$VERDICT" \
-    STUB_RC="$WANT_RC" AGY_BIN="$STUB" \
-    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint 2>/dev/null)"
+  PHASE_RC=0
+  OUT="$(STUB_PHASE=TEST STUB_TRANSCRIPT="$TRANSCRIPT" STUB_TRANSCRIPT_RAW="$RAW" STUB_VERDICT="$VERDICT" \
+    STUB_RC="$WANT_RC" STUB_ACTION="${STUB_ACTION:-}" AGY_BIN="$STUB" \
+    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint ${1+"$@"} 2>/dev/null)" || PHASE_RC=$?
+  CODE=$PHASE_RC
 
   printf '%-28s %s\n' "$NAME" "$OUT"
   case "$OUT" in
@@ -74,6 +91,9 @@ run_case() {
   # The status file must carry exactly what was printed.
   if [ "$(cat "$REPO/.agy/runs/$RUN_ID/phases/TEST/status" 2>/dev/null)" != "$OUT" ]; then
     FAIL=$((FAIL + 1)); printf '%-28s FAIL — R/phases/TEST/status differs from stdout\n' ""
+  fi
+  if [ -n "$WANT_PHASE_RC" ] && [ "$PHASE_RC" -ne "$WANT_PHASE_RC" ]; then
+    FAIL=$((FAIL + 1)); printf '%-28s FAIL — wanted phase.sh exit code %s, got %s\n' "" "$WANT_PHASE_RC" "$PHASE_RC"
   fi
 }
 
@@ -118,6 +138,214 @@ run_case g-stale-verdict \
   'STATUS: FAILED | File: REVIEW_FEEDBACK.md' \
   'retry round\nSTATUS: FAILED | File: REVIEW_FEEDBACK.md\n' '' 0 \
   'STATUS: PASSED | File: STALE.md\n'
+
+# h. a worker writing the impossible verdict to its verdict file: exits 10, collision text intact
+run_case h-impossible-verdict-file \
+  'STATUS: BRIEF_IMPOSSIBLE(requirement A collides with constraint B)' \
+  'investigating codebase...\n' \
+  'STATUS: BRIEF_IMPOSSIBLE(requirement A collides with constraint B)\n' 0 '' '' 10
+
+# i. same impossible verdict via transcript fallback line: exits 10, collision text intact
+run_case i-impossible-transcript \
+  'STATUS: BRIEF_IMPOSSIBLE(cannot modify locked config without violating rule 2)' \
+  'reading brief\nSTATUS: BRIEF_IMPOSSIBLE(cannot modify locked config without violating rule 2)\n' \
+  '' 0 '' '' 10
+
+# j. retry counter is unchanged across an impossible round, and following ordinary dispatch succeeds
+test_impossible_retries() {
+  NAME="j-impossible-retries"
+  REPO="$ROOT/repos/$NAME"
+  mkdir -p "$REPO"
+  ( cd "$REPO" && git init -q . )
+  printf 'do the thing\n' > "$REPO/brief.md"
+
+  RUN_ID="$(run_dir_new --dir "$REPO" --task "$NAME")"
+  RETRY_PATH="$REPO/.agy/runs/$RUN_ID/phases/TEST/retries"
+  mkdir -p "$REPO/.agy/runs/$RUN_ID/phases/TEST"
+
+  # Case j1: When retry counter was absent before dispatch
+  BEFORE_ABSENT="absent"
+  [ -f "$RETRY_PATH" ] && BEFORE_ABSENT="$(cat "$RETRY_PATH")"
+
+  PHASE_RC=0
+  OUT1="$(STUB_PHASE=TEST STUB_TRANSCRIPT="" \
+    STUB_VERDICT="STATUS: BRIEF_IMPOSSIBLE(constraint X blocks requirement Y)\n" \
+    STUB_RC=0 AGY_BIN="$STUB" \
+    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint 2>/dev/null)" || PHASE_RC=$?
+
+  AFTER_ABSENT="absent"
+  [ -f "$RETRY_PATH" ] && AFTER_ABSENT="$(cat "$RETRY_PATH")"
+
+  if [ "$BEFORE_ABSENT" = "$AFTER_ABSENT" ] && [ "$PHASE_RC" -eq 10 ]; then
+    PASS=$((PASS + 1))
+    printf '%-28s %s (exit %s, retries %s -> %s)\n' "$NAME-absent" "$OUT1" "$PHASE_RC" "$BEFORE_ABSENT" "$AFTER_ABSENT"
+  else
+    FAIL=$((FAIL + 1))
+    printf '%-28s FAIL — retries changed or wrong exit: %s -> %s, rc=%s\n' "$NAME-absent" "$BEFORE_ABSENT" "$AFTER_ABSENT" "$PHASE_RC"
+  fi
+
+  # Case j2: When retry counter had 1 retry spent before dispatch
+  printf '1\n' > "$RETRY_PATH"
+  BEFORE_SPENT="$(cat "$RETRY_PATH")"
+
+  PHASE_RC=0
+  OUT2="$(STUB_PHASE=TEST STUB_TRANSCRIPT="" \
+    STUB_VERDICT="STATUS: BRIEF_IMPOSSIBLE(constraint X blocks requirement Y)\n" \
+    STUB_RC=0 AGY_BIN="$STUB" \
+    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint 2>/dev/null)" || PHASE_RC=$?
+
+  AFTER_SPENT="$(cat "$RETRY_PATH" 2>/dev/null || echo "absent")"
+
+  if [ "$BEFORE_SPENT" = "$AFTER_SPENT" ] && [ "$PHASE_RC" -eq 10 ]; then
+    PASS=$((PASS + 1))
+    printf '%-28s %s (exit %s, retries %s -> %s)\n' "$NAME-refund" "$OUT2" "$PHASE_RC" "$BEFORE_SPENT" "$AFTER_SPENT"
+  else
+    FAIL=$((FAIL + 1))
+    printf '%-28s FAIL — retries changed: %s -> %s, rc=%s\n' "$NAME-refund" "$BEFORE_SPENT" "$AFTER_SPENT" "$PHASE_RC"
+  fi
+
+  # Case j3: A following ordinary dispatch is still permitted (with retry-cap 2 and 1 spent, it must not be blocked)
+  PHASE_RC=0
+  OUT3="$(STUB_PHASE=TEST STUB_TRANSCRIPT="" \
+    STUB_VERDICT="STATUS: PASSED | File: CHANGES.md\n" \
+    STUB_RC=0 AGY_BIN="$STUB" \
+    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint --retry-cap 2 2>/dev/null)" || PHASE_RC=$?
+
+  case "$OUT3" in
+    *"STATUS: PASSED | File: CHANGES.md"*)
+      if [ "$PHASE_RC" -eq 0 ]; then
+        PASS=$((PASS + 1))
+        printf '%-28s %s (exit %s)\n' "$NAME-following-pass" "$OUT3" "$PHASE_RC"
+      else
+        FAIL=$((FAIL + 1))
+        printf '%-28s FAIL — following dispatch failed with rc=%s\n' "$NAME-following-pass" "$PHASE_RC"
+      fi
+      ;;
+    *)
+      FAIL=$((FAIL + 1))
+      printf '%-28s FAIL — following dispatch did not pass: %s\n' "$NAME-following-pass" "$OUT3"
+      ;;
+  esac
+}
+test_impossible_retries
+
+# h. worker refused verdict file write, reported ERROR, but printed verdict line
+run_case h-refused-verdict-file \
+  'Note: file route failed; printed route carried the verdict' \
+  '' '' 0 '' \
+  '{"status":"ERROR","response":"Refused to write verdict file to path outside workspace\nSTATUS: PASSED | File: CHANGES.md\n"}'
+
+# h2. assert h-refused-verdict-file produced a passing status line and clean round
+H_REPO="$ROOT/repos/h-refused-verdict-file"
+H_RUN="$(cat "$H_REPO/.agy/current")"
+H_OUT="$(cat "$H_REPO/.agy/runs/$H_RUN/phases/TEST/status" 2>/dev/null || true)"
+case "$H_OUT" in
+  "STATUS: PASSED | File: CHANGES.md"*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); printf '%-28s FAIL — wanted STATUS: PASSED prefix: %s\n' "" "$H_OUT" ;;
+esac
+if [ ! -e "$H_REPO/.agy/runs/$H_RUN/phases/TEST/retries" ]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1)); printf '%-28s FAIL — retries file exists; round was not clean\n' ""
+fi
+
+# i. worker reported ERROR status but wrote verdict file — must NOT carry the note
+run_case i-verdict-file-with-error-status \
+  'STATUS: PASSED | File: CHANGES.md' \
+  '' \
+  'STATUS: PASSED | File: CHANGES.md\n' 0 '' \
+  '{"status":"ERROR","response":"some error occurred\n"}'
+
+I_REPO="$ROOT/repos/i-verdict-file-with-error-status"
+I_OUT="$(cat "$I_REPO"/.agy/runs/*/phases/TEST/status 2>/dev/null || true)"
+case "$I_OUT" in
+  *"Note: file route failed"*) FAIL=$((FAIL + 1)); printf '%-28s FAIL — note must not appear when verdict came from file: %s\n' "" "$I_OUT" ;;
+  *) PASS=$((PASS + 1)) ;;
+esac
+
+# --- --check-git-state ----------------------------------------------------
+
+# h. flag passed, checker non-executable, worker commits: phase fails, status names why, round not clean
+CHECK_SCRIPT="$HERE/../scripts/check-git-state.sh"
+chmod -x "$CHECK_SCRIPT"
+STUB_ACTION='git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "worker commit"' \
+  run_case h-git-state-non-exec \
+  'STATUS: GIT_STATE_CHANGED' \
+  '' '\nSTATUS: PASSED | File: CHANGES.md\n' 0 '' '' '' --check-git-state
+chmod +x "$CHECK_SCRIPT"
+
+if [ "$CODE" -ne 0 ]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf '%-28s FAIL — expected non-zero exit code when checker was non-executable\n' ""
+fi
+RUN_ID_H="$(cat "$ROOT/repos/h-git-state-non-exec/.agy/current" 2>/dev/null || true)"
+if [ -f "$ROOT/repos/h-git-state-non-exec/.agy/runs/$RUN_ID_H/phases/TEST/retries" ]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf '%-28s FAIL — expected retries file to remain (round not clean)\n' ""
+fi
+
+# i. flag passed, worker commits: changed status, non-zero exit, round not clean
+STUB_ACTION='git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "worker commit"' \
+  run_case i-git-state-worker-commits \
+  'STATUS: GIT_STATE_CHANGED' \
+  '' '\nSTATUS: PASSED | File: CHANGES.md\n' 0 '' '' '' --check-git-state
+
+if [ "$CODE" -ne 0 ]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf '%-28s FAIL — expected non-zero exit on git state changed\n' ""
+fi
+RUN_ID_I="$(cat "$ROOT/repos/i-git-state-worker-commits/.agy/current" 2>/dev/null || true)"
+if [ -f "$ROOT/repos/i-git-state-worker-commits/.agy/runs/$RUN_ID_I/phases/TEST/retries" ]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf '%-28s FAIL — expected retries file to remain (round not clean)\n' ""
+fi
+
+# j. flag passed, worker touches nothing: unchanged, clean, exit zero
+run_case j-git-state-unchanged \
+  'STATUS: PASSED | File: CHANGES.md' \
+  '' '\nSTATUS: PASSED | File: CHANGES.md\n' 0 '' '' '' --check-git-state
+
+case "$OUT" in
+  *"GitState: GIT_STATE_UNCHANGED"*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); printf '%-28s FAIL — wanted GitState: GIT_STATE_UNCHANGED in %s\n' "" "$OUT" ;;
+esac
+if [ "$CODE" -eq 0 ]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf '%-28s FAIL — expected exit 0 on clean round\n' ""
+fi
+RUN_ID_J="$(cat "$ROOT/repos/j-git-state-unchanged/.agy/current" 2>/dev/null || true)"
+if [ ! -f "$ROOT/repos/j-git-state-unchanged/.agy/runs/$RUN_ID_J/phases/TEST/retries" ]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf '%-28s FAIL — expected retries file to be cleared on clean round\n' ""
+fi
+
+# k. no flag: no git-state field on the line at all, outcome unchanged
+run_case k-git-state-no-flag \
+  'STATUS: PASSED | File: CHANGES.md' \
+  '' '\nSTATUS: PASSED | File: CHANGES.md\n' 0
+
+case "$OUT" in
+  *GitState:*) FAIL=$((FAIL + 1)); printf '%-28s FAIL — unexpected GitState field: %s\n' "" "$OUT" ;;
+  *) PASS=$((PASS + 1)) ;;
+esac
+if [ "$CODE" -eq 0 ]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf '%-28s FAIL — expected exit 0 without flag\n' ""
+fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

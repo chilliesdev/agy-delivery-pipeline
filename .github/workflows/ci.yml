@@ -35,17 +35,9 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
-      # Staging shellcheck: the scripts have never been linted, nobody knows what
-      # shellcheck says about them yet, and a red build on day one gets muted.
-      # Errors block now, while style/warnings remain advisory and visible.
-      # Issue #39 walks the warnings to zero and then raises the blocking severity
-      # to warning.
-      - name: Run shellcheck (errors - blocking)
-        run: shellcheck -S error scripts/*.sh tests/*.sh drivers/*.sh
-
-      - name: Run shellcheck (style/advisory - non-blocking)
-        continue-on-error: true
-        run: shellcheck -S style scripts/*.sh tests/*.sh drivers/*.sh || true
+      # Shellcheck runs at warning severity, blocking on warnings and errors.
+      - name: Run shellcheck
+        run: shellcheck -S warning scripts/*.sh tests/*.sh drivers/*.sh
 
   manifests:
     name: manifests

@@ -22,7 +22,10 @@
 #      --allow-shell is passed. That flag is the seam for driver-capabilities
 #      work in #23: a backend that permits shell commands makes this rule
 #      unnecessary, and the flag is where that will plug in.
-#   4. Input files exist: every path named as an input exists inside the repo.
+#   4. Input files exist: input paths are verified only when they carry a
+#      directory component (every path named as an input exists inside the repo).
+#      Candidates containing backticks are discarded as prose; trailing line
+#      and column references (:10 or :10:20) are stripped before resolving.
 #   5. No outside paths: no paths outside the repo (~/... or absolute paths
 #      outside --dir) are referenced.
 #   6. Git prohibition: "do not touch git" / "do not commit" is present.
@@ -77,13 +80,31 @@ clean_candidate() {
   printf '%s' "$cand"
 }
 
+strip_line_suffix() {
+  local p="$1"
+  local tail
+  for _ in 1 2; do
+    case "$p" in
+      *:[0-9]*)
+        tail="${p##*:}"
+        case "$tail" in
+          *[!0-9]*) break ;;
+          *) p="${p%:"$tail"}" ;;
+        esac
+        ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$p"
+}
+
 should_discard_path() {
   local cand="$1"
   case "$cand" in
     http://*|https://*|mailto:*|\#*) return 0 ;;
     \~*|\~/*) return 0 ;;
     -*) return 0 ;;
-    *\**|*\?*|*\$*|*\<*|*\>*|*…*|*...*) return 0 ;;
+    *\**|*\?*|*\$*|*\<*|*\>*|*\`*|*…*|*...*) return 0 ;;
   esac
   [ -z "$cand" ] && return 0
 
@@ -177,6 +198,7 @@ TILDE_PATHS="$(grep -a -o -E '(^|[[:space:]`"'\''\(])~[A-Za-z0-9_./+-]*' "$BRIEF
 while IFS= read -r TP; do
   [ -n "$TP" ] || continue
   TP="$(clean_candidate "$TP")"
+  # shellcheck disable=SC2088 # matching literal tilde token from brief
   case "$TP" in
     ""|"~"|"~/"|*\**|*\?*|*\$*|*\<*|*\>*|*…*|*...*) continue ;;
   esac
@@ -319,6 +341,8 @@ fi
 # A bare filename with no directory is a generic mention in prose
 # (e.g. "the SKILL.md files", "a package.json", "your Makefile"), not an
 # assertion that a file exists at the repo root.
+# Tokens containing backticks are treated as prose, not paths.
+# Trailing line references (:10 or :10:20) are stripped before resolving.
 #
 # Classification:
 # 1. A path inside an ## Output Contract section is an output.
@@ -335,7 +359,8 @@ list_contains() {
 
 is_output_context() {
   local ctx=" $1 "
-  local norm=" $(printf '%s' "$ctx" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' ' ' | tr -s ' ') "
+  local norm
+  norm=" $(printf '%s' "$ctx" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' ' ' | tr -s ' ') "
 
   case "$norm" in
     *" create "*|*" creates "*|*" write "*|*" writes "*|*" add "*|*" adds "*|*" new file "*|*" produce "*|*" ship "*|*" generate "*)
@@ -417,7 +442,7 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
     \#*)
       HEADING_TEXT="$(printf '%s' "$LINE" | sed -e 's/^#*[[:space:]]*//' | tr '[:upper:]' '[:lower:]')"
       case "$HEADING_TEXT" in
-        output\ contract*|"output contract"*)
+        "output contract"*)
           IN_OUTPUT_SECTION=1
           ;;
         *)
@@ -468,6 +493,7 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
     if [ -n "$CAND_LIST" ]; then
       for RAW_CAND in $CAND_LIST; do
         CAND="$(clean_candidate "$RAW_CAND")"
+        CAND="$(strip_line_suffix "$CAND")"
         if [ -z "$CAND" ] || should_discard_path "$CAND"; then
           continue
         fi

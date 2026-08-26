@@ -13,6 +13,7 @@ RUN_DIR_SCRIPT="$HERE/../scripts/run-dir.sh"
 [ -f "$RUN_DIR_SCRIPT" ] || { echo "run-dir-test: script not found next door" >&2; exit 2; }
 
 # Source helper for function-level testing
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SCRIPT"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/run-dir-test.XXXXXX")" && pwd)"
@@ -76,7 +77,7 @@ check resolve-last "$RESOLVED_LAST" "$R_SAME/.agy/runs/$ID_B" "resolve last retu
 RESOLVED_EXPLICIT="$(run_dir_resolve --dir "$R_SAME" --run "$ID_A")"
 check resolve-explicit "$RESOLVED_EXPLICIT" "$R_SAME/.agy/runs/$ID_A" "resolve explicit id returns matching directory"
 
-NONEXISTENT_OUT="$(run_dir_resolve --dir "$R_SAME" --run "nonexistent-id" 2>/dev/null)"; CODE=$?
+run_dir_resolve --dir "$R_SAME" --run "nonexistent-id" >/dev/null 2>&1 || CODE=$?
 check resolve-nonexistent-rc "$CODE" 3 "resolve nonexistent id exits 3"
 [ ! -e "$R_SAME/.agy/runs/nonexistent-id" ] && ok resolve-no-create "resolve does not create anything on failure" || bad resolve-no-create "created missing run"
 
@@ -123,7 +124,7 @@ fi
 # --- 7. newline in task is refused -----------------------------------------
 
 R_NL="$(new_repo newline-task)"
-NL_OUT="$(run_dir_new --dir "$R_NL" --task $'task line 1\ntask line 2' 2>/dev/null)"; CODE=$?
+run_dir_new --dir "$R_NL" --task $'task line 1\ntask line 2' >/dev/null 2>&1 || CODE=$?
 check newline-refused-rc "$CODE" 2 "refuses task containing newline with exit 2"
 
 # --- 8. run_dir_record_phase merges without clobbering ---------------------
@@ -176,10 +177,10 @@ check phase-dir-path "$PDIR" "$DIR_REC/phases/REVIEW" "phase directory path matc
 
 NON_GIT="$ROOT/not-a-repo"
 mkdir -p "$NON_GIT"
-NG_OUT="$(run_dir_new --dir "$NON_GIT" 2>/dev/null)"; CODE=$?
+run_dir_new --dir "$NON_GIT" >/dev/null 2>&1 || CODE=$?
 check non-git-new-rc "$CODE" 4 "run_dir_new on non-git dir exits 4"
 
-NG_RES_OUT="$(run_dir_resolve --dir "$NON_GIT" 2>/dev/null)"; CODE=$?
+run_dir_resolve --dir "$NON_GIT" >/dev/null 2>&1 || CODE=$?
 check non-git-resolve-rc "$CODE" 4 "run_dir_resolve on non-git dir exits 4"
 
 # --- 13. CLI execution mode ------------------------------------------------
@@ -222,7 +223,7 @@ else
   bad cli-show-content "CLI show did not output run.json content"
 fi
 
-CLI_BAD_CMD="$(/bin/bash "$RUN_DIR_SCRIPT" bogus --dir "$R_CLI" 2>/dev/null)"; CODE=$?
+/bin/bash "$RUN_DIR_SCRIPT" bogus --dir "$R_CLI" >/dev/null 2>&1 || CODE=$?
 check cli-bad-cmd-rc "$CODE" 2 "CLI unknown command exits 2"
 
 # --- 14. worktree field readability and unknown key refusal -----------------

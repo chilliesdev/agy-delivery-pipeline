@@ -98,7 +98,10 @@ only this file, so everything it needs is in it and nothing else is.
 
 State: **the task**, in enough detail to act on; **the files** it should touch,
 by path, and any it must not; **the constraints** — existing patterns to follow,
-APIs that already exist, what not to invent; and **what done looks like**.
+APIs that already exist, what not to invent; and **what done looks like**. When a
+brief commissions tests, name the function or script the test must call. Reaching
+inside the implementation or reconstructing its logic in the test is a failure of
+the round rather than a way to pass it.
 
 Three rules the brief must carry, each earned by a failure:
 
@@ -115,8 +118,13 @@ Then the verdict contract, verbatim in shape:
 > `.agy/runs/<run-id>/phases/DELEGATE/verdict`, and print that same line as the
 > last line of your output, in the form `STATUS: <verdict> | File: <path>`. Use
 > `STATUS: DONE` if you completed the task, `STATUS: BLOCKED` with the reason
-> if you could not. Never write `.agy/runs/<run-id>/phases/DELEGATE/status` —
-> that file belongs to the tooling.
+> if you could not, or `STATUS: BRIEF_IMPOSSIBLE(<what is in the way>)` if the
+> brief's constraints make its requirement impossible. If the brief's constraints
+> make its requirement impossible, stop **before editing anything**, name the
+> specific constraint and the specific requirement that collide, and return the
+> impossible verdict. That is a successful round. A workaround that satisfies the
+> assertion without satisfying the requirement is not. Never write
+> `.agy/runs/<run-id>/phases/DELEGATE/status` — that file belongs to the tooling.
 
 Both routes, because they are not redundant: the file is authoritative and is
 read first, and the printed line is the fallback for a worker that ignored it.
@@ -170,8 +178,13 @@ single stdout line and should not read the progress channel.
 |---|---|---|
 | `STATUS: DONE …` | the worker finished and the check held | gate it below |
 | `STATUS: BLOCKED …` | it could not proceed | read the reason, then take the work over yourself |
+| `STATUS: BRIEF_IMPOSSIBLE(…)` | constraints and requirement collide | read the collision, fix the brief, re-dispatch — it did not cost a retry |
 | `BRIEF_INVALID(…)` | brief violates contract rules | fix the brief and re-dispatch (zero token cost) |
 | `SECRETS_FOUND(…)` | secret detected in brief or diff | remove secret and re-dispatch (or --no-secret-scan) |
+| `RETRY_CAP_REACHED(…)` | retry budget for this phase is spent | take the work over yourself, or pass --reset-retries to start a fresh cycle |
+| `BUDGET_EXCEEDED(…)` | token budget for this run is spent | increase --budget-tokens to continue, or inspect spend with report.sh |
+| `REPO_BUDGET_EXCEEDED(…)` | repository token budget is spent | increase --repo-budget-tokens to continue, or inspect spend with report.sh |
+| `WORKER_CAP_EXCEEDED(…)` | concurrent worker cap reached | wait for a running dispatch to finish, or increase --max-workers to continue |
 | `VERIFY_FAILED(rc=N)` | it claimed success; the tests disagree | read `VerifyLog:`, then fix it yourself or re-brief once |
 | `WORKER_FAILED(rc=N)` | agy died | check the brief path and the criteria, then retry once |
 | `PREFLIGHT_FAILED(…)` | setup broke mid-session | report the cause, do the work yourself |

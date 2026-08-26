@@ -5,7 +5,7 @@
 #            [--dir <repo>] [--run <id|current|new>] [--task <string>]
 #            [--mode accept-edits|plan|full] [--timeout 30m]
 #            [--sandbox] [--no-preflight] [--no-brief-lint] [--no-secret-scan]
-#            [--no-diff-integrity]
+#            [--no-diff-integrity] [--check-git-state]
 #            [--allow-shell] [--verify '<command>'] [--retry-cap <n>]
 #            [--budget-tokens <n>] [--repo-budget-tokens <n>] [--max-workers <n>]
 #            [--reset-retries] [--ignore-via gitignore|exclude]
@@ -22,6 +22,15 @@
 # result into that one line. It overrides the worker: a PASSED claim whose check
 # exits non-zero comes back as STATUS: VERIFY_FAILED(rc=N), exit 5 — distinct
 # from WORKER_FAILED, which is the worker itself dying.
+#
+# A worker verdict of STATUS: BRIEF_IMPOSSIBLE(<what is in the way>) returns
+# exit 10. The parenthesised text names the collision between the brief's
+# requirements and constraints. This is a clean outcome: it does not consume a
+# retry, refunding the round so the retry counter is left unchanged.
+#
+# --check-git-state snapshots git state (HEAD, tags, refs) before dispatch and
+# compares after return via check-git-state.sh, failing the phase on any changes.
+# The flag is a request, and an unfulfilled request is not a pass.
 #
 # The retry counter is mechanical: each dispatch beyond the first bumps
 # R/phases/<PHASE>/retries, and past --retry-cap (default 2, matching SKILL.md)
@@ -170,6 +179,7 @@ SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
 SKIP_BRIEF_LINT="${AGY_SKIP_BRIEF_LINT:-}"
 SKIP_SECRET_SCAN="${AGY_SKIP_SECRET_SCAN:-}"
 SKIP_DIFF_INTEGRITY="${AGY_SKIP_DIFF_INTEGRITY:-}"
+CHECK_GIT_STATE="${AGY_CHECK_GIT_STATE:-}"
 ALLOW_SHELL="${AGY_ALLOW_SHELL:-}"
 VERIFY=""; RESET_RETRIES=""; IGNORE_VIA="gitignore"
 RETRY_CAP="${AGY_RETRY_CAP:-2}"
@@ -203,6 +213,7 @@ while [ $# -gt 0 ]; do
     --no-brief-lint) SKIP_BRIEF_LINT=1; shift ;;
     --no-secret-scan) SKIP_SECRET_SCAN=1; shift ;;
     --no-diff-integrity) SKIP_DIFF_INTEGRITY=1; shift ;;
+    --check-git-state) CHECK_GIT_STATE=1; shift ;;
     --allow-shell) ALLOW_SHELL=1; shift ;;
     --quiet|-q)    QUIET=1; shift ;;
     -h|--help)     sed -n '2,68p' "$0"; exit 0 ;;
@@ -379,6 +390,7 @@ if [ -z "$DRIVER_PATH" ] || [ ! -f "$DRIVER_PATH" ]; then
   exit 2
 fi
 
+# shellcheck source=../drivers/agy.sh
 . "$DRIVER_PATH"
 
 if ! command -v driver_run >/dev/null 2>&1 || ! command -v driver_capabilities >/dev/null 2>&1; then
@@ -820,6 +832,14 @@ if [ -z "$SKIP_DIFF_INTEGRITY" ]; then
   fi
 fi
 
+GIT_STATE_BEFORE=""
+GIT_STATE_SNAP_RC=0
+if [ -n "$CHECK_GIT_STATE" ]; then
+  GIT_STATE_BEFORE="$PHASE_DIR/git_state_before.txt"
+  /bin/bash "$HERE/check-git-state.sh" snapshot --dir "$DIR" --out "$GIT_STATE_BEFORE" >/dev/null 2>&1
+  GIT_STATE_SNAP_RC=$?
+fi
+
 START_EPOCH=$(date +%s)
 
 MONITOR_PID=""
@@ -937,16 +957,24 @@ fi
 # line, no transcript involved. Fallback: the last transcript line that *starts*
 # with STATUS:, so prose like "I will end with STATUS: PASSED" cannot match.
 CLAIM=""
+VERDICT_ROUTE=""
 if [ -s "$VERDICT_FILE" ]; then
   CLAIM="$(strip_ansi < "$VERDICT_FILE" 2>/dev/null | awk 'NF { print; exit }' | trim_claim)"
+  [ -n "$CLAIM" ] && VERDICT_ROUTE="file"
 fi
 if [ -z "$CLAIM" ] && [ -f "$LOG" ]; then
   CLAIM="$(strip_ansi < "$LOG" 2>/dev/null \
     | grep -a -E '^[[:space:]*#>_`-]*STATUS:' | tail -1 | trim_claim)"
+  [ -n "$CLAIM" ] && VERDICT_ROUTE="print"
 fi
 case "$CLAIM" in
   ""|STATUS:*) ;;
   *) CLAIM="STATUS: $CLAIM" ;;   # a verdict file that omitted the marker
+esac
+
+IS_IMPOSSIBLE=0
+case "$CLAIM" in
+  STATUS:\ BRIEF_IMPOSSIBLE*|BRIEF_IMPOSSIBLE*) IS_IMPOSSIBLE=1 ;;
 esac
 
 # The gate SKILL.md asks the orchestrator to run by hand, run here instead. It
@@ -956,12 +984,36 @@ esac
 # refused: there is no work to check. Output goes to its own log and never to
 # stdout, which belongs to the STATUS line alone.
 VRC=0
-if [ -n "$VERIFY" ] && [ "$RC" -eq 0 ]; then
+if [ -n "$VERIFY" ] && [ "$RC" -eq 0 ] && [ "$IS_IMPOSSIBLE" -eq 0 ]; then
   printf -- '--- phase.sh: verify %s ---\n$ %s\n' "$PHASE" "$VERIFY" > "$VERIFY_LOG" 2>/dev/null
   # No pipe here on purpose: $? is the check's own code, not a tee's.
   ( cd "$DIR" && /bin/bash -c "$VERIFY" ) >> "$VERIFY_LOG" 2>&1
   VRC=$?
   printf -- '--- phase.sh: verify rc=%s ---\n' "$VRC" >> "$VERIFY_LOG" 2>/dev/null
+fi
+
+# Run git state check if requested
+GIT_STATE_FIELD=""
+GIT_STATE_RC=0
+GIT_STATE_STATUS=""
+
+if [ -n "$CHECK_GIT_STATE" ]; then
+  if [ -n "$GIT_STATE_BEFORE" ] && [ -f "$GIT_STATE_BEFORE" ] && [ "$GIT_STATE_SNAP_RC" -eq 0 ]; then
+    GIT_STATE_OUT="$(/bin/bash "$HERE/check-git-state.sh" compare --dir "$DIR" --before "$GIT_STATE_BEFORE" 2>/dev/null)"
+    GIT_STATE_RC=$?
+    GIT_STATE_STATUS="$(printf '%s\n' "$GIT_STATE_OUT" | sed -e 's/^STATUS:[[:space:]]*//' -e 's/[[:space:]]*|.*//')"
+    if [ -z "$GIT_STATE_STATUS" ]; then
+      GIT_STATE_STATUS="GIT_STATE_UNCHECKED(empty_output)"
+      [ "$GIT_STATE_RC" -eq 0 ] && GIT_STATE_RC=2
+    elif [ "$GIT_STATE_RC" -ne 0 ] && [ "$GIT_STATE_STATUS" = "GIT_STATE_UNCHANGED" ]; then
+      GIT_STATE_STATUS="GIT_STATE_UNCHECKED(rc=$GIT_STATE_RC)"
+    fi
+    GIT_STATE_FIELD=" | GitState: $GIT_STATE_STATUS"
+  else
+    GIT_STATE_STATUS="GIT_STATE_UNCHECKED(no_snapshot)"
+    GIT_STATE_RC=2
+    GIT_STATE_FIELD=" | GitState: $GIT_STATE_STATUS"
+  fi
 fi
 
 # Run diff integrity check over the changes the worker made
@@ -974,7 +1026,7 @@ elif [ "$RC" -eq 0 ]; then
   if [ -n "$TREE_BEFORE" ]; then
     DISPATCH_PATCH="$PHASE_DIR/DISPATCH_DIFF.patch"
     DISPATCH_STAT="$PHASE_DIR/DISPATCH_DIFF.stat"
-    CAPTURE_OUT="$("$HERE/capture-diff.sh" --dir "$DIR" --base "$TREE_BEFORE" --into "$PHASE_DIR" --name "DISPATCH_DIFF" 2>/dev/null)"
+    "$HERE/capture-diff.sh" --dir "$DIR" --base "$TREE_BEFORE" --into "$PHASE_DIR" --name "DISPATCH_DIFF" >/dev/null 2>&1
     CAPTURE_RC=$?
     if [ "$CAPTURE_RC" -eq 0 ] || [ "$CAPTURE_RC" -eq 3 ]; then
       INTEGRITY_OUT="$("$HERE/check-diff-integrity.sh" --dir "$DIR" --patch "$DISPATCH_PATCH" --stat "$DISPATCH_STAT" --brief "$PHASE_DIR/brief.md" 2>/dev/null)"
@@ -992,12 +1044,24 @@ elif [ "$RC" -eq 0 ]; then
   fi
 fi
 
+# Diff integrity field or skip
+VERDICT_ROUTE_FIELD=""
+if [ "$VERDICT_ROUTE" = "print" ] && [ -n "$CLAIM" ]; then
+  case "$(printf '%s' "$AGY_STATUS_VAL" | tr '[:lower:]' '[:upper:]')" in
+    ERROR*)
+      VERDICT_ROUTE_FIELD=" | Note: file route failed; printed route carried the verdict"
+      ;;
+  esac
+fi
+
 # Trust the claim only as a claim — the orchestrator still verifies the artifacts
 # on disk. rc=0 with no claim at all is not a failure and not a pass; say so.
 if [ "$RC" -ne 0 ]; then
   LINE="STATUS: WORKER_FAILED(rc=$RC) | Phase: $PHASE | Run: $RUN_ID | Next: check the brief path and the criteria, then retry once | Log: $LOG"
 elif [ -n "$VERIFY" ] && [ "$VRC" -ne 0 ]; then
   LINE="STATUS: VERIFY_FAILED(rc=$VRC) | Phase: $PHASE | Run: $RUN_ID | Claimed: ${CLAIM:-none} | Next: read the verify log named on this line, then fix or re-brief once | Log: $LOG | VerifyLog: $VERIFY_LOG"
+elif [ -n "$CHECK_GIT_STATE" ] && [ "$GIT_STATE_RC" -ne 0 ]; then
+  LINE="STATUS: $GIT_STATE_STATUS | Phase: $PHASE | Run: $RUN_ID | Claimed: ${CLAIM:-none} | Next: git state changed during phase execution — inspect git status | Log: $LOG"
 elif [ -n "$CLAIM" ]; then
   LINE="$CLAIM | Phase: $PHASE | Run: $RUN_ID | Log: $LOG"
 else
@@ -1008,11 +1072,11 @@ fi
 if [ -n "$VERIFY" ] && [ "$VRC" -eq 0 ] && [ "$RC" -eq 0 ]; then
   LINE="$LINE | Verify: ok | VerifyLog: $VERIFY_LOG"
 fi
-LINE="$LINE$INTEGRITY_FIELD$FALLBACK_FIELD$JSON_FALLBACK_FIELD$SECRETS_FIELD$GITIGNORE_FIELD"
+LINE="$LINE$GIT_STATE_FIELD$INTEGRITY_FIELD$FALLBACK_FIELD$JSON_FALLBACK_FIELD$SECRETS_FIELD$VERDICT_ROUTE_FIELD$GITIGNORE_FIELD"
 
 # Record the phase outcome in run.json
-FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | awk '{print $1}')"
-FINAL_VERDICT="$(printf '%s' "${CLAIM#STATUS: }" | awk '{print $1}')"
+FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | sed -e 's/[[:space:]]*|.*//')"
+FINAL_VERDICT="$(printf '%s' "${CLAIM#STATUS: }" | sed -e 's/[[:space:]]*|.*//')"
 run_dir_record_phase "$R" "$PHASE" "status=$FINAL_STATUS" "verdict=${FINAL_VERDICT:-$FINAL_STATUS}" "attempts=$((SPENT + 1))"
 
 # A round that ends clean ends the cycle, so the next one starts from zero
@@ -1021,7 +1085,7 @@ run_dir_record_phase "$R" "$PHASE" "status=$FINAL_STATUS" "verdict=${FINAL_VERDI
 # every phase uses for "I could not". NO_STATUS_REPORTED is not clean: it is
 # unresolved, and an unresolved round is exactly what the cap is counting.
 CLEAN=0
-if [ "$RC" -eq 0 ] && [ "$VRC" -eq 0 ] && [ "$INTEGRITY_RC" -eq 0 ] && [ -n "$CLAIM" ]; then
+if [ "$RC" -eq 0 ] && [ "$VRC" -eq 0 ] && [ "$GIT_STATE_RC" -eq 0 ] && [ "$INTEGRITY_RC" -eq 0 ] && [ -n "$CLAIM" ]; then
   WORD="$(printf '%s' "${CLAIM#STATUS: }" | awk '{print $1}' \
     | tr -d '|' | tr '[:lower:]' '[:upper:]')"
   case "$WORD" in
@@ -1046,7 +1110,7 @@ fi
 # user's ^C reaches phase.sh with the worker, phase.sh dies here and never
 # reaches this line, so the retry it wrote before dispatching stands. Only a
 # worker that returned a non-zero code to a phase.sh still running is refunded.
-if [ "$RC" -ne 0 ]; then
+if [ "$RC" -ne 0 ] || [ "$IS_IMPOSSIBLE" -eq 1 ]; then
   if [ -n "$HAD_COUNTER" ]; then
     printf '%s\n' "$SPENT" > "$RETRY_FILE" 2>/dev/null
   else
@@ -1076,13 +1140,21 @@ if [ -n "$FINAL_VERDICT" ]; then
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verdict=$FINAL_VERDICT")
 fi
 
+if [ -n "$VERDICT_ROUTE" ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verdict_route=$VERDICT_ROUTE")
+fi
+
 if [ -n "$VERIFY" ] && [ "$RC" -eq 0 ]; then
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verify_ran=true" "verify_rc=$VRC")
 else
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verify_ran=false")
 fi
 
-if [ "$RC" -ne 0 ]; then
+if [ -n "$CHECK_GIT_STATE" ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "git_state_ran=true" "git_state_rc=$GIT_STATE_RC")
+fi
+
+if [ "$RC" -ne 0 ] || [ "$IS_IMPOSSIBLE" -eq 1 ]; then
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "retries_refunded=1")
 else
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "retries_refunded=0")
@@ -1116,6 +1188,8 @@ ledger_append "$DIR" "${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" 2>/dev/null || echo
 
 printf '%s\n' "$LINE" | tee "$STATUS_FILE"
 [ "$RC" -eq 0 ] || exit "$RC"
+[ "$IS_IMPOSSIBLE" -eq 0 ] || exit 10
 [ "$VRC" -eq 0 ] || exit 5
+[ "$GIT_STATE_RC" -eq 0 ] || exit "$GIT_STATE_RC"
 [ "$INTEGRITY_RC" -eq 0 ] || exit "$INTEGRITY_RC"
 exit 0

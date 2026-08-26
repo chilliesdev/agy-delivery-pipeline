@@ -15,6 +15,7 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$CHECK" ] || { echo "check-review-test: script not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "check-review-test: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/check-review.XXXXXX")" && pwd)"
@@ -45,7 +46,8 @@ new_case() {
 # feedback <repo> — write REVIEW_FEEDBACK.md in current run directory from stdin.
 feedback() {
   local r="$1"
-  local id="$(cat "$r/.agy/current" 2>/dev/null)"
+  local id
+  id="$(cat "$r/.agy/current" 2>/dev/null)"
   cat > "$r/.agy/runs/$id/REVIEW_FEEDBACK.md"
 }
 

@@ -21,12 +21,12 @@ CHECK_RANGE="$ROOT/scripts/check-phase-range.sh"
 CHECK_TEST_CMD="$ROOT/scripts/check-test-command.sh"
 WATCH_RUN="$ROOT/scripts/watch-run.sh"
 RUN_DIR_SH="$ROOT/scripts/run-dir.sh"
-LEDGER_SH="$ROOT/scripts/ledger.sh"
 
 [ -f "$PHASE_SH" ] || { echo "progress-test: scripts/phase.sh not found" >&2; exit 2; }
 [ -f "$WATCH_RUN" ] || { echo "progress-test: scripts/watch-run.sh not found" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "progress-test: scripts/run-dir.sh not found" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/progress-test.XXXXXX")"

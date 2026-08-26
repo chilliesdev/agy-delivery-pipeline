@@ -22,6 +22,7 @@ RUN_DIR_SH="$ROOT/scripts/run-dir.sh"
 [ -f "$CHECK_BRIEF" ] || { echo "driver-test: scripts/check-brief.sh not found" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "driver-test: scripts/run-dir.sh not found" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/driver-test.XXXXXX")"
@@ -49,6 +50,7 @@ new_repo() {
 
 # --- 1. agy driver capabilities reporting ------------------------------------
 
+# shellcheck source=../drivers/agy.sh
 . "$AGY_DRIVER"
 
 CAPS="$(driver_capabilities)"
@@ -174,8 +176,8 @@ Write verdict to .agy/runs/RUN_ID/phases/TEST/verdict and print that same line a
 EOF
 
 ERR_UNKNOWN="$SCRATCH/unknown_driver.err"
-OUT_UNKNOWN="$(AGY_BIN="$STUB_AGY" "$PHASE_SH" --phase TEST --brief "$BRIEF_UNKNOWN" --dir "$R_UNKNOWN" \
-  --driver nonexistent_driver_xyz --no-preflight 2>"$ERR_UNKNOWN")" || RC_UNKNOWN=$?
+AGY_BIN="$STUB_AGY" "$PHASE_SH" --phase TEST --brief "$BRIEF_UNKNOWN" --dir "$R_UNKNOWN" \
+  --driver nonexistent_driver_xyz --no-preflight >/dev/null 2>"$ERR_UNKNOWN" || RC_UNKNOWN=$?
 RC_UNKNOWN="${RC_UNKNOWN:-0}"
 
 check unknown-driver-rc "$RC_UNKNOWN" 2 "unknown --driver exits with code 2"

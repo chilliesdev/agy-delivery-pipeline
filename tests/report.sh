@@ -6,6 +6,8 @@
 # 4. Malformed input: non-JSON lines, truncated JSON, missing required fields
 # 5. Pricing and cost calculation: --price-in and --price-out formatting
 # 6. Multi-run aggregation, verify overrides, and CLI error handling
+# 7. Worker Error and Printed Fallback Counts
+# 8. Gate Firing Counts and Never-Fired Gates
 #
 #   tests/report.sh
 #
@@ -20,6 +22,7 @@ LEDGER_SH="$HERE/../scripts/ledger.sh"
 [ -f "$REPORT_SH" ] || { echo "report-test: report.sh not found next door" >&2; exit 2; }
 [ -f "$LEDGER_SH" ] || { echo "report-test: ledger.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/ledger.sh
 . "$LEDGER_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/report-test.XXXXXX")" && pwd)"
@@ -44,11 +47,11 @@ new_repo() {
 R_COL="$(new_repo col-integrity)"
 mkdir -p "$R_COL/.agy"
 
-# Record with distinct, identifiable values in every single field of the 15-field TSV:
+# Record with distinct, identifiable values in every single field of the 17-field TSV:
 # 1:run=r-col-integ, 2:phase=CUSTOMPHASE, 3:attempt=2, 4:status=PASSED, 5:elapsed_s=42,
 # 6:verdict="STATUS: PASSED | File: x.txt", 7:verify_ran=true, 8:started=2026-08-25T11:22:33Z,
 # 9:input_tokens=111, 10:output_tokens=222, 11:thinking_tokens=333, 12:total_tokens=666,
-# 13:retries_refunded=0, 14:has_usage=1, 15:issue=888
+# 13:retries_refunded=0, 14:has_usage=1, 15:issue=888, 16:agy_status=SUCCESS, 17:verdict_route=file
 ledger_append "$R_COL" \
   run=r-col-integ \
   phase=CUSTOMPHASE \
@@ -60,12 +63,14 @@ ledger_append "$R_COL" \
   elapsed_s=42 \
   worker_rc=0 \
   verdict="STATUS: PASSED | File: x.txt" \
+  verdict_route=file \
   verify_ran=true \
   verify_rc=0 \
   status=PASSED \
   retries_spent=0 \
   retries_refunded=0 \
   issue=888 \
+  agy_status=SUCCESS \
   usage='{"input_tokens":111,"output_tokens":222,"thinking_tokens":333,"cache_read_tokens":0,"total_tokens":666}'
 
 REPORT_COL="$(bash "$REPORT_SH" --dir "$R_COL")"
@@ -457,6 +462,270 @@ check cli-non-git "${RC_NON_GIT:-0}" 4 "non-git dir exits 4"
 
 bash "$REPORT_SH" --bogus-arg >/dev/null 2>&1 || RC_BAD_ARG=$?
 check cli-bad-arg "${RC_BAD_ARG:-0}" 2 "unknown arg exits 2"
+
+
+# =============================================================================
+# 7. Worker Error and Printed Fallback Counts
+# =============================================================================
+
+R_COUNTS="$(new_repo worker-error-and-printed-fallback)"
+mkdir -p "$R_COUNTS/.agy"
+
+# Record 1: clean run with file route (verdict_route=file, agy_status=SUCCESS)
+ledger_append "$R_COUNTS" run=run-1 phase=IMPLEMENT attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:00:00Z elapsed_s=10 worker_rc=0 verdict=PASSED verdict_route=file verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 agy_status=SUCCESS
+
+# Record 2: worker error with printed route (verdict_route=print, agy_status=ERROR)
+ledger_append "$R_COUNTS" run=run-2 phase=IMPLEMENT attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:05:00Z elapsed_s=12 worker_rc=0 verdict=PASSED verdict_route=print verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 agy_status=ERROR
+
+# Record 3: worker error with file route (verdict_route=file, agy_status=ERROR)
+ledger_append "$R_COUNTS" run=run-3 phase=REVIEW attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:10:00Z elapsed_s=8 worker_rc=0 verdict=PASSED verdict_route=file verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 agy_status=ERROR
+
+# Record 4: clean worker with printed fallback route (verdict_route=print, agy_status=SUCCESS)
+ledger_append "$R_COUNTS" run=run-4 phase=QA attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:15:00Z elapsed_s=6 worker_rc=0 verdict=PASSED verdict_route=print verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 agy_status=SUCCESS
+
+REPORT_COUNTS="$(bash "$REPORT_SH" --dir "$R_COUNTS")"; RC_COUNTS=$?
+check report-counts-rc "$RC_COUNTS" 0 "report.sh exits 0 on counts fixture"
+
+if printf '%s\n' "$REPORT_COUNTS" | grep -q "Worker error dispatches:[[:space:]]*2"; then
+  ok report-worker-errors-counted "worker error dispatches counted accurately (2)"
+else
+  bad report-worker-errors-counted "worker error dispatches count unexpected: $REPORT_COUNTS"
+fi
+
+if printf '%s\n' "$REPORT_COUNTS" | grep -q "Printed fallback dispatches:[[:space:]]*2"; then
+  ok report-printed-fallbacks-counted "printed fallback dispatches counted accurately (2)"
+else
+  bad report-printed-fallbacks-counted "printed fallback dispatches count unexpected: $REPORT_COUNTS"
+fi
+
+# Zero reporting: ledger with neither worker error nor printed fallback reports zero rather than omitting
+R_ZERO="$(new_repo counts-zero)"
+mkdir -p "$R_ZERO/.agy"
+ledger_append "$R_ZERO" run=run-z phase=IMPLEMENT attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:00:00Z elapsed_s=5 worker_rc=0 verdict=PASSED verdict_route=file verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 agy_status=SUCCESS
+
+REPORT_ZERO="$(bash "$REPORT_SH" --dir "$R_ZERO")"
+
+if printf '%s\n' "$REPORT_ZERO" | grep -q "Worker error dispatches:[[:space:]]*0"; then
+  ok report-worker-errors-zero "worker error dispatches reports 0 when none present"
+else
+  bad report-worker-errors-zero "worker error dispatches missing or not 0: $REPORT_ZERO"
+fi
+
+if printf '%s\n' "$REPORT_ZERO" | grep -q "Printed fallback dispatches:[[:space:]]*0"; then
+  ok report-printed-fallbacks-zero "printed fallback dispatches reports 0 when none present"
+else
+  bad report-printed-fallbacks-zero "printed fallback dispatches missing or not 0: $REPORT_ZERO"
+fi
+
+
+# =============================================================================
+# 8. Gate Firing Counts and Never-Fired Gates
+# =============================================================================
+
+# 8.1 All gates fired: fixture containing at least one record for each gate
+R_ALL_GATES="$(new_repo all-gates)"
+mkdir -p "$R_ALL_GATES/.agy"
+
+ledger_append "$R_ALL_GATES" run=run-1 phase=PHASE1 attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:00:00Z elapsed_s=10 worker_rc=0 verdict=PASSED verify_ran=true verify_rc=1 status='VERIFY_FAILED(rc=1)' \
+  retries_spent=0 retries_refunded=0
+
+ledger_append "$R_ALL_GATES" run=run-2 phase=PHASE2 attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:05:00Z elapsed_s=10 worker_rc=0 verdict=PASSED verify_ran=false status='DIFF_TESTS_WEAKENED(test_foo.py)' \
+  retries_spent=0 retries_refunded=0
+
+ledger_append "$R_ALL_GATES" run=run-3 phase=PHASE3 attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:10:00Z elapsed_s=10 worker_rc=0 verdict=PASSED verify_ran=false status='DIFF_SUSPICIOUS(rm -rf)' \
+  retries_spent=0 retries_refunded=0
+
+ledger_append "$R_ALL_GATES" run=run-4 phase=PHASE4 attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:15:00Z elapsed_s=10 worker_rc=0 verdict=FAILED verify_ran=false status='SECRETS_FOUND(api_key)' \
+  retries_spent=0 retries_refunded=0
+
+ledger_append "$R_ALL_GATES" run=run-5 phase=PHASE5 attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:20:00Z elapsed_s=10 worker_rc=0 verdict=FAILED verify_ran=false status='BRIEF_INVALID(missing_verdict)' \
+  retries_spent=0 retries_refunded=0
+
+ledger_append "$R_ALL_GATES" run=run-6 phase=PHASE6 attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:25:00Z elapsed_s=10 worker_rc=0 verdict='' verify_ran=false status=NO_STATUS_REPORTED \
+  retries_spent=0 retries_refunded=0
+
+ledger_append "$R_ALL_GATES" run=run-7 phase=PHASE7 attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:30:00Z elapsed_s=10 worker_rc=0 verdict=FAILED verify_ran=false status='RETRY_CAP_REACHED(n=2, cap=2)' \
+  retries_spent=2 retries_refunded=0
+
+ledger_append "$R_ALL_GATES" run=run-8 phase=PHASE8 attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:35:00Z elapsed_s=10 worker_rc=0 verdict='STATUS: BRIEF_IMPOSSIBLE(conflict)' verify_ran=false status='BRIEF_IMPOSSIBLE(conflict)' \
+  retries_spent=0 retries_refunded=1
+
+ledger_append "$R_ALL_GATES" run=run-9 phase=PHASE9 attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:40:00Z elapsed_s=10 worker_rc=0 verdict=FAILED verify_ran=false status='GIT_STATE_CHANGED(head)' \
+  retries_spent=0 retries_refunded=0
+
+REPORT_ALL="$(bash "$REPORT_SH" --dir "$R_ALL_GATES")"; RC_ALL=$?
+check gate-all-rc "$RC_ALL" 0 "report.sh exits 0 on all-gates fixture"
+
+for gate_label in \
+  "Verify gate overrides:[[:space:]]*1" \
+  "Diff tests weakened:[[:space:]]*1" \
+  "Diff suspicious:[[:space:]]*1" \
+  "Secrets found:[[:space:]]*1" \
+  "Brief invalid:[[:space:]]*1" \
+  "No status reported dispatches:[[:space:]]*1" \
+  "Retry cap reached:[[:space:]]*1" \
+  "Brief impossible:[[:space:]]*1" \
+  "Git state changed:[[:space:]]*1"; do
+  if printf '%s\n' "$REPORT_ALL" | grep -q "$gate_label"; then
+    ok "gate-count-${gate_label%%:*}" "$gate_label accurately counted as 1"
+  else
+    bad "gate-count-${gate_label%%:*}" "expected count 1 for $gate_label: $REPORT_ALL"
+  fi
+done
+
+# When all gates fired, none should be listed under Never-Fired Gates
+NEVER_SECTION_ALL="$(printf '%s\n' "$REPORT_ALL" | sed -n '/Never-Fired Gates:/,/Data Integrity:/p')"
+if ! printf '%s\n' "$NEVER_SECTION_ALL" | grep -q -E -- '- (Verify gate overrides|Diff tests weakened|Diff suspicious|Secrets found|Brief invalid|No status reported|Retry cap reached|Brief impossible|Git state changed)'; then
+  ok gate-all-none-never-fired "no gates listed under never-fired heading when all fired"
+else
+  bad gate-all-none-never-fired "gates unexpectedly listed under never-fired: $NEVER_SECTION_ALL"
+fi
+
+# 8.2 None of them fired: fixture containing none of the gate statuses
+R_NO_GATES="$(new_repo no-gates)"
+mkdir -p "$R_NO_GATES/.agy"
+
+ledger_append "$R_NO_GATES" run=run-1 phase=IMPLEMENT attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:00:00Z elapsed_s=10 worker_rc=0 verdict=PASSED verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0
+
+REPORT_NONE="$(bash "$REPORT_SH" --dir "$R_NO_GATES")"; RC_NONE=$?
+check gate-none-rc "$RC_NONE" 0 "report.sh exits 0 on no-gates fixture"
+
+NEVER_SECTION_NONE="$(printf '%s\n' "$REPORT_NONE" | sed -n '/Never-Fired Gates:/,/Data Integrity:/p')"
+if printf '%s\n' "$NEVER_SECTION_NONE" | grep -q "This gate has never fired — either nothing has triggered it yet, or it is dead code."; then
+  ok gate-none-expl-line "never-fired section carries explanation line"
+else
+  bad gate-none-expl-line "never-fired explanation line missing: $NEVER_SECTION_NONE"
+fi
+
+for gate_name in \
+  "Verify gate overrides" \
+  "Diff tests weakened" \
+  "Diff suspicious" \
+  "Secrets found" \
+  "Brief invalid" \
+  "No status reported dispatches" \
+  "Retry cap reached" \
+  "Brief impossible" \
+  "Git state changed"; do
+  if printf '%s\n' "$NEVER_SECTION_NONE" | grep -q -- "- $gate_name"; then
+    ok "gate-none-listed-${gate_name// /-}" "$gate_name listed under never-fired heading"
+  else
+    bad "gate-none-listed-${gate_name// /-}" "$gate_name missing from never-fired: $NEVER_SECTION_NONE"
+  fi
+done
+
+# 8.3 Mixed fixture: exactly absent ones under never-fired heading and no others
+R_MIXED="$(new_repo mixed-gates)"
+mkdir -p "$R_MIXED/.agy"
+
+# Fired gates: VERIFY_FAILED, SECRETS_FOUND, RETRY_CAP_REACHED
+ledger_append "$R_MIXED" run=run-1 phase=IMPLEMENT attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:00:00Z elapsed_s=10 worker_rc=0 verdict=PASSED verify_ran=true verify_rc=1 status='VERIFY_FAILED(rc=1)' \
+  retries_spent=0 retries_refunded=0
+
+ledger_append "$R_MIXED" run=run-2 phase=REVIEW attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:05:00Z elapsed_s=5 worker_rc=0 verdict=FAILED verify_ran=false status='SECRETS_FOUND(token)' \
+  retries_spent=0 retries_refunded=0
+
+ledger_append "$R_MIXED" run=run-3 phase=QA attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:10:00Z elapsed_s=8 worker_rc=0 verdict=FAILED verify_ran=false status='RETRY_CAP_REACHED(n=2, cap=2)' \
+  retries_spent=2 retries_refunded=0
+
+REPORT_MIXED="$(bash "$REPORT_SH" --dir "$R_MIXED")"; RC_MIXED=$?
+check gate-mixed-rc "$RC_MIXED" 0 "report.sh exits 0 on mixed fixture"
+
+NEVER_SECTION_MIXED="$(printf '%s\n' "$REPORT_MIXED" | sed -n '/Never-Fired Gates:/,/Data Integrity:/p')"
+
+# Fired gates must NOT be in never-fired
+for fired_gate in "Verify gate overrides" "Secrets found" "Retry cap reached"; do
+  if ! printf '%s\n' "$NEVER_SECTION_MIXED" | grep -q -- "- $fired_gate"; then
+    ok "gate-mixed-fired-omitted-${fired_gate// /-}" "fired gate $fired_gate omitted from never-fired"
+  else
+    bad "gate-mixed-fired-omitted-${fired_gate// /-}" "fired gate $fired_gate unexpectedly in never-fired: $NEVER_SECTION_MIXED"
+  fi
+done
+
+# Absent gates MUST be in never-fired
+for absent_gate in \
+  "Diff tests weakened" \
+  "Diff suspicious" \
+  "Brief invalid" \
+  "No status reported dispatches" \
+  "Brief impossible" \
+  "Git state changed"; do
+  if printf '%s\n' "$NEVER_SECTION_MIXED" | grep -q -- "- $absent_gate"; then
+    ok "gate-mixed-absent-listed-${absent_gate// /-}" "absent gate $absent_gate listed in never-fired"
+  else
+    bad "gate-mixed-absent-listed-${absent_gate// /-}" "absent gate $absent_gate missing from never-fired: $NEVER_SECTION_MIXED"
+  fi
+done
+
+# 8.4 Filters narrow gate counts
+R_FILT_GATES="$(new_repo filt-gates)"
+mkdir -p "$R_FILT_GATES/.agy"
+
+ledger_append "$R_FILT_GATES" run=run-1 phase=IMPLEMENT attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T08:00:00Z elapsed_s=10 worker_rc=0 verdict=PASSED verify_ran=true verify_rc=1 status='VERIFY_FAILED(rc=1)' \
+  retries_spent=0 retries_refunded=0
+
+ledger_append "$R_FILT_GATES" run=run-2 phase=REVIEW attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T09:00:00Z elapsed_s=5 worker_rc=0 verdict=FAILED verify_ran=false status='SECRETS_FOUND(key)' \
+  retries_spent=0 retries_refunded=0
+
+ledger_append "$R_FILT_GATES" run=run-2 phase=QA attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T11:00:00Z elapsed_s=8 worker_rc=0 verdict=FAILED verify_ran=false status='BRIEF_INVALID(empty)' \
+  retries_spent=0 retries_refunded=0
+
+# Filter by --phase IMPLEMENT
+REP_FILT_PH="$(bash "$REPORT_SH" --dir "$R_FILT_GATES" --phase IMPLEMENT)"
+if printf '%s\n' "$REP_FILT_PH" | grep -q "Verify gate overrides:[[:space:]]*1" && \
+   printf '%s\n' "$REP_FILT_PH" | grep -q "Secrets found:[[:space:]]*0" && \
+   printf '%s\n' "$REP_FILT_PH" | grep -q "Brief invalid:[[:space:]]*0"; then
+  ok gate-filt-phase "--phase narrows gate firing counts"
+else
+  bad gate-filt-phase "--phase gate counts unexpected: $REP_FILT_PH"
+fi
+
+# Filter by --run run-2
+REP_FILT_RN="$(bash "$REPORT_SH" --dir "$R_FILT_GATES" --run run-2)"
+if printf '%s\n' "$REP_FILT_RN" | grep -q "Verify gate overrides:[[:space:]]*0" && \
+   printf '%s\n' "$REP_FILT_RN" | grep -q "Secrets found:[[:space:]]*1" && \
+   printf '%s\n' "$REP_FILT_RN" | grep -q "Brief invalid:[[:space:]]*1"; then
+  ok gate-filt-run "--run narrows gate firing counts"
+else
+  bad gate-filt-run "--run gate counts unexpected: $REP_FILT_RN"
+fi
+
+# Filter by --since
+REP_FILT_SN="$(bash "$REPORT_SH" --dir "$R_FILT_GATES" --since 2026-08-25T10:00:00Z)"
+if printf '%s\n' "$REP_FILT_SN" | grep -q "Verify gate overrides:[[:space:]]*0" && \
+   printf '%s\n' "$REP_FILT_SN" | grep -q "Secrets found:[[:space:]]*0" && \
+   printf '%s\n' "$REP_FILT_SN" | grep -q "Brief invalid:[[:space:]]*1"; then
+  ok gate-filt-since "--since narrows gate firing counts"
+else
+  bad gate-filt-since "--since gate counts unexpected: $REP_FILT_SN"
+fi
 
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

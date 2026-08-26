@@ -18,6 +18,7 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$PHASE_SH" ] || { echo "check-brief-test: phase.sh not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "check-brief-test: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/check-brief.XXXXXX")" && pwd)"
@@ -34,7 +35,7 @@ new_repo() {
   local r="$ROOT/repos/$name"
   mkdir -p "$r"
   ( cd "$r" && git init -q . )
-  local run_id="$(run_dir_new --dir "$r" --task "brief test $name")"
+  run_dir_new --dir "$r" --task "brief test $name" >/dev/null
   printf '%s' "$r"
 }
 
@@ -361,6 +362,180 @@ case "$OUT" in
   *"STATUS: BRIEF_VALID"*"input_paths (1 checked, 1 output skipped)"*)
     ok input-and-output-counts-status "reported BRIEF_VALID with 1 checked, 1 output skipped" ;;
   *) bad input-and-output-counts-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4j: Bare filenames in prose without backticks (Issue #48) ---------
+REPO="$(new_repo bare-filenames-prose)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Examine README.md and Makefile for general patterns and structure.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check bare-filenames-prose-rc "$CODE" 0 "exit 0 when brief names bare filenames in prose"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok bare-filenames-prose-status "reported BRIEF_VALID for bare filenames in prose" ;;
+  *) bad bare-filenames-prose-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4k: Existing path under docs directory is accepted ----------------
+REPO="$(new_repo existing-docs-path)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+mkdir -p "$REPO/docs"
+touch "$REPO/docs/architecture.md"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Follow design in docs/architecture.md.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check existing-docs-path-rc "$CODE" 0 "exit 0 when path under docs directory exists"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok existing-docs-path-status "reported BRIEF_VALID for existing path under docs" ;;
+  *) bad existing-docs-path-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4l: Nonexistent root-level path in ./ form is refused --------------
+REPO="$(new_repo missing-dot-slash-path)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Read ./nonexistent-root-file.md before proceeding.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check missing-dot-slash-rc "$CODE" 3 "exit 3 when nonexistent root file uses ./ form"
+case "$OUT" in
+  *"STATUS: BRIEF_INVALID(missing_input_file:./nonexistent-root-file.md)"*)
+    ok missing-dot-slash-status "reported missing_input_file for nonexistent ./ root file" ;;
+  *) bad missing-dot-slash-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4m: Slash-joined backticked words in prose are accepted (Issue #73) -
+REPO="$(new_repo slash-joined-backticks)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Use \`helper_a\`/\`helper_b\`/\`helper_c\` to coordinate the pipeline.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check slash-joined-backticks-rc "$CODE" 0 "exit 0 when prose joins three backticked words with slashes"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok slash-joined-backticks-status "reported BRIEF_VALID for slash-joined backticked words" ;;
+  *) bad slash-joined-backticks-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4n: Diagnostic line for existing file with line:column suffix (Issue #73) -
+REPO="$(new_repo diagnostic-existing)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+mkdir -p "$REPO/src"
+touch "$REPO/src/parser.sh"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Fix the issue reported by the linter:
+src/parser.sh:42:15: error: unquoted expansion
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check diagnostic-existing-rc "$CODE" 0 "exit 0 when diagnostic names existing file with line:column"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok diagnostic-existing-status "reported BRIEF_VALID for existing file diagnostic line" ;;
+  *) bad diagnostic-existing-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4o: Diagnostic line for nonexistent file with line:column suffix (Issue #73) -
+REPO="$(new_repo diagnostic-nonexistent)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Fix the issue reported by the linter:
+src/nonexistent.sh:10:5: error: syntax error
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check diagnostic-nonexistent-rc "$CODE" 3 "exit 3 when diagnostic names nonexistent file"
+case "$OUT" in
+  *"STATUS: BRIEF_INVALID(missing_input_file:src/nonexistent.sh)"*)
+    ok diagnostic-nonexistent-status "reported missing_input_file with stripped suffix for nonexistent file" ;;
+  *) bad diagnostic-nonexistent-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4p: Nonexistent path with no suffix is refused (Issue #73) ---------
+REPO="$(new_repo missing-path-no-suffix)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Read src/missing-module.sh before starting.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check missing-path-no-suffix-rc "$CODE" 3 "exit 3 when nonexistent path has no suffix"
+case "$OUT" in
+  *"STATUS: BRIEF_INVALID(missing_input_file:src/missing-module.sh)"*)
+    ok missing-path-no-suffix-status "reported missing_input_file for nonexistent path with no suffix" ;;
+  *) bad missing-path-no-suffix-status "unexpected output: $OUT" ;;
 esac
 
 # --- Check 5: Path outside repository (~/.claude/something) -----------------
@@ -719,7 +894,7 @@ esac
 
 # 2. phase.sh dispatches anyway under --no-brief-lint
 rm -f "$INVOKED_FILE"
-PHASE_OUT_BYPASS="$(STUB_PHASE=IMPLEMENT AGY_BIN="$STUB" "$PHASE_SH" --phase IMPLEMENT --brief "$INVALID_BRIEF" --dir "$REPO_P1" --run "$RUN_ID_P1" --no-brief-lint 2>/dev/null)"
+STUB_PHASE=IMPLEMENT AGY_BIN="$STUB" "$PHASE_SH" --phase IMPLEMENT --brief "$INVALID_BRIEF" --dir "$REPO_P1" --run "$RUN_ID_P1" --no-brief-lint >/dev/null 2>&1
 PHASE_RC_BYPASS=$?
 
 check phase-bypass-rc "$PHASE_RC_BYPASS" 0 "phase.sh exits 0 under --no-brief-lint"

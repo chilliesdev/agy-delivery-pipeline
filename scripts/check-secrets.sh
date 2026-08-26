@@ -3,7 +3,7 @@
 #
 #   check-secrets.sh [--brief <file>] [--diff <file>] [--patch <file>]
 #                    [--file <file>] [--dir <repo>] [--run <id|current|last>]
-#                    [--phase <NAME>]
+#                    [--phase <NAME>] [--skip <path>]
 #
 # Reads:   <brief>                       the brief about to be dispatched
 #          <diff> | <patch>              the unified diff about to be reviewed
@@ -37,6 +37,7 @@ DIR="$PWD"
 BRIEF=""
 DIFF=""
 FILES=()
+SKIP_PATHS=("scripts/check-secrets.sh" "tests/check-secrets.sh")
 PHASE=""
 RUN_TARGET=""
 
@@ -45,16 +46,53 @@ while [ $# -gt 0 ]; do
     --brief)       BRIEF="$2"; shift 2 ;;
     --diff|--patch) DIFF="$2"; shift 2 ;;
     --file)        FILES[${#FILES[@]}]="$2"; shift 2 ;;
+    --skip)        SKIP_PATHS[${#SKIP_PATHS[@]}]="$2"; shift 2 ;;
     --dir)         DIR="$2"; shift 2 ;;
     --run)         RUN_TARGET="$2"; shift 2 ;;
     --phase)       PHASE="$2"; shift 2 ;;
-    -h|--help)     sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,31p' "$0"; exit 0 ;;
     *) echo "check-secrets: unknown arg $1" >&2; exit 2 ;;
   esac
 done
 
 [ -d "$DIR" ] || { echo "check-secrets: dir not found: $DIR" >&2; exit 2; }
 DIR="$(cd "$DIR" && pwd)"
+
+normalize_path() {
+  local p="$1"
+  case "$p" in
+    "$DIR"/*) p="${p#$DIR/}" ;;
+  esac
+  case "$p" in
+    ./*) p="${p#./}" ;;
+  esac
+  printf '%s' "$p"
+}
+
+UNIQUE_SKIPS=()
+for P in "${SKIP_PATHS[@]}"; do
+  NORM_P="$(normalize_path "$P")"
+  [ -n "$NORM_P" ] || continue
+  ALREADY=0
+  for U in "${UNIQUE_SKIPS[@]+"${UNIQUE_SKIPS[@]}"}"; do
+    if [ "$U" = "$NORM_P" ]; then
+      ALREADY=1
+      break
+    fi
+  done
+  if [ "$ALREADY" -eq 0 ]; then
+    UNIQUE_SKIPS[${#UNIQUE_SKIPS[@]}]="$NORM_P"
+  fi
+done
+
+SKIPPED_STR=""
+for U in "${UNIQUE_SKIPS[@]+"${UNIQUE_SKIPS[@]}"}"; do
+  if [ -z "$SKIPPED_STR" ]; then
+    SKIPPED_STR="$U"
+  else
+    SKIPPED_STR="$SKIPPED_STR, $U"
+  fi
+done
 
 RUN_ID=""
 if [ -n "$RUN_TARGET" ]; then
@@ -71,31 +109,35 @@ elif [ -n "$PHASE" ]; then
 fi
 
 # Collect candidate files
-SCANNED_FILES=()
+SCANNED_BRIEFS=()
+SCANNED_DIFFS=()
+SCANNED_OTHER=()
 
 if [ -n "$BRIEF" ]; then
   [ -f "$BRIEF" ] || { echo "check-secrets: brief not found: $BRIEF" >&2; exit 2; }
-  SCANNED_FILES[${#SCANNED_FILES[@]}]="$BRIEF"
+  SCANNED_BRIEFS[${#SCANNED_BRIEFS[@]}]="$BRIEF"
 fi
 
 if [ -n "$DIFF" ]; then
   [ -f "$DIFF" ] || { echo "check-secrets: diff not found: $DIFF" >&2; exit 2; }
-  SCANNED_FILES[${#SCANNED_FILES[@]}]="$DIFF"
+  SCANNED_DIFFS[${#SCANNED_DIFFS[@]}]="$DIFF"
 elif [ -n "${R:-}" ] && [ -f "$R/REVIEW_DIFF.patch" ]; then
-  SCANNED_FILES[${#SCANNED_FILES[@]}]="$R/REVIEW_DIFF.patch"
+  SCANNED_DIFFS[${#SCANNED_DIFFS[@]}]="$R/REVIEW_DIFF.patch"
 fi
 
 for F in "${FILES[@]+"${FILES[@]}"}"; do
   [ -f "$F" ] || { echo "check-secrets: file not found: $F" >&2; exit 2; }
-  SCANNED_FILES[${#SCANNED_FILES[@]}]="$F"
+  SCANNED_OTHER[${#SCANNED_OTHER[@]}]="$F"
 done
+
+TOTAL_FILES=$(( ${#SCANNED_BRIEFS[@]} + ${#SCANNED_DIFFS[@]} + ${#SCANNED_OTHER[@]} ))
 
 RUN_FIELD=""
 [ -n "$RUN_ID" ] && RUN_FIELD=" | Run: $RUN_ID"
 PHASE_FIELD=""
 [ -n "$PHASE" ] && PHASE_FIELD=" | Phase: $PHASE"
 
-if [ ${#SCANNED_FILES[@]} -eq 0 ]; then
+if [ "$TOTAL_FILES" -eq 0 ]; then
   printf '%s\n' "STATUS: SECRETS_UNCHECKED(no_files_scanned)$PHASE_FIELD$RUN_FIELD | Note: no brief or diff files were supplied to scan"
   exit 0
 fi
@@ -105,9 +147,6 @@ is_private_key() {
   local line="$1"
   case "$line" in
     *"-----BEGIN "*"PRIVATE KEY"*) return 0 ;;
-    *"-----BEGIN PRIVATE KEY"*) return 0 ;;
-    *"-----BEGIN PGP PRIVATE KEY BLOCK"*) return 0 ;;
-    *"-----BEGIN ENCRYPTED PRIVATE KEY"*) return 0 ;;
   esac
   return 1
 }
@@ -260,7 +299,7 @@ is_env_secret() {
   var_upper="$(printf '%s' "$var_name" | tr '[:lower:]' '[:upper:]')"
 
   case "$var_upper" in
-    *KEY*|*SECRET*|*PASSWORD*|*PASSWD*|*TOKEN*|*AUTH*|*CREDENTIAL*|*PRIVATE*|*APIKEY*|*API_KEY*|*ACCESS_TOKEN*|*PRIVATE_KEY*|*CLIENT_SECRET*|*DATABASE_URL*|*DB_PASS*|*DB_PASSWORD*|*WEBHOOK_URL*)
+    *KEY*|*SECRET*|*PASSWORD*|*PASSWD*|*TOKEN*|*AUTH*|*CREDENTIAL*|*PRIVATE*|*DATABASE_URL*|*DB_PASS*|*WEBHOOK_URL*)
       ;;
     *)
       return 1
@@ -323,13 +362,13 @@ is_env_secret() {
     *placeholder*|*example*|*dummy*|*sample*|*fake*|*mock*|*todo*|*fixme*|*default*)
       return 1
       ;;
-    *xxxx*|*000000*|*0000*|*123456*|*12345678*)
+    *xxxx*|*0000*|*123456*)
       return 1
       ;;
     testpassword|mysecret|my_secret|secret123|admin|root|guest|user)
       return 1
       ;;
-    my_*|insert_*|test_*|sample_*|dummy_*|demo_*|mock_*)
+    my_*|insert_*|test_*|demo_*)
       return 1
       ;;
     *_here|*_value|*_key|*_token|*_secret|*_password)
@@ -368,11 +407,50 @@ is_env_secret() {
   return 0
 }
 
+check_line_secret() {
+  local line="$1"
+  local in_fence="$2"
+  local is_fence_line="$3"
+
+  if is_private_key "$line"; then
+    FOUND_WHAT="private_key"
+    return 0
+  fi
+
+  if is_aws_key "$line"; then
+    FOUND_WHAT="aws_access_key"
+    return 0
+  fi
+
+  if is_github_token "$line"; then
+    FOUND_WHAT="github_token"
+    return 0
+  fi
+
+  if is_slack_token "$line"; then
+    FOUND_WHAT="slack_token"
+    return 0
+  fi
+
+  if is_google_key "$line"; then
+    FOUND_WHAT="google_api_key"
+    return 0
+  fi
+
+  if [ "$in_fence" -eq 0 ] && [ "$is_fence_line" -eq 0 ] && is_env_secret "$line"; then
+    FOUND_WHAT="env_secret"
+    return 0
+  fi
+
+  return 1
+}
+
 FOUND_WHAT=""
 FOUND_FILE=""
 FOUND_LINE=0
 
-for FILE in "${SCANNED_FILES[@]}"; do
+# Scan briefs
+for FILE in "${SCANNED_BRIEFS[@]+"${SCANNED_BRIEFS[@]}"}"; do
   [ -f "$FILE" ] || continue
   LINE_NUM=0
   IN_FENCE=0
@@ -396,49 +474,158 @@ for FILE in "${SCANNED_FILES[@]}"; do
         ;;
     esac
 
-    if is_private_key "$LINE"; then
-      FOUND_WHAT="private_key"
-      FOUND_FILE="$FILE"
-      FOUND_LINE="$LINE_NUM"
-      break 2
-    fi
-
-    if is_aws_key "$LINE"; then
-      FOUND_WHAT="aws_access_key"
-      FOUND_FILE="$FILE"
-      FOUND_LINE="$LINE_NUM"
-      break 2
-    fi
-
-    if is_github_token "$LINE"; then
-      FOUND_WHAT="github_token"
-      FOUND_FILE="$FILE"
-      FOUND_LINE="$LINE_NUM"
-      break 2
-    fi
-
-    if is_slack_token "$LINE"; then
-      FOUND_WHAT="slack_token"
-      FOUND_FILE="$FILE"
-      FOUND_LINE="$LINE_NUM"
-      break 2
-    fi
-
-    if is_google_key "$LINE"; then
-      FOUND_WHAT="google_api_key"
-      FOUND_FILE="$FILE"
-      FOUND_LINE="$LINE_NUM"
-      break 2
-    fi
-
-    if [ "$IN_FENCE" -eq 0 ] && [ "$IS_FENCE_LINE" -eq 0 ] && is_env_secret "$LINE"; then
-      FOUND_WHAT="env_secret"
+    if check_line_secret "$LINE" "$IN_FENCE" "$IS_FENCE_LINE"; then
       FOUND_FILE="$FILE"
       FOUND_LINE="$LINE_NUM"
       break 2
     fi
   done < "$FILE"
 done
+
+# Scan diffs (with file-level skipping)
+if [ -z "$FOUND_WHAT" ]; then
+  for FILE in "${SCANNED_DIFFS[@]+"${SCANNED_DIFFS[@]}"}"; do
+    [ -f "$FILE" ] || continue
+    LINE_NUM=0
+    IN_FENCE=0
+    CURRENT_DIFF_FILE=""
+    CANDIDATE_OLD_FILE=""
+    CURRENT_FILE_SKIPPED=0
+
+    while IFS= read -r LINE || [ -n "$LINE" ]; do
+      LINE_NUM=$((LINE_NUM + 1))
+
+      FILE_HEADER_SEEN=0
+      case "$LINE" in
+        "diff --git "*)
+          FILE_HEADER_SEEN=1
+          dpath="${LINE#diff --git }"
+          case "$dpath" in
+            *" b/"*)
+              bpath="${dpath##* b/}"
+              if [ "$bpath" != "/dev/null" ] && [ "$bpath" != "dev/null" ]; then
+                CURRENT_DIFF_FILE="$bpath"
+              else
+                apath="${dpath% b/*}"
+                case "$apath" in
+                  a/*) apath="${apath#a/}" ;;
+                esac
+                CURRENT_DIFF_FILE="$apath"
+              fi
+              ;;
+            *)
+              CURRENT_DIFF_FILE=""
+              ;;
+          esac
+          ;;
+        "--- "*)
+          FILE_HEADER_SEEN=1
+          old_target="${LINE#--- }"
+          old_target="${old_target%%	*}"
+          old_target="${old_target%% *}"
+          case "$old_target" in
+            a/*) old_target="${old_target#a/}" ;;
+          esac
+          if [ "$old_target" != "/dev/null" ]; then
+            CANDIDATE_OLD_FILE="$old_target"
+            if [ -z "$CURRENT_DIFF_FILE" ]; then
+              CURRENT_DIFF_FILE="$old_target"
+            fi
+          fi
+          ;;
+        "+++ "*)
+          FILE_HEADER_SEEN=1
+          new_target="${LINE#+++ }"
+          new_target="${new_target%%	*}"
+          new_target="${new_target%% *}"
+          case "$new_target" in
+            b/*) new_target="${new_target#b/}" ;;
+          esac
+          if [ "$new_target" != "/dev/null" ]; then
+            CURRENT_DIFF_FILE="$new_target"
+          elif [ -n "$CANDIDATE_OLD_FILE" ]; then
+            CURRENT_DIFF_FILE="$CANDIDATE_OLD_FILE"
+          fi
+          ;;
+      esac
+
+      if [ "$FILE_HEADER_SEEN" -eq 1 ]; then
+        CURRENT_FILE_SKIPPED=0
+        if [ -n "$CURRENT_DIFF_FILE" ]; then
+          NORM_DIFF_FILE="$(normalize_path "$CURRENT_DIFF_FILE")"
+          for S in "${UNIQUE_SKIPS[@]+"${UNIQUE_SKIPS[@]}"}"; do
+            if [ "$NORM_DIFF_FILE" = "$S" ]; then
+              CURRENT_FILE_SKIPPED=1
+              break
+            fi
+          done
+        fi
+      fi
+
+      if [ "$CURRENT_FILE_SKIPPED" -eq 1 ]; then
+        continue
+      fi
+
+      STRIP_DIFF="$LINE"
+      case "$STRIP_DIFF" in
+        +*|-*) STRIP_DIFF="${STRIP_DIFF#?}" ;;
+      esac
+      TRIM_DIFF="$(printf '%s' "$STRIP_DIFF" | sed -e 's/^[[:space:]]*//')"
+      IS_FENCE_LINE=0
+      case "$TRIM_DIFF" in
+        '```'*|'~~~'*)
+          IS_FENCE_LINE=1
+          if [ "$IN_FENCE" -eq 1 ]; then
+            IN_FENCE=0
+          else
+            IN_FENCE=1
+          fi
+          ;;
+      esac
+
+      if check_line_secret "$LINE" "$IN_FENCE" "$IS_FENCE_LINE"; then
+        FOUND_FILE="$FILE"
+        FOUND_LINE="$LINE_NUM"
+        break 2
+      fi
+    done < "$FILE"
+  done
+fi
+
+# Scan other files
+if [ -z "$FOUND_WHAT" ]; then
+  for FILE in "${SCANNED_OTHER[@]+"${SCANNED_OTHER[@]}"}"; do
+    [ -f "$FILE" ] || continue
+    LINE_NUM=0
+    IN_FENCE=0
+    while IFS= read -r LINE || [ -n "$LINE" ]; do
+      LINE_NUM=$((LINE_NUM + 1))
+
+      STRIP_DIFF="$LINE"
+      case "$STRIP_DIFF" in
+        +*|-*) STRIP_DIFF="${STRIP_DIFF#?}" ;;
+      esac
+      TRIM_DIFF="$(printf '%s' "$STRIP_DIFF" | sed -e 's/^[[:space:]]*//')"
+      IS_FENCE_LINE=0
+      case "$TRIM_DIFF" in
+        '```'*|'~~~'*)
+          IS_FENCE_LINE=1
+          if [ "$IN_FENCE" -eq 1 ]; then
+            IN_FENCE=0
+          else
+            IN_FENCE=1
+          fi
+          ;;
+      esac
+
+      if check_line_secret "$LINE" "$IN_FENCE" "$IS_FENCE_LINE"; then
+        FOUND_FILE="$FILE"
+        FOUND_LINE="$LINE_NUM"
+        break 2
+      fi
+    done < "$FILE"
+  done
+fi
 
 if [ -n "$FOUND_WHAT" ]; then
   REL_FILE="$FOUND_FILE"
@@ -449,6 +636,11 @@ if [ -n "$FOUND_WHAT" ]; then
   exit 3
 fi
 
+SKIPPED_FIELD=""
+if [ ${#SCANNED_DIFFS[@]} -gt 0 ] && [ -n "$SKIPPED_STR" ]; then
+  SKIPPED_FIELD=" | Skipped: $SKIPPED_STR"
+fi
+
 CHECKS_LIST="private_key, aws_access_key, github_token, slack_token, google_api_key, env_secret"
-printf '%s\n' "STATUS: SECRETS_NONE | Checks: $CHECKS_LIST$PHASE_FIELD$RUN_FIELD"
+printf '%s\n' "STATUS: SECRETS_NONE | Checks: $CHECKS_LIST$SKIPPED_FIELD$PHASE_FIELD$RUN_FIELD"
 exit 0
