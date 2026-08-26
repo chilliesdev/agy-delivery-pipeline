@@ -22,7 +22,8 @@
 #      --allow-shell is passed. That flag is the seam for driver-capabilities
 #      work in #23: a backend that permits shell commands makes this rule
 #      unnecessary, and the flag is where that will plug in.
-#   4. Input files exist: every path named as an input exists inside the repo.
+#   4. Input files exist: input paths are verified only when they carry a
+#      directory component (every path named as an input exists inside the repo).
 #   5. No outside paths: no paths outside the repo (~/... or absolute paths
 #      outside --dir) are referenced.
 #   6. Git prohibition: "do not touch git" / "do not commit" is present.

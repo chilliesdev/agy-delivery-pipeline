@@ -363,6 +363,80 @@ case "$OUT" in
   *) bad input-and-output-counts-status "unexpected output: $OUT" ;;
 esac
 
+# --- Check 4j: Bare filenames in prose without backticks (Issue #48) ---------
+REPO="$(new_repo bare-filenames-prose)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Examine README.md and Makefile for general patterns and structure.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check bare-filenames-prose-rc "$CODE" 0 "exit 0 when brief names bare filenames in prose"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok bare-filenames-prose-status "reported BRIEF_VALID for bare filenames in prose" ;;
+  *) bad bare-filenames-prose-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4k: Existing path under docs directory is accepted ----------------
+REPO="$(new_repo existing-docs-path)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+mkdir -p "$REPO/docs"
+touch "$REPO/docs/architecture.md"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Follow design in docs/architecture.md.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check existing-docs-path-rc "$CODE" 0 "exit 0 when path under docs directory exists"
+case "$OUT" in
+  *"STATUS: BRIEF_VALID"*)
+    ok existing-docs-path-status "reported BRIEF_VALID for existing path under docs" ;;
+  *) bad existing-docs-path-status "unexpected output: $OUT" ;;
+esac
+
+# --- Check 4l: Nonexistent root-level path in ./ form is refused --------------
+REPO="$(new_repo missing-dot-slash-path)"
+RUN_ID="$(cat "$REPO/.agy/current")"
+BRIEF="$REPO/brief.md"
+cat > "$BRIEF" <<EOF
+# Phase 1: Implementation
+Read ./nonexistent-root-file.md before proceeding.
+
+Rules:
+- Do not run shell commands.
+- Do not touch git.
+
+Output Contract:
+Write your verdict to .agy/runs/$RUN_ID/phases/IMPLEMENT/verdict and print that same line as the last line of your output in the form STATUS: DONE | File: CHANGES.md.
+EOF
+
+run_check "$REPO" "IMPLEMENT" "$BRIEF" --run "$RUN_ID"
+check missing-dot-slash-rc "$CODE" 3 "exit 3 when nonexistent root file uses ./ form"
+case "$OUT" in
+  *"STATUS: BRIEF_INVALID(missing_input_file:./nonexistent-root-file.md)"*)
+    ok missing-dot-slash-status "reported missing_input_file for nonexistent ./ root file" ;;
+  *) bad missing-dot-slash-status "unexpected output: $OUT" ;;
+esac
+
 # --- Check 5: Path outside repository (~/.claude/something) -----------------
 REPO="$(new_repo outside-tilde)"
 RUN_ID="$(cat "$REPO/.agy/current")"
