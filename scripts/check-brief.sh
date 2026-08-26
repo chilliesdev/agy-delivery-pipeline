@@ -178,6 +178,7 @@ TILDE_PATHS="$(grep -a -o -E '(^|[[:space:]`"'\''\(])~[A-Za-z0-9_./+-]*' "$BRIEF
 while IFS= read -r TP; do
   [ -n "$TP" ] || continue
   TP="$(clean_candidate "$TP")"
+  # shellcheck disable=SC2088 # matching literal tilde token from brief
   case "$TP" in
     ""|"~"|"~/"|*\**|*\?*|*\$*|*\<*|*\>*|*…*|*...*) continue ;;
   esac
@@ -336,7 +337,8 @@ list_contains() {
 
 is_output_context() {
   local ctx=" $1 "
-  local norm=" $(printf '%s' "$ctx" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' ' ' | tr -s ' ') "
+  local norm
+  norm=" $(printf '%s' "$ctx" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' ' ' | tr -s ' ') "
 
   case "$norm" in
     *" create "*|*" creates "*|*" write "*|*" writes "*|*" add "*|*" adds "*|*" new file "*|*" produce "*|*" ship "*|*" generate "*)
@@ -418,7 +420,7 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
     \#*)
       HEADING_TEXT="$(printf '%s' "$LINE" | sed -e 's/^#*[[:space:]]*//' | tr '[:upper:]' '[:lower:]')"
       case "$HEADING_TEXT" in
-        output\ contract*|"output contract"*)
+        "output contract"*)
           IN_OUTPUT_SECTION=1
           ;;
         *)

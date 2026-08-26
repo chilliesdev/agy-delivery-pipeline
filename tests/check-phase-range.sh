@@ -13,6 +13,7 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$CHECK" ] || { echo "check-phase-range: script not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "check-phase-range: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/check-range.XXXXXX")"
@@ -30,7 +31,8 @@ new_repo() {
   local r="$ROOT/$name"
   mkdir -p "$r"
   ( cd "$r" && git init -q . )
-  local run_id="$(run_dir_new --dir "$r" --task "range test $name")"
+  local run_id
+  run_id="$(run_dir_new --dir "$r" --task "range test $name")"
   local run_dir="$r/.agy/runs/$run_id"
   for a in "$@"; do
     printf 'content\n' > "$run_dir/$a"

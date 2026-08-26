@@ -16,7 +16,9 @@ LEDGER_SH="$HERE/../scripts/ledger.sh"
 [ -f "$RUN_DIR_SH" ] || { echo "run-summary-test: scripts/run-dir.sh not found" >&2; exit 2; }
 [ -f "$LEDGER_SH" ] || { echo "run-summary-test: scripts/ledger.sh not found" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
+# shellcheck source=../scripts/ledger.sh
 . "$LEDGER_SH"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/run-summary-test.XXXXXX")"
@@ -40,7 +42,6 @@ STUB_EOF
 chmod +x "$STUB_GH"
 
 export STUB_GH_TRIGGER="$ROOT/gh_was_executed"
-ORIG_PATH="$PATH"
 export PATH="$BIN_DIR:$PATH"
 
 new_repo() {
@@ -54,7 +55,8 @@ new_repo() {
 
 pdir() {
   local repo="$1"
-  local id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
+  local id
+  id="$(cat "$repo/.agy/current" 2>/dev/null || true)"
   [ -n "$id" ] && printf '%s/.agy/runs/%s' "$repo" "$id"
 }
 

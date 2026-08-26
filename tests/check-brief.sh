@@ -18,6 +18,7 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$PHASE_SH" ] || { echo "check-brief-test: phase.sh not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "check-brief-test: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/check-brief.XXXXXX")" && pwd)"
@@ -34,7 +35,7 @@ new_repo() {
   local r="$ROOT/repos/$name"
   mkdir -p "$r"
   ( cd "$r" && git init -q . )
-  local run_id="$(run_dir_new --dir "$r" --task "brief test $name")"
+  run_dir_new --dir "$r" --task "brief test $name" >/dev/null
   printf '%s' "$r"
 }
 
@@ -793,7 +794,7 @@ esac
 
 # 2. phase.sh dispatches anyway under --no-brief-lint
 rm -f "$INVOKED_FILE"
-PHASE_OUT_BYPASS="$(STUB_PHASE=IMPLEMENT AGY_BIN="$STUB" "$PHASE_SH" --phase IMPLEMENT --brief "$INVALID_BRIEF" --dir "$REPO_P1" --run "$RUN_ID_P1" --no-brief-lint 2>/dev/null)"
+STUB_PHASE=IMPLEMENT AGY_BIN="$STUB" "$PHASE_SH" --phase IMPLEMENT --brief "$INVALID_BRIEF" --dir "$REPO_P1" --run "$RUN_ID_P1" --no-brief-lint >/dev/null 2>&1
 PHASE_RC_BYPASS=$?
 
 check phase-bypass-rc "$PHASE_RC_BYPASS" 0 "phase.sh exits 0 under --no-brief-lint"

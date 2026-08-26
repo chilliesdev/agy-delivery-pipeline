@@ -12,10 +12,10 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE="$HERE/../scripts/resolve-criteria.sh"
 RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
-VENDORED="$HERE/../criteria"
 [ -f "$RESOLVE" ] || { echo "criteria-packs-test: script not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "criteria-packs-test: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/criteria-packs.XXXXXX")" && pwd)"

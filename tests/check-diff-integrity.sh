@@ -15,6 +15,7 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$CHECK" ] || { echo "check-diff-integrity-test: script not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "check-diff-integrity-test: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/check-diff-integrity.XXXXXX")" && pwd)"
@@ -30,7 +31,8 @@ new_case() {
   local name="$1"
   local r="$ROOT/cases/$name"; mkdir -p "$r"
   ( cd "$r" && git init -q . )
-  local id="$(run_dir_new --dir "$r" --task "diff integrity test $name")"
+  local id
+  id="$(run_dir_new --dir "$r" --task "diff integrity test $name")"
   local rdir="$r/.agy/runs/$id"
   mkdir -p "$rdir/phases/IMPLEMENT"
   printf '%s' "$r"
@@ -38,13 +40,15 @@ new_case() {
 
 set_patch() {
   local r="$1"
-  local id="$(cat "$r/.agy/current" 2>/dev/null)"
+  local id
+  id="$(cat "$r/.agy/current" 2>/dev/null)"
   cat > "$r/.agy/runs/$id/REVIEW_DIFF.patch"
 }
 
 set_brief() {
   local r="$1"
-  local id="$(cat "$r/.agy/current" 2>/dev/null)"
+  local id
+  id="$(cat "$r/.agy/current" 2>/dev/null)"
   cat > "$r/.agy/runs/$id/phases/IMPLEMENT/brief.md"
 }
 

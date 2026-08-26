@@ -20,7 +20,9 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$PHASE_SH" ] || { echo "ledger-test: phase.sh not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "ledger-test: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
+# shellcheck source=../scripts/ledger.sh
 . "$LEDGER_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ledger-test.XXXXXX")" && pwd)"
@@ -84,7 +86,7 @@ run_phase() {
 # --- 1. single dispatch appends exactly one valid single-line JSON -----------
 
 R1="$(new_repo single-dispatch)"
-OUT1="$(run_phase "$R1" --task "my secret task")"
+run_phase "$R1" --task "my secret task" >/dev/null
 LEDGER1="$R1/.agy/ledger.jsonl"
 
 [ -f "$LEDGER1" ] && ok single-dispatch-file-exists "ledger file created on dispatch" \
@@ -460,7 +462,8 @@ else
 fi
 
 # Third dispatch under budget (budget 50000 > 16814) succeeds and dispatches
-OUT15_OK="$(STUB_RAN="$RAN15" run_phase "$R15" --run current --budget-tokens 50000)"; RC15_OK=$?
+STUB_RAN="$RAN15" run_phase "$R15" --run current --budget-tokens 50000 >/dev/null
+RC15_OK=$?
 check budget-under-rc "$RC15_OK" 0 "under budget dispatch succeeds"
 check budget-under-dispatched "$(count_lines "$RAN15")" "$((BEFORE15 + 1))" "worker invoked when under budget"
 
@@ -564,7 +567,6 @@ RUN1_ID_18="$(cat "$R18/.agy/current")"
 
 # Run 2: spends another 16,814 tokens (total repo spent = 33,628)
 STUB_RAN="$RAN18" run_phase "$R18" --run new --task "repo run 2" >/dev/null
-RUN2_ID_18="$(cat "$R18/.agy/current")"
 
 REPO_SPENT_18="$(_ledger_repo_spent_tokens "$R18")"
 check repo-spent-tokens-sums "$REPO_SPENT_18" "33628" "_ledger_repo_spent_tokens sums tokens across runs"

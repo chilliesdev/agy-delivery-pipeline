@@ -389,6 +389,7 @@ if [ -z "$DRIVER_PATH" ] || [ ! -f "$DRIVER_PATH" ]; then
   exit 2
 fi
 
+# shellcheck source=../drivers/agy.sh
 . "$DRIVER_PATH"
 
 if ! command -v driver_run >/dev/null 2>&1 || ! command -v driver_capabilities >/dev/null 2>&1; then
@@ -1016,7 +1017,7 @@ elif [ "$RC" -eq 0 ]; then
   if [ -n "$TREE_BEFORE" ]; then
     DISPATCH_PATCH="$PHASE_DIR/DISPATCH_DIFF.patch"
     DISPATCH_STAT="$PHASE_DIR/DISPATCH_DIFF.stat"
-    CAPTURE_OUT="$("$HERE/capture-diff.sh" --dir "$DIR" --base "$TREE_BEFORE" --into "$PHASE_DIR" --name "DISPATCH_DIFF" 2>/dev/null)"
+    "$HERE/capture-diff.sh" --dir "$DIR" --base "$TREE_BEFORE" --into "$PHASE_DIR" --name "DISPATCH_DIFF" >/dev/null 2>&1
     CAPTURE_RC=$?
     if [ "$CAPTURE_RC" -eq 0 ] || [ "$CAPTURE_RC" -eq 3 ]; then
       INTEGRITY_OUT="$("$HERE/check-diff-integrity.sh" --dir "$DIR" --patch "$DISPATCH_PATCH" --stat "$DISPATCH_STAT" --brief "$PHASE_DIR/brief.md" 2>/dev/null)"

@@ -22,6 +22,7 @@ LEDGER_SH="$HERE/../scripts/ledger.sh"
 [ -f "$REPORT_SH" ] || { echo "report-test: report.sh not found next door" >&2; exit 2; }
 [ -f "$LEDGER_SH" ] || { echo "report-test: ledger.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/ledger.sh
 . "$LEDGER_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/report-test.XXXXXX")" && pwd)"

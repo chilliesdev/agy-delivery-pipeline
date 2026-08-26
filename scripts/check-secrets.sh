@@ -105,9 +105,6 @@ is_private_key() {
   local line="$1"
   case "$line" in
     *"-----BEGIN "*"PRIVATE KEY"*) return 0 ;;
-    *"-----BEGIN PRIVATE KEY"*) return 0 ;;
-    *"-----BEGIN PGP PRIVATE KEY BLOCK"*) return 0 ;;
-    *"-----BEGIN ENCRYPTED PRIVATE KEY"*) return 0 ;;
   esac
   return 1
 }
@@ -260,7 +257,7 @@ is_env_secret() {
   var_upper="$(printf '%s' "$var_name" | tr '[:lower:]' '[:upper:]')"
 
   case "$var_upper" in
-    *KEY*|*SECRET*|*PASSWORD*|*PASSWD*|*TOKEN*|*AUTH*|*CREDENTIAL*|*PRIVATE*|*APIKEY*|*API_KEY*|*ACCESS_TOKEN*|*PRIVATE_KEY*|*CLIENT_SECRET*|*DATABASE_URL*|*DB_PASS*|*DB_PASSWORD*|*WEBHOOK_URL*)
+    *KEY*|*SECRET*|*PASSWORD*|*PASSWD*|*TOKEN*|*AUTH*|*CREDENTIAL*|*PRIVATE*|*DATABASE_URL*|*DB_PASS*|*WEBHOOK_URL*)
       ;;
     *)
       return 1
@@ -323,13 +320,13 @@ is_env_secret() {
     *placeholder*|*example*|*dummy*|*sample*|*fake*|*mock*|*todo*|*fixme*|*default*)
       return 1
       ;;
-    *xxxx*|*000000*|*0000*|*123456*|*12345678*)
+    *xxxx*|*0000*|*123456*)
       return 1
       ;;
     testpassword|mysecret|my_secret|secret123|admin|root|guest|user)
       return 1
       ;;
-    my_*|insert_*|test_*|sample_*|dummy_*|demo_*|mock_*)
+    my_*|insert_*|test_*|demo_*)
       return 1
       ;;
     *_here|*_value|*_key|*_token|*_secret|*_password)

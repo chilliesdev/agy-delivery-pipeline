@@ -20,6 +20,7 @@ VENDORED_CONFIG="$HERE/../agy.toml"
 [ -f "$RUN_DIR_SH" ] || { echo "resolve-model-test: run-dir.sh not found next door" >&2; exit 2; }
 [ -f "$VENDORED_CONFIG" ] || { echo "resolve-model-test: agy.toml not found at repo root" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/resolve-model.XXXXXX")" && pwd)"
@@ -157,7 +158,7 @@ esac
 # --- 5. Unknown tier refused ----------------------------------------------
 
 R5="$(new_repo unknown-tier)"
-OUT5="$(/bin/bash "$RESOLVE" --tier bogus --dir "$R5" 2>/dev/null)"; RC5=$?
+/bin/bash "$RESOLVE" --tier bogus --dir "$R5" >/dev/null 2>&1 || RC5=$?
 check unknown-tier-rc "$RC5" 2 "exit 2 on unknown tier name"
 
 STDERR5="$(/bin/bash "$RESOLVE" --tier bogus --dir "$R5" 2>&1 >/dev/null)"
@@ -171,7 +172,7 @@ cat > "$R5/.claude/agy.toml" <<'EOF'
 [phases.REVIEW]
 tier = "unregistered"
 EOF
-OUT5_PHASE="$(/bin/bash "$RESOLVE" --phase REVIEW --dir "$R5" 2>/dev/null)"; RC5_PHASE=$?
+/bin/bash "$RESOLVE" --phase REVIEW --dir "$R5" >/dev/null 2>&1 || RC5_PHASE=$?
 check unknown-phase-tier-rc "$RC5_PHASE" 2 "exit 2 on unknown tier configured for phase"
 
 # --- 6. Malformed config refused with clear message ------------------------
@@ -222,7 +223,7 @@ cat > "$R6/agy.toml" <<'EOF'
 [tiers]
 high = true
 EOF
-OUT6_D="$(/bin/bash "$RESOLVE" --dir "$R6" --tier high 2>&1)"; RC6_D=$?
+/bin/bash "$RESOLVE" --dir "$R6" --tier high >/dev/null 2>&1 || RC6_D=$?
 check malformed-unsupported-type-rc "$RC6_D" 2 "exit 2 on unsupported value type"
 
 # 6e. Key defined outside section
@@ -231,7 +232,7 @@ tier = "high"
 [tiers]
 high = "gemini-3.7-flash-high"
 EOF
-OUT6_E="$(/bin/bash "$RESOLVE" --dir "$R6" --tier high 2>&1)"; RC6_E=$?
+/bin/bash "$RESOLVE" --dir "$R6" --tier high >/dev/null 2>&1 || RC6_E=$?
 check malformed-outside-section-rc "$RC6_E" 2 "exit 2 on key outside section"
 
 # --- 7. Fallback chain walked when first entry unavailable -----------------
@@ -263,8 +264,8 @@ case "$PREFLIGHT_OUT" in
 esac
 
 # Preflight fails with exit 4 when all fallbacks are unavailable
-PREFLIGHT_FAIL_OUT="$(STUB_MODELS='other-model\tOther\n' STUB_RC=0 AGY_BIN="$STUB" \
-  /bin/bash "$PREFLIGHT" --phase REVIEW --dir "$R7" 2>&1)"; PREFLIGHT_FAIL_RC=$?
+STUB_MODELS='other-model\tOther\n' STUB_RC=0 AGY_BIN="$STUB" \
+  /bin/bash "$PREFLIGHT" --phase REVIEW --dir "$R7" >/dev/null 2>&1 || PREFLIGHT_FAIL_RC=$?
 check preflight-all-unavailable-rc "$PREFLIGHT_FAIL_RC" 4 "preflight exits 4 when primary and all fallbacks unavailable"
 
 # phase.sh dispatch walks fallback chain and reports fallback on STATUS line

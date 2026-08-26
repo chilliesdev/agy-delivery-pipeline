@@ -18,6 +18,7 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 [ -f "$PHASE_SH" ] || { echo "check-secrets-test: phase.sh not found next door" >&2; exit 2; }
 [ -f "$RUN_DIR_SH" ] || { echo "check-secrets-test: run-dir.sh not found next door" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/check-secrets.XXXXXX")" && pwd)"
@@ -57,7 +58,8 @@ new_repo() {
   mkdir -p "$r"
   ( cd "$r" && git init -q . && git config user.email "test@example.com" \
       && git config user.name "Tester" && git commit -q --allow-empty -m "initial" )
-  local run_id="$(run_dir_new --dir "$r" --task "secret test $name")"
+  local run_id
+  run_id="$(run_dir_new --dir "$r" --task "secret test $name")"
   [ -n "$run_id" ] || { echo "check-secrets-test: run_dir_new failed for $name" >&2; exit 2; }
   printf '%s' "$r"
 }
@@ -286,8 +288,8 @@ case "$PHASE_OUT" in
 esac
 
 # --- 11. --no-secret-scan dispatching anyway ---------------------------------
-PHASE_BYPASS_OUT="$(STUB_PHASE=IMPLEMENT STUB_CALLED_FILE="$CALLED_LOG" AGY_BIN="$STUB" \
-  /bin/bash "$PHASE_SH" --phase IMPLEMENT --run "$RUN_ID_PHASE" --brief "$BRIEF_LEAK" --dir "$R_PHASE" --no-preflight --no-secret-scan 2>/dev/null)"
+STUB_PHASE=IMPLEMENT STUB_CALLED_FILE="$CALLED_LOG" AGY_BIN="$STUB" \
+  /bin/bash "$PHASE_SH" --phase IMPLEMENT --run "$RUN_ID_PHASE" --brief "$BRIEF_LEAK" --dir "$R_PHASE" --no-preflight --no-secret-scan >/dev/null 2>&1
 PHASE_BYPASS_RC=$?
 
 check phase-bypass-rc "$PHASE_BYPASS_RC" 0 "phase.sh exited 0 with --no-secret-scan"
