@@ -226,12 +226,13 @@ run_case h-refused-verdict-file \
 
 # h2. assert h-refused-verdict-file produced a passing status line and clean round
 H_REPO="$ROOT/repos/h-refused-verdict-file"
-H_OUT="$(cat "$H_REPO"/.agy/runs/*/phases/TEST/status 2>/dev/null || true)"
+H_RUN="$(cat "$H_REPO/.agy/current")"
+H_OUT="$(cat "$H_REPO/.agy/runs/$H_RUN/phases/TEST/status" 2>/dev/null || true)"
 case "$H_OUT" in
   "STATUS: PASSED | File: CHANGES.md"*) PASS=$((PASS + 1)) ;;
   *) FAIL=$((FAIL + 1)); printf '%-28s FAIL — wanted STATUS: PASSED prefix: %s\n' "" "$H_OUT" ;;
 esac
-if [ ! -e "$H_REPO"/.agy/runs/*/phases/TEST/retries ]; then
+if [ ! -e "$H_REPO/.agy/runs/$H_RUN/phases/TEST/retries" ]; then
   PASS=$((PASS + 1))
 else
   FAIL=$((FAIL + 1)); printf '%-28s FAIL — retries file exists; round was not clean\n' ""

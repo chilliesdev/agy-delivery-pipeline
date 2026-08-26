@@ -20,7 +20,9 @@ FAKE_LIB="$HERE/lib/fake-agy.sh"
 [ -f "$RUN_DIR_SH" ] || { echo "fake-agy-test: scripts/run-dir.sh not found" >&2; exit 2; }
 [ -f "$FAKE_LIB" ]   || { echo "fake-agy-test: tests/lib/fake-agy.sh not found" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
+# shellcheck source=lib/fake-agy.sh
 . "$FAKE_LIB"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/fake-agy-test.XXXXXX")"
@@ -51,7 +53,7 @@ new_repo() {
 # With preflight.sh redirecting stdin from /dev/null, it returns immediately.
 FAKE_DRAIN="$(fake_agy_new --dir "$SCRATCH/bin-drain" --behaviour drain-stdin-forever)"
 
-OUT_DRAIN="$( { sleep 15 | AGY_BIN="$FAKE_DRAIN" /bin/bash "$PREFLIGHT" --tier medium --timeout 2; } 2>&1 )"
+{ sleep 15 | AGY_BIN="$FAKE_DRAIN" /bin/bash "$PREFLIGHT" --tier medium --timeout 2; } >/dev/null 2>&1
 CODE_DRAIN=$?
 check drain-stdin-protected "$CODE_DRAIN" 0 "preflight succeeds with unclosed stdin because stdin is redirected"
 
@@ -105,8 +107,8 @@ Write verdict to .agy/runs/$RUN_ID_SCRATCH/phases/TEST/verdict and print that sa
 EOF
 
 # 3a. With phase.sh (which passes --add-dir), repo is written to
-OUT_SCRATCH="$(AGY_BIN="$FAKE_SCRATCH" "$PHASE_SH" --phase TEST --brief "$BRIEF_SCRATCH" \
-  --dir "$REPO_SCRATCH" --run "$RUN_ID_SCRATCH" --no-preflight 2>/dev/null)"
+AGY_BIN="$FAKE_SCRATCH" "$PHASE_SH" --phase TEST --brief "$BRIEF_SCRATCH" \
+  --dir "$REPO_SCRATCH" --run "$RUN_ID_SCRATCH" --no-preflight >/dev/null 2>&1
 CODE_SCRATCH=$?
 
 check scratch-add-dir-present-rc "$CODE_SCRATCH" 0 "phase succeeds when --add-dir is passed"
@@ -194,9 +196,10 @@ esac
 # Test fake_agy_new with --verdict and --sleep
 START_OPTS=$(date +%s)
 FAKE_OPTS="$(fake_agy_new --dir "$SCRATCH/bin-opts" --verdict PASSED --sleep 1)"
-OUT_OPTS="$( { sleep 15 | AGY_BIN="$FAKE_OPTS" /bin/bash "$PREFLIGHT" --tier medium --timeout 5; } 2>&1 )"
+{ sleep 15 | AGY_BIN="$FAKE_OPTS" /bin/bash "$PREFLIGHT" --tier medium --timeout 5; } >/dev/null 2>&1
+CODE_OPTS=$?
 ELAPSED_OPTS=$(( $(date +%s) - START_OPTS ))
-check opts-preflight-rc "$?" 0 "preflight succeeds with custom fake_agy"
+check opts-preflight-rc "$CODE_OPTS" 0 "preflight succeeds with custom fake_agy"
 if [ "$ELAPSED_OPTS" -ge 1 ]; then
   ok opts-sleep-applied "artificial sleep was applied (${ELAPSED_OPTS}s >= 1s)"
 else
