@@ -522,6 +522,10 @@ standalone contract — the worker has none of your conversation:
   last line of your output. Do not write
   `.agy/runs/<run-id>/phases/IMPLEMENT/status`."*
 
+When a brief commissions tests, name the function or script the test must call.
+Reaching inside the implementation or reconstructing its logic in the test is a
+failure of the round rather than a way to pass it.
+
 Worker writes a short summary to `.agy/runs/<run-id>/CHANGES.md`.
 
 If the task is genuinely too large for one brief, split it into **sequential**
