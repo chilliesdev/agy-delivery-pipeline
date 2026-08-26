@@ -25,6 +25,7 @@
 #
 # --check-git-state snapshots git state (HEAD, tags, refs) before dispatch and
 # compares after return via check-git-state.sh, failing the phase on any changes.
+# The flag is a request, and an unfulfilled request is not a pass.
 #
 # The retry counter is mechanical: each dispatch beyond the first bumps
 # R/phases/<PHASE>/retries, and past --retry-cap (default 2, matching SKILL.md)
@@ -826,9 +827,11 @@ if [ -z "$SKIP_DIFF_INTEGRITY" ]; then
 fi
 
 GIT_STATE_BEFORE=""
+GIT_STATE_SNAP_RC=0
 if [ -n "$CHECK_GIT_STATE" ]; then
   GIT_STATE_BEFORE="$PHASE_DIR/git_state_before.txt"
-  "$HERE/check-git-state.sh" snapshot --dir "$DIR" --out "$GIT_STATE_BEFORE" >/dev/null 2>&1 || true
+  /bin/bash "$HERE/check-git-state.sh" snapshot --dir "$DIR" --out "$GIT_STATE_BEFORE" >/dev/null 2>&1
+  GIT_STATE_SNAP_RC=$?
 fi
 
 START_EPOCH=$(date +%s)
@@ -981,14 +984,20 @@ GIT_STATE_RC=0
 GIT_STATE_STATUS=""
 
 if [ -n "$CHECK_GIT_STATE" ]; then
-  if [ -n "$GIT_STATE_BEFORE" ] && [ -f "$GIT_STATE_BEFORE" ]; then
-    GIT_STATE_OUT="$("$HERE/check-git-state.sh" compare --dir "$DIR" --before "$GIT_STATE_BEFORE" 2>/dev/null)"
+  if [ -n "$GIT_STATE_BEFORE" ] && [ -f "$GIT_STATE_BEFORE" ] && [ "$GIT_STATE_SNAP_RC" -eq 0 ]; then
+    GIT_STATE_OUT="$(/bin/bash "$HERE/check-git-state.sh" compare --dir "$DIR" --before "$GIT_STATE_BEFORE" 2>/dev/null)"
     GIT_STATE_RC=$?
     GIT_STATE_STATUS="$(printf '%s\n' "$GIT_STATE_OUT" | sed -e 's/^STATUS:[[:space:]]*//' -e 's/[[:space:]]*|.*//')"
-    [ -z "$GIT_STATE_STATUS" ] && GIT_STATE_STATUS="GIT_STATE_UNCHECKED(empty_output)"
+    if [ -z "$GIT_STATE_STATUS" ]; then
+      GIT_STATE_STATUS="GIT_STATE_UNCHECKED(empty_output)"
+      [ "$GIT_STATE_RC" -eq 0 ] && GIT_STATE_RC=2
+    elif [ "$GIT_STATE_RC" -ne 0 ] && [ "$GIT_STATE_STATUS" = "GIT_STATE_UNCHANGED" ]; then
+      GIT_STATE_STATUS="GIT_STATE_UNCHECKED(rc=$GIT_STATE_RC)"
+    fi
     GIT_STATE_FIELD=" | GitState: $GIT_STATE_STATUS"
   else
     GIT_STATE_STATUS="GIT_STATE_UNCHECKED(no_snapshot)"
+    GIT_STATE_RC=2
     GIT_STATE_FIELD=" | GitState: $GIT_STATE_STATUS"
   fi
 fi
