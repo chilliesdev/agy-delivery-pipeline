@@ -14,7 +14,6 @@
 #     3  GIT_STATE_CHANGED(<what changed>)
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CMD=""
 DIR="$PWD"
