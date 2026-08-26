@@ -15,6 +15,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFLIGHT="$HERE/../scripts/preflight.sh"
 [ -f "$PREFLIGHT" ] || { echo "preflight-test: preflight.sh not found next door" >&2; exit 2; }
+. "$HERE/lib/fake-agy.sh"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/preflight.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
@@ -23,24 +24,8 @@ trap 'rm -rf "$ROOT"' EXIT INT TERM
 # stalls first for $STUB_SLEEP seconds when asked to — a hung fetch is the thing
 # the watchdog exists for. The stall is a pipeline on purpose: killing the stub
 # alone would leave the sleep running, so only a process-group kill clears it.
-# Anything else is not preflight's business and exits 0.
-STUB="$ROOT/agy"
-cat > "$STUB" <<'STUB_EOF'
-#!/usr/bin/env bash
-set -uo pipefail
-if [ "${1:-}" = "models" ]; then
-  printf 'Fetching available models...\n' >&2
-  # Real agy drains stdin before it answers, so an inherited stdin that never
-  # reaches EOF hangs it forever. Reproduce that here: with the redirect in
-  # place this read sees EOF at once, without it this blocks.
-  [ -n "${STUB_READS_STDIN:-}" ] && cat >/dev/null
-  [ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP" | cat
-  [ -n "${STUB_MODELS:-}" ] && printf '%b' "$STUB_MODELS"
-  exit "${STUB_RC:-0}"
-fi
-exit 0
-STUB_EOF
-chmod +x "$STUB"
+# Generated using fake_agy_new with drain-stdin-forever behaviour.
+STUB="$(fake_agy_new --dir "$ROOT" --behaviour drain-stdin-forever)"
 
 LISTING='gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\ngemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\nclaude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n'
 
