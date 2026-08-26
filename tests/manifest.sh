@@ -253,6 +253,163 @@ EOF
 done
 check no-test-script-shadowing "$TEST_SHADOWS" "0" "no test file defines a function that exists in the script it tests"
 
+# --- status table sync between scripts and skills ---------------------------
+
+# Check A (Forward): Every status scripts/phase.sh can print appears in the
+# status table of at least one skill file, and every status reachable through
+# the single-dispatch path appears in skills/agy-delegate/SKILL.md.
+#
+# Check B (Backward): Every status named in a skill's table is one the script
+# can actually emit.
+#
+# Deliberate exemptions in `<file>:<status>` or `<status>` form, one per line with rationale.
+STATUS_ALLOWLIST="
+# <file>:<status>                                 # rationale
+# skills/agy-delegate/SKILL.md:DONE               # worker verdict passed through by phase.sh
+# skills/agy-delegate/SKILL.md:BLOCKED            # worker verdict passed through by phase.sh
+DONE                                              # worker verdict passed through by phase.sh
+BLOCKED                                           # worker verdict passed through by phase.sh
+"
+
+get_script_statuses() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  sed -n '/^[[:space:]]*#/d; s/.*STATUS:[[:space:]\\]*\([A-Z][A-Z0-9_]*\).*/\1/p; s/.*STATUS="\([A-Z][A-Z0-9_]*\).*/\1/p' "$f" 2>/dev/null | sort -u
+}
+
+get_all_emittable_statuses() {
+  local dir="$1"
+  local s
+  for s in "$dir"/*.sh; do
+    [ -f "$s" ] || continue
+    get_script_statuses "$s"
+  done | sort -u
+}
+
+get_skill_table_statuses() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  awk -F'|' '
+    !/^[[:space:]]*\|/ {
+      in_status_table = 0
+    }
+    NF >= 3 {
+      col = $2
+      gsub(/[`[:space:]]/, "", col)
+      if (tolower(col) == "status") {
+        in_status_table = 1
+        next
+      }
+      if (col ~ /^:?-+:?$/) {
+        next
+      }
+      if (in_status_table) {
+        sub(/^STATUS:/, "", col)
+        if (match(col, /^[A-Z][A-Z0-9_]+/)) {
+          val = substr(col, RSTART, RLENGTH)
+          if (length(val) >= 2 && val != "STATUS" && val != "GITIGNORE" && val != "STEP") {
+            print val
+          }
+        }
+      }
+    }
+  ' "$f" 2>/dev/null | sort -u
+}
+
+is_status_exempt() {
+  local target_file="$1" target_status="$2"
+  local bn entry line
+  bn="$(basename "$target_file")"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      \#*|[[:space:]]*\#*) continue ;;
+    esac
+    entry="$(printf '%s' "$line" | awk '{print $1}')"
+    case "$entry" in
+      "$target_file:$target_status" | "$bn:$target_status" | "skills/$bn/$target_status" | "$target_status")
+        return 0
+        ;;
+    esac
+  done <<EOF
+$STATUS_ALLOWLIST
+EOF
+  return 1
+}
+
+# --- Forward check: script statuses appear in skill tables -----------------
+
+PHASE_SCRIPT="$ROOT/scripts/phase.sh"
+PHASE_STATUSES="$(get_script_statuses "$PHASE_SCRIPT")"
+DELEGATE_SKILL="skills/agy-delegate/SKILL.md"
+PIPELINE_SKILL="skills/agy-pipeline/SKILL.md"
+DELEGATE_STATUSES="$(get_skill_table_statuses "$ROOT/$DELEGATE_SKILL")"
+PIPELINE_STATUSES="$(get_skill_table_statuses "$ROOT/$PIPELINE_SKILL")"
+ALL_SKILL_STATUSES="$(printf '%s\n%s\n' "$DELEGATE_STATUSES" "$PIPELINE_STATUSES" | sort -u)"
+
+FORWARD_MISSING=0
+FORWARD_CHECKED=0
+while IFS= read -r ST; do
+  [ -n "$ST" ] || continue
+  FORWARD_CHECKED=$((FORWARD_CHECKED + 1))
+  if printf '%s\n' "$DELEGATE_STATUSES" | grep -Fqx "$ST" || is_status_exempt "$DELEGATE_SKILL" "$ST"; then
+    ok "status-forward-delegate-$ST" "$ST appears in $DELEGATE_SKILL table or is exempt"
+  elif printf '%s\n' "$ALL_SKILL_STATUSES" | grep -Fqx "$ST" || is_status_exempt "$PIPELINE_SKILL" "$ST"; then
+    ok "status-forward-pipeline-$ST" "$ST appears in $PIPELINE_SKILL table or is exempt"
+  else
+    bad "status-forward-$ST" "status '$ST' emitted by phase.sh but missing from skill tables"
+    FORWARD_MISSING=$((FORWARD_MISSING + 1))
+  fi
+done <<EOF
+$PHASE_STATUSES
+EOF
+
+if [ "$FORWARD_CHECKED" -gt 0 ]; then
+  ok phase-statuses-nonempty "found $FORWARD_CHECKED statuses in phase.sh"
+else
+  bad phase-statuses-nonempty "no statuses extracted from phase.sh"
+fi
+check phase-statuses-in-skills "$FORWARD_MISSING" "0" "all $FORWARD_CHECKED script statuses appear in skill tables"
+
+# --- Backward check: skill table statuses are emittable by script ----------
+
+ALL_EMITTABLE="$(get_all_emittable_statuses "$ROOT/scripts")"
+EMITTABLE_COUNT="$(printf '%s\n' "$ALL_EMITTABLE" | grep -c . || true)"
+if [ "${EMITTABLE_COUNT:-0}" -gt 0 ]; then
+  ok emittable-statuses-nonempty "found $EMITTABLE_COUNT emittable statuses across scripts"
+else
+  bad emittable-statuses-nonempty "no emittable statuses extracted from scripts"
+fi
+
+BACKWARD_EXTRA=0
+BACKWARD_CHECKED=0
+for SK in "$DELEGATE_SKILL" "$PIPELINE_SKILL"; do
+  [ -f "$ROOT/$SK" ] || continue
+  SK_STATUSES="$(get_skill_table_statuses "$ROOT/$SK")"
+  SK_COUNT="$(printf '%s\n' "$SK_STATUSES" | grep -c . || true)"
+  SK_BN="$(basename "$SK" .md)"
+  if [ "${SK_COUNT:-0}" -gt 0 ]; then
+    ok "skill-statuses-nonempty-$SK_BN" "found $SK_COUNT statuses in $SK"
+  else
+    bad "skill-statuses-nonempty-$SK_BN" "no statuses extracted from $SK table"
+  fi
+
+  while IFS= read -r ST; do
+    [ -n "$ST" ] || continue
+    BACKWARD_CHECKED=$((BACKWARD_CHECKED + 1))
+    if printf '%s\n' "$ALL_EMITTABLE" | grep -Fqx "$ST" || is_status_exempt "$SK" "$ST"; then
+      ok "status-backward-$ST" "$ST in $SK is emittable by scripts or exempt"
+    else
+      bad "status-backward-$ST" "status '$ST' named in $SK table cannot be emitted by scripts"
+      BACKWARD_EXTRA=$((BACKWARD_EXTRA + 1))
+    fi
+  done <<EOF
+$SK_STATUSES
+EOF
+done
+check skill-statuses-emittable "$BACKWARD_EXTRA" "0" "all $BACKWARD_CHECKED skill table statuses are emittable by script"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
+
 

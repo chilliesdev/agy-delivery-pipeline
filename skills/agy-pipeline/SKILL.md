@@ -112,6 +112,23 @@ Read it, not the log. Progress heartbeats, liveness warnings, and failure log
 tails stream to stderr for the user's terminal — the orchestrator reads only
 the single stdout line and must not read the progress channel or log tails.
 
+| status | means | do |
+|---|---|---|
+| `STATUS: DONE …` | the worker finished and the check held | gate it below |
+| `STATUS: BLOCKED …` | it could not proceed | read the reason, ask the user (Phase 0) or handle the blocker |
+| `STATUS: BRIEF_IMPOSSIBLE(…)` | constraints and requirement collide | read the collision, fix the brief, re-dispatch — it did not cost a retry |
+| `BRIEF_INVALID(…)` | brief violates contract rules | fix the brief and re-dispatch (zero token cost) |
+| `SECRETS_FOUND(…)` | secret detected in brief or diff | remove secret and re-dispatch (or --no-secret-scan) |
+| `RETRY_CAP_REACHED(…)` | retry budget for this phase is spent | take the work over yourself, or pass --reset-retries to start a fresh cycle |
+| `BUDGET_EXCEEDED(…)` | token budget for this run is spent | increase --budget-tokens to continue, or inspect spend with report.sh |
+| `REPO_BUDGET_EXCEEDED(…)` | repository token budget is spent | increase --repo-budget-tokens to continue, or inspect spend with report.sh |
+| `WORKER_CAP_EXCEEDED(…)` | concurrent worker cap reached | wait for a running dispatch to finish, or increase --max-workers to continue |
+| `VERIFY_FAILED(rc=N)` | it claimed success; the tests disagree | read `VerifyLog:`, then fix it yourself or re-brief once |
+| `WORKER_FAILED(rc=N)` | agy died | check the brief path and the criteria, then retry once |
+| `PREFLIGHT_FAILED(…)` | setup broke mid-session | report the cause, do the work yourself |
+| `GIT_STATE_UNCHECKED(…)` | git-state check was requested but could not run | find out why the check could not run, fix that, and dispatch again |
+| `NO_STATUS_REPORTED` | rc=0, no verdict — neither pass nor fail | check the diff; it may well have worked |
+
 Underneath sits the worker driver ([drivers/agy.sh](../../drivers/agy.sh)), with
 [agy-run.sh](../../scripts/agy-run.sh) retained as a compatibility shim. Every
 phase runs through a driver; `agy` is the only one today, and the gates do not
