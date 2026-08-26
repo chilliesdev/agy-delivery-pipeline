@@ -46,9 +46,9 @@ chmod +x "$STUB"
 
 PASS=0; FAIL=0
 
-# run_case <name> <expected substring> <transcript> <verdict> <rc> [stale verdict]
+# run_case <name> <expected substring> <transcript> <verdict> <rc> [stale verdict] [want_phase_rc]
 run_case() {
-  NAME="$1"; WANT="$2"; TRANSCRIPT="$3"; VERDICT="$4"; WANT_RC="$5"; STALE="${6:-}"
+  NAME="$1"; WANT="$2"; TRANSCRIPT="$3"; VERDICT="$4"; WANT_RC="$5"; STALE="${6:-}"; WANT_PHASE_RC="${7:-}"
   REPO="$ROOT/repos/$NAME"
   mkdir -p "$REPO"
   ( cd "$REPO" && git init -q . )
@@ -62,9 +62,10 @@ run_case() {
 
   # Bypass brief lint: this suite tests verdict parsing and status extraction;
   # the brief is a stub by design, and brief validity has its own suite.
+  PHASE_RC=0
   OUT="$(STUB_PHASE=TEST STUB_TRANSCRIPT="$TRANSCRIPT" STUB_VERDICT="$VERDICT" \
     STUB_RC="$WANT_RC" AGY_BIN="$STUB" \
-    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint 2>/dev/null)"
+    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint 2>/dev/null)" || PHASE_RC=$?
 
   printf '%-28s %s\n' "$NAME" "$OUT"
   case "$OUT" in
@@ -74,6 +75,9 @@ run_case() {
   # The status file must carry exactly what was printed.
   if [ "$(cat "$REPO/.agy/runs/$RUN_ID/phases/TEST/status" 2>/dev/null)" != "$OUT" ]; then
     FAIL=$((FAIL + 1)); printf '%-28s FAIL — R/phases/TEST/status differs from stdout\n' ""
+  fi
+  if [ -n "$WANT_PHASE_RC" ] && [ "$PHASE_RC" -ne "$WANT_PHASE_RC" ]; then
+    FAIL=$((FAIL + 1)); printf '%-28s FAIL — wanted phase.sh exit code %s, got %s\n' "" "$WANT_PHASE_RC" "$PHASE_RC"
   fi
 }
 
@@ -118,6 +122,96 @@ run_case g-stale-verdict \
   'STATUS: FAILED | File: REVIEW_FEEDBACK.md' \
   'retry round\nSTATUS: FAILED | File: REVIEW_FEEDBACK.md\n' '' 0 \
   'STATUS: PASSED | File: STALE.md\n'
+
+# h. a worker writing the impossible verdict to its verdict file: exits 10, collision text intact
+run_case h-impossible-verdict-file \
+  'STATUS: BRIEF_IMPOSSIBLE(requirement A collides with constraint B)' \
+  'investigating codebase...\n' \
+  'STATUS: BRIEF_IMPOSSIBLE(requirement A collides with constraint B)\n' 0 '' 10
+
+# i. same impossible verdict via transcript fallback line: exits 10, collision text intact
+run_case i-impossible-transcript \
+  'STATUS: BRIEF_IMPOSSIBLE(cannot modify locked config without violating rule 2)' \
+  'reading brief\nSTATUS: BRIEF_IMPOSSIBLE(cannot modify locked config without violating rule 2)\n' \
+  '' 0 '' 10
+
+# j. retry counter is unchanged across an impossible round, and following ordinary dispatch succeeds
+test_impossible_retries() {
+  NAME="j-impossible-retries"
+  REPO="$ROOT/repos/$NAME"
+  mkdir -p "$REPO"
+  ( cd "$REPO" && git init -q . )
+  printf 'do the thing\n' > "$REPO/brief.md"
+
+  RUN_ID="$(run_dir_new --dir "$REPO" --task "$NAME")"
+  RETRY_PATH="$REPO/.agy/runs/$RUN_ID/phases/TEST/retries"
+  mkdir -p "$REPO/.agy/runs/$RUN_ID/phases/TEST"
+
+  # Case j1: When retry counter was absent before dispatch
+  BEFORE_ABSENT="absent"
+  [ -f "$RETRY_PATH" ] && BEFORE_ABSENT="$(cat "$RETRY_PATH")"
+
+  PHASE_RC=0
+  OUT1="$(STUB_PHASE=TEST STUB_TRANSCRIPT="" \
+    STUB_VERDICT="STATUS: BRIEF_IMPOSSIBLE(constraint X blocks requirement Y)\n" \
+    STUB_RC=0 AGY_BIN="$STUB" \
+    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint 2>/dev/null)" || PHASE_RC=$?
+
+  AFTER_ABSENT="absent"
+  [ -f "$RETRY_PATH" ] && AFTER_ABSENT="$(cat "$RETRY_PATH")"
+
+  if [ "$BEFORE_ABSENT" = "$AFTER_ABSENT" ] && [ "$PHASE_RC" -eq 10 ]; then
+    PASS=$((PASS + 1))
+    printf '%-28s %s (exit %s, retries %s -> %s)\n' "$NAME-absent" "$OUT1" "$PHASE_RC" "$BEFORE_ABSENT" "$AFTER_ABSENT"
+  else
+    FAIL=$((FAIL + 1))
+    printf '%-28s FAIL — retries changed or wrong exit: %s -> %s, rc=%s\n' "$NAME-absent" "$BEFORE_ABSENT" "$AFTER_ABSENT" "$PHASE_RC"
+  fi
+
+  # Case j2: When retry counter had 1 retry spent before dispatch
+  printf '1\n' > "$RETRY_PATH"
+  BEFORE_SPENT="$(cat "$RETRY_PATH")"
+
+  PHASE_RC=0
+  OUT2="$(STUB_PHASE=TEST STUB_TRANSCRIPT="" \
+    STUB_VERDICT="STATUS: BRIEF_IMPOSSIBLE(constraint X blocks requirement Y)\n" \
+    STUB_RC=0 AGY_BIN="$STUB" \
+    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint 2>/dev/null)" || PHASE_RC=$?
+
+  AFTER_SPENT="$(cat "$RETRY_PATH" 2>/dev/null || echo "absent")"
+
+  if [ "$BEFORE_SPENT" = "$AFTER_SPENT" ] && [ "$PHASE_RC" -eq 10 ]; then
+    PASS=$((PASS + 1))
+    printf '%-28s %s (exit %s, retries %s -> %s)\n' "$NAME-refund" "$OUT2" "$PHASE_RC" "$BEFORE_SPENT" "$AFTER_SPENT"
+  else
+    FAIL=$((FAIL + 1))
+    printf '%-28s FAIL — retries changed: %s -> %s, rc=%s\n' "$NAME-refund" "$BEFORE_SPENT" "$AFTER_SPENT" "$PHASE_RC"
+  fi
+
+  # Case j3: A following ordinary dispatch is still permitted (with retry-cap 2 and 1 spent, it must not be blocked)
+  PHASE_RC=0
+  OUT3="$(STUB_PHASE=TEST STUB_TRANSCRIPT="" \
+    STUB_VERDICT="STATUS: PASSED | File: CHANGES.md\n" \
+    STUB_RC=0 AGY_BIN="$STUB" \
+    "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint --retry-cap 2 2>/dev/null)" || PHASE_RC=$?
+
+  case "$OUT3" in
+    *"STATUS: PASSED | File: CHANGES.md"*)
+      if [ "$PHASE_RC" -eq 0 ]; then
+        PASS=$((PASS + 1))
+        printf '%-28s %s (exit %s)\n' "$NAME-following-pass" "$OUT3" "$PHASE_RC"
+      else
+        FAIL=$((FAIL + 1))
+        printf '%-28s FAIL — following dispatch failed with rc=%s\n' "$NAME-following-pass" "$PHASE_RC"
+      fi
+      ;;
+    *)
+      FAIL=$((FAIL + 1))
+      printf '%-28s FAIL — following dispatch did not pass: %s\n' "$NAME-following-pass" "$OUT3"
+      ;;
+  esac
+}
+test_impossible_retries
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

@@ -115,8 +115,13 @@ Then the verdict contract, verbatim in shape:
 > `.agy/runs/<run-id>/phases/DELEGATE/verdict`, and print that same line as the
 > last line of your output, in the form `STATUS: <verdict> | File: <path>`. Use
 > `STATUS: DONE` if you completed the task, `STATUS: BLOCKED` with the reason
-> if you could not. Never write `.agy/runs/<run-id>/phases/DELEGATE/status` —
-> that file belongs to the tooling.
+> if you could not, or `STATUS: BRIEF_IMPOSSIBLE(<what is in the way>)` if the
+> brief's constraints make its requirement impossible. If the brief's constraints
+> make its requirement impossible, stop **before editing anything**, name the
+> specific constraint and the specific requirement that collide, and return the
+> impossible verdict. That is a successful round. A workaround that satisfies the
+> assertion without satisfying the requirement is not. Never write
+> `.agy/runs/<run-id>/phases/DELEGATE/status` — that file belongs to the tooling.
 
 Both routes, because they are not redundant: the file is authoritative and is
 read first, and the printed line is the fallback for a worker that ignored it.
@@ -170,6 +175,7 @@ single stdout line and should not read the progress channel.
 |---|---|---|
 | `STATUS: DONE …` | the worker finished and the check held | gate it below |
 | `STATUS: BLOCKED …` | it could not proceed | read the reason, then take the work over yourself |
+| `STATUS: BRIEF_IMPOSSIBLE(…)` | constraints and requirement collide | read the collision, fix the brief, re-dispatch — it did not cost a retry |
 | `BRIEF_INVALID(…)` | brief violates contract rules | fix the brief and re-dispatch (zero token cost) |
 | `SECRETS_FOUND(…)` | secret detected in brief or diff | remove secret and re-dispatch (or --no-secret-scan) |
 | `VERIFY_FAILED(rc=N)` | it claimed success; the tests disagree | read `VerifyLog:`, then fix it yourself or re-brief once |

@@ -134,6 +134,14 @@ produces one, `phase.sh` reports `STATUS: NO_STATUS_REPORTED` — which is not a
 failure and not a pass; the phase may well have succeeded, so verify the artifact
 on disk before advancing or retrying.
 
+If the brief's constraints make its requirement impossible, the worker must stop
+**before editing anything**, name the specific constraint and the specific
+requirement that collide, and return the impossible verdict
+(`STATUS: BRIEF_IMPOSSIBLE(<what is in the way>)`). That is a successful round.
+A workaround that satisfies the assertion without satisfying the requirement is
+not. The orchestrator reads the collision, fixes the brief, and re-dispatches —
+it did not cost a retry.
+
 `.agy/runs/<run-id>/phases/<PHASE>/status` is `phase.sh`'s **own** output file.
 Briefs must tell the worker never to write it — the worker writes
 `.agy/runs/<run-id>/phases/<PHASE>/verdict` and nothing else in that pair.
@@ -516,8 +524,10 @@ standalone contract — the worker has none of your conversation:
 - "do not run shell commands; the orchestrator runs the checks"
 - "do not commit; leave changes in the working tree"
 - the closing verdict instruction — *"Write your one-line verdict —
-  `STATUS: DONE | File: .agy/runs/<run-id>/CHANGES.md` or
-  `STATUS: BLOCKED | File: .agy/runs/<run-id>/CHANGES.md` — to
+  `STATUS: DONE | File: .agy/runs/<run-id>/CHANGES.md`,
+  `STATUS: BLOCKED | File: .agy/runs/<run-id>/CHANGES.md`, or
+  `STATUS: BRIEF_IMPOSSIBLE(<what is in the way>)` (if constraints and
+  requirement collide, stop before editing anything and name the collision) — to
   `.agy/runs/<run-id>/phases/IMPLEMENT/verdict`, and print that same line as the
   last line of your output. Do not write
   `.agy/runs/<run-id>/phases/IMPLEMENT/status`."*
@@ -699,14 +709,15 @@ refusal happens before preflight and before the verdict is cleared, so
 hand over.
 
 **A round that never reviewed anything is refunded.** The counter is spent at
-dispatch, so that a round killed halfway still counts, but a `WORKER_FAILED` or
-`PREFLIGHT_FAILED` round gets it back — those are agy dying on its own
-configuration in seconds, not a reviewer failing to converge, and they leave no
+dispatch, so that a round killed halfway still counts, but a `WORKER_FAILED`,
+`PREFLIGHT_FAILED` or `BRIEF_IMPOSSIBLE` round gets it back — those are agy
+dying on its own configuration in seconds or a brief impossible as written, not
+a reviewer failing to converge, and they leave no
 `.agy/runs/<run-id>/REVIEW_FEEDBACK.md` to hand over either. Two of them in a row
 once came within one round of retiring a review phase that had never run.
 `FAILED`, `VERIFY_FAILED` and `NO_STATUS_REPORTED` all keep spending: each is a
 worker that ran and left the round unresolved, which is exactly what the cap
-counts. Fix the configuration and dispatch again — the budget is where it was.
+counts. Fix the configuration or brief and dispatch again — the budget is where it was.
 
 ### Phase 3 — QA (tier `medium`, `--mode full --sandbox`)
 
