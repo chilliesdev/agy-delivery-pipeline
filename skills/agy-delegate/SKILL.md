@@ -98,7 +98,10 @@ only this file, so everything it needs is in it and nothing else is.
 
 State: **the task**, in enough detail to act on; **the files** it should touch,
 by path, and any it must not; **the constraints** — existing patterns to follow,
-APIs that already exist, what not to invent; and **what done looks like**.
+APIs that already exist, what not to invent; and **what done looks like**. When a
+brief commissions tests, name the function or script the test must call. Reaching
+inside the implementation or reconstructing its logic in the test is a failure of
+the round rather than a way to pass it.
 
 Three rules the brief must carry, each earned by a failure:
 

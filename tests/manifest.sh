@@ -137,5 +137,114 @@ for S in "$ROOT"/scripts/*.sh; do
 done
 check scripts-have-suites "$MISSING_SUITES" "0" "all $SCRIPTS_CHECKED scripts have suites or explicit exemptions"
 
+# --- function duplication across sourcing pairs & test shadowing -----------
+
+# Check A: Duplicated function definition across a sourcing pair under scripts/.
+# Check B: A test file defining a function that also exists in the script it tests.
+#
+# Deliberate exemptions in `<file>:<function>` form, one per line with rationale.
+FUNCTION_ALLOWLIST="
+# <file>:<function>                               # rationale
+# tests/manifest.sh:ok                            # test harness helper
+"
+
+get_defined_functions() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  awk '/^[a-zA-Z_][a-zA-Z0-9_-]*[ \t]*\([ \t]*\)[ \t]*\{/ { sub(/[ \t]*\(.*/, ""); print }' "$f" 2>/dev/null | sort -u
+}
+
+is_fn_exempt() {
+  local target_file="$1" target_fn="$2"
+  local bn entry line
+  bn="$(basename "$target_file")"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      \#*|[[:space:]]*\#*) continue ;;
+    esac
+    entry="$(printf '%s' "$line" | awk '{print $1}')"
+    case "$entry" in
+      "$target_file:$target_fn" | "$bn:$target_fn" | "scripts/$bn:$target_fn" | "tests/$bn:$target_fn")
+        return 0
+        ;;
+    esac
+  done <<EOF
+$FUNCTION_ALLOWLIST
+EOF
+  return 1
+}
+
+# --- Check A: no duplicated functions across sourcing pairs ----------------
+
+SOURCED_DUPS=0
+SOURCING_PAIRS_CHECKED=0
+for S1 in "$ROOT"/scripts/*.sh; do
+  [ -f "$S1" ] || continue
+  S1_BN="$(basename "$S1")"
+  S1_FUNCS="$(get_defined_functions "$S1")"
+  [ -n "$S1_FUNCS" ] || continue
+
+  for S2 in "$ROOT"/scripts/*.sh; do
+    [ -f "$S2" ] || continue
+    [ "$S1" != "$S2" ] || continue
+    S2_BN="$(basename "$S2")"
+
+    # Detect if S1 sources S2 (. "$HERE/<file>" or source)
+    if grep -E -q '^[[:space:]]*(\.|source)[[:space:]]+.*(^|/|\$HERE/|["'"'"'])'"$S2_BN"'(["'"'"']|[[:space:]]|$)' "$S1" 2>/dev/null; then
+      SOURCING_PAIRS_CHECKED=$((SOURCING_PAIRS_CHECKED + 1))
+      S2_FUNCS="$(get_defined_functions "$S2")"
+      [ -n "$S2_FUNCS" ] || continue
+
+      while IFS= read -r FN; do
+        [ -n "$FN" ] || continue
+        if printf '%s\n' "$S2_FUNCS" | grep -Fqx "$FN"; then
+          if is_fn_exempt "scripts/$S1_BN" "$FN" || is_fn_exempt "scripts/$S2_BN" "$FN"; then
+            ok "sourced-dup-exempt-$S1_BN-$S2_BN-$FN" "$FN exempt in scripts/$S1_BN <-> scripts/$S2_BN"
+          else
+            bad "sourced-dup-$S1_BN-$S2_BN-$FN" "function '$FN' defined in both scripts/$S1_BN and sourced scripts/$S2_BN"
+            SOURCED_DUPS=$((SOURCED_DUPS + 1))
+          fi
+        fi
+      done <<EOF
+$S1_FUNCS
+EOF
+    fi
+  done
+done
+check no-duplicate-sourced-functions "$SOURCED_DUPS" "0" "no duplicate function definitions across sourcing pairs in scripts/"
+
+# --- Check B: test file defining a function in the script it tests ----------
+
+TEST_SHADOWS=0
+TESTS_CHECKED=0
+for T in "$ROOT"/tests/*.sh; do
+  [ -f "$T" ] || continue
+  T_BN="$(basename "$T")"
+  S="$ROOT/scripts/$T_BN"
+  [ -f "$S" ] || continue
+  TESTS_CHECKED=$((TESTS_CHECKED + 1))
+
+  T_FUNCS="$(get_defined_functions "$T")"
+  S_FUNCS="$(get_defined_functions "$S")"
+  [ -n "$T_FUNCS" ] && [ -n "$S_FUNCS" ] || continue
+
+  while IFS= read -r FN; do
+    [ -n "$FN" ] || continue
+    if printf '%s\n' "$S_FUNCS" | grep -Fqx "$FN"; then
+      if is_fn_exempt "tests/$T_BN" "$FN" || is_fn_exempt "scripts/$T_BN" "$FN"; then
+        ok "test-shadow-exempt-$T_BN-$FN" "$FN exempt in tests/$T_BN <-> scripts/$T_BN"
+      else
+        bad "test-shadows-script-$T_BN-$FN" "function '$FN' defined in both tests/$T_BN and scripts/$T_BN"
+        TEST_SHADOWS=$((TEST_SHADOWS + 1))
+      fi
+    fi
+  done <<EOF
+$T_FUNCS
+EOF
+done
+check no-test-script-shadowing "$TEST_SHADOWS" "0" "no test file defines a function that exists in the script it tests"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
+
