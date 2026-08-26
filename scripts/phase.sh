@@ -937,12 +937,15 @@ fi
 # line, no transcript involved. Fallback: the last transcript line that *starts*
 # with STATUS:, so prose like "I will end with STATUS: PASSED" cannot match.
 CLAIM=""
+VERDICT_ROUTE=""
 if [ -s "$VERDICT_FILE" ]; then
   CLAIM="$(strip_ansi < "$VERDICT_FILE" 2>/dev/null | awk 'NF { print; exit }' | trim_claim)"
+  [ -n "$CLAIM" ] && VERDICT_ROUTE="file"
 fi
 if [ -z "$CLAIM" ] && [ -f "$LOG" ]; then
   CLAIM="$(strip_ansi < "$LOG" 2>/dev/null \
     | grep -a -E '^[[:space:]*#>_`-]*STATUS:' | tail -1 | trim_claim)"
+  [ -n "$CLAIM" ] && VERDICT_ROUTE="print"
 fi
 case "$CLAIM" in
   ""|STATUS:*) ;;
@@ -992,6 +995,16 @@ elif [ "$RC" -eq 0 ]; then
   fi
 fi
 
+# Diff integrity field or skip
+VERDICT_ROUTE_FIELD=""
+if [ "$VERDICT_ROUTE" = "print" ] && [ -n "$CLAIM" ]; then
+  case "$(printf '%s' "$AGY_STATUS_VAL" | tr '[:lower:]' '[:upper:]')" in
+    ERROR*)
+      VERDICT_ROUTE_FIELD=" | Note: file route failed; printed route carried the verdict"
+      ;;
+  esac
+fi
+
 # Trust the claim only as a claim — the orchestrator still verifies the artifacts
 # on disk. rc=0 with no claim at all is not a failure and not a pass; say so.
 if [ "$RC" -ne 0 ]; then
@@ -1008,7 +1021,7 @@ fi
 if [ -n "$VERIFY" ] && [ "$VRC" -eq 0 ] && [ "$RC" -eq 0 ]; then
   LINE="$LINE | Verify: ok | VerifyLog: $VERIFY_LOG"
 fi
-LINE="$LINE$INTEGRITY_FIELD$FALLBACK_FIELD$JSON_FALLBACK_FIELD$SECRETS_FIELD$GITIGNORE_FIELD"
+LINE="$LINE$INTEGRITY_FIELD$FALLBACK_FIELD$JSON_FALLBACK_FIELD$SECRETS_FIELD$VERDICT_ROUTE_FIELD$GITIGNORE_FIELD"
 
 # Record the phase outcome in run.json
 FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | awk '{print $1}')"
@@ -1074,6 +1087,10 @@ LEDGER_ARGS=(
 
 if [ -n "$FINAL_VERDICT" ]; then
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verdict=$FINAL_VERDICT")
+fi
+
+if [ -n "$VERDICT_ROUTE" ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verdict_route=$VERDICT_ROUTE")
 fi
 
 if [ -n "$VERIFY" ] && [ "$RC" -eq 0 ]; then

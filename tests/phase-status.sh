@@ -39,16 +39,20 @@ if [ -f .agy/current ]; then
     printf '%b' "$STUB_VERDICT" > ".agy/runs/$CUR_RUN/phases/$STUB_PHASE/verdict"
   fi
 fi
-[ -n "${STUB_TRANSCRIPT:-}" ] && printf '%b' "$STUB_TRANSCRIPT"
+if [ -n "${STUB_TRANSCRIPT_RAW:-}" ]; then
+  printf '%s\n' "$STUB_TRANSCRIPT_RAW"
+elif [ -n "${STUB_TRANSCRIPT:-}" ]; then
+  printf '%b' "$STUB_TRANSCRIPT"
+fi
 exit "${STUB_RC:-0}"
 STUB_EOF
 chmod +x "$STUB"
 
 PASS=0; FAIL=0
 
-# run_case <name> <expected substring> <transcript> <verdict> <rc> [stale verdict]
+# run_case <name> <expected substring> <transcript> <verdict> <rc> [stale verdict] [raw transcript]
 run_case() {
-  NAME="$1"; WANT="$2"; TRANSCRIPT="$3"; VERDICT="$4"; WANT_RC="$5"; STALE="${6:-}"
+  NAME="$1"; WANT="$2"; TRANSCRIPT="$3"; VERDICT="$4"; WANT_RC="$5"; STALE="${6:-}"; RAW="${7:-}"
   REPO="$ROOT/repos/$NAME"
   mkdir -p "$REPO"
   ( cd "$REPO" && git init -q . )
@@ -62,7 +66,7 @@ run_case() {
 
   # Bypass brief lint: this suite tests verdict parsing and status extraction;
   # the brief is a stub by design, and brief validity has its own suite.
-  OUT="$(STUB_PHASE=TEST STUB_TRANSCRIPT="$TRANSCRIPT" STUB_VERDICT="$VERDICT" \
+  OUT="$(STUB_PHASE=TEST STUB_TRANSCRIPT="$TRANSCRIPT" STUB_TRANSCRIPT_RAW="$RAW" STUB_VERDICT="$VERDICT" \
     STUB_RC="$WANT_RC" AGY_BIN="$STUB" \
     "$PHASE_SH" --phase TEST --brief "$REPO/brief.md" --dir "$REPO" --run "$RUN_ID" --no-brief-lint 2>/dev/null)"
 
@@ -118,6 +122,39 @@ run_case g-stale-verdict \
   'STATUS: FAILED | File: REVIEW_FEEDBACK.md' \
   'retry round\nSTATUS: FAILED | File: REVIEW_FEEDBACK.md\n' '' 0 \
   'STATUS: PASSED | File: STALE.md\n'
+
+# h. worker refused verdict file write, reported ERROR, but printed verdict line
+run_case h-refused-verdict-file \
+  'Note: file route failed; printed route carried the verdict' \
+  '' '' 0 '' \
+  '{"status":"ERROR","response":"Refused to write verdict file to path outside workspace\nSTATUS: PASSED | File: CHANGES.md\n"}'
+
+# h2. assert h-refused-verdict-file produced a passing status line and clean round
+H_REPO="$ROOT/repos/h-refused-verdict-file"
+H_OUT="$(cat "$H_REPO"/.agy/runs/*/phases/TEST/status 2>/dev/null || true)"
+case "$H_OUT" in
+  "STATUS: PASSED | File: CHANGES.md"*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); printf '%-28s FAIL — wanted STATUS: PASSED prefix: %s\n' "" "$H_OUT" ;;
+esac
+if [ ! -e "$H_REPO"/.agy/runs/*/phases/TEST/retries ]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1)); printf '%-28s FAIL — retries file exists; round was not clean\n' ""
+fi
+
+# i. worker reported ERROR status but wrote verdict file — must NOT carry the note
+run_case i-verdict-file-with-error-status \
+  'STATUS: PASSED | File: CHANGES.md' \
+  '' \
+  'STATUS: PASSED | File: CHANGES.md\n' 0 '' \
+  '{"status":"ERROR","response":"some error occurred\n"}'
+
+I_REPO="$ROOT/repos/i-verdict-file-with-error-status"
+I_OUT="$(cat "$I_REPO"/.agy/runs/*/phases/TEST/status 2>/dev/null || true)"
+case "$I_OUT" in
+  *"Note: file route failed"*) FAIL=$((FAIL + 1)); printf '%-28s FAIL — note must not appear when verdict came from file: %s\n' "" "$I_OUT" ;;
+  *) PASS=$((PASS + 1)) ;;
+esac
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

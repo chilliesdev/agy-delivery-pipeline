@@ -19,6 +19,7 @@
 # Values containing newlines are flattened to preserve the single-line invariant.
 # Task strings are hashed by default as task_id (first 12 chars of git hash-object)
 # for privacy; set AGY_LEDGER_TASK=plain to record literal task strings.
+# verdict_route: which route carried the verdict ("file" or "print") when known.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -241,11 +242,12 @@ ledger_append() {
   local diff_val="" review_val=""
   local usage_val="" num_turns_val="" agy_status_val=""
   local issue_val=""
+  local verdict_route_val=""
 
   local has_elapsed=0 has_worker_rc=0 has_verdict=0 has_verify_rc=0
   local has_diff=0 has_review=0 has_attempt=0 has_retries_spent=0 has_retries_refunded=0
   local has_verify_ran=0 has_usage=0 has_num_turns=0 has_agy_status=0
-  local has_issue=0
+  local has_issue=0 has_verdict_route=0
 
   for pair in "$@"; do
     case "$pair" in
@@ -287,6 +289,7 @@ ledger_append() {
       num_turns) num_turns_val="$v"; has_num_turns=1 ;;
       agy_status) agy_status_val="$v"; has_agy_status=1 ;;
       issue) issue_val="$v"; has_issue=1 ;;
+      verdict_route) verdict_route_val="$v"; has_verdict_route=1 ;;
       *)
         echo "ledger: unknown key '$k'" >&2
         return 2 2>/dev/null || exit 2
@@ -362,6 +365,9 @@ ledger_append() {
   fi
   if [ $has_agy_status -eq 1 ] && [ -n "$agy_status_val" ]; then
     fields[${#fields[@]}]="\"agy_status\":\"$(_run_dir_escape "$agy_status_val")\""
+  fi
+  if [ $has_verdict_route -eq 1 ] && [ -n "$verdict_route_val" ]; then
+    fields[${#fields[@]}]="\"verdict_route\":\"$(_run_dir_escape "$verdict_route_val")\""
   fi
 
   if [ $has_diff -eq 1 ] && [ -n "$diff_val" ]; then
