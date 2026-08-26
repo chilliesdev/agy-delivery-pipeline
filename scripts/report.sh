@@ -6,7 +6,8 @@
 #
 # Reads:   <repo>/.agy/ledger.jsonl
 # Prints:  plain-text summary report of dispatch outcomes, retries, verify overrides,
-#          elapsed time distribution, token spend by phase, and unparseable records.
+#          elapsed time distribution, token spend by phase, gate firing counts,
+#          never-fired gates, and unparseable records.
 #
 # Exit codes:
 #     0  fine (including empty or absent ledger)
@@ -492,18 +493,46 @@ else
 fi
 echo ""
 
-VERIFY_OVERRIDES=0
-NO_STATUS_COUNT=0
+GATE_VERIFY_OVERRIDE=0
+GATE_DIFF_WEAKENED=0
+GATE_DIFF_SUSPICIOUS=0
+GATE_SECRETS_FOUND=0
+GATE_BRIEF_INVALID=0
+GATE_NO_STATUS=0
+GATE_RETRY_CAP=0
+GATE_BRIEF_IMPOSSIBLE=0
+GATE_GIT_STATE=0
 WORKER_ERROR_COUNT=0
 PRINTED_VERDICT_COUNT=0
 
 while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt; do
   _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt
   case "$r_st" in
-    VERIFY_FAILED*) VERIFY_OVERRIDES=$((VERIFY_OVERRIDES + 1)) ;;
+    VERIFY_FAILED*) GATE_VERIFY_OVERRIDE=$((GATE_VERIFY_OVERRIDE + 1)) ;;
   esac
   case "$r_st" in
-    NO_STATUS_REPORTED*) NO_STATUS_COUNT=$((NO_STATUS_COUNT + 1)) ;;
+    DIFF_TESTS_WEAKENED*) GATE_DIFF_WEAKENED=$((GATE_DIFF_WEAKENED + 1)) ;;
+  esac
+  case "$r_st" in
+    DIFF_SUSPICIOUS*) GATE_DIFF_SUSPICIOUS=$((GATE_DIFF_SUSPICIOUS + 1)) ;;
+  esac
+  case "$r_st" in
+    SECRETS_FOUND*) GATE_SECRETS_FOUND=$((GATE_SECRETS_FOUND + 1)) ;;
+  esac
+  case "$r_st" in
+    BRIEF_INVALID*) GATE_BRIEF_INVALID=$((GATE_BRIEF_INVALID + 1)) ;;
+  esac
+  case "$r_st" in
+    NO_STATUS_REPORTED*) GATE_NO_STATUS=$((GATE_NO_STATUS + 1)) ;;
+  esac
+  case "$r_st" in
+    RETRY_CAP_REACHED*) GATE_RETRY_CAP=$((GATE_RETRY_CAP + 1)) ;;
+  esac
+  case "$r_st" in
+    BRIEF_IMPOSSIBLE*) GATE_BRIEF_IMPOSSIBLE=$((GATE_BRIEF_IMPOSSIBLE + 1)) ;;
+  esac
+  case "$r_st" in
+    GIT_STATE_CHANGED*) GATE_GIT_STATE=$((GATE_GIT_STATE + 1)) ;;
   esac
   case "$r_agy_st" in
     ERROR*|error*|Error*) WORKER_ERROR_COUNT=$((WORKER_ERROR_COUNT + 1)) ;;
@@ -514,10 +543,33 @@ while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out
 done < "$VALID_TSV"
 
 echo "Gate and Verification Outcomes:"
-printf '  Verify gate overrides:          %d (worker claimed PASSED, --verify failed; number that justifies the gate)\n' "$VERIFY_OVERRIDES"
-printf '  No status reported dispatches:  %d\n' "$NO_STATUS_COUNT"
 printf '  Worker error dispatches:        %d (worker recorded ERROR status)\n' "$WORKER_ERROR_COUNT"
 printf '  Printed fallback dispatches:    %d (verdict read from printed fallback route rather than file)\n' "$PRINTED_VERDICT_COUNT"
+echo ""
+
+echo "Gate Firing Counts:"
+printf '  Verify gate overrides:          %d\n' "$GATE_VERIFY_OVERRIDE"
+printf '  Diff tests weakened:            %d\n' "$GATE_DIFF_WEAKENED"
+printf '  Diff suspicious:                %d\n' "$GATE_DIFF_SUSPICIOUS"
+printf '  Secrets found:                  %d\n' "$GATE_SECRETS_FOUND"
+printf '  Brief invalid:                  %d\n' "$GATE_BRIEF_INVALID"
+printf '  No status reported dispatches:  %d\n' "$GATE_NO_STATUS"
+printf '  Retry cap reached:              %d\n' "$GATE_RETRY_CAP"
+printf '  Brief impossible:               %d\n' "$GATE_BRIEF_IMPOSSIBLE"
+printf '  Git state changed:              %d\n' "$GATE_GIT_STATE"
+echo ""
+
+echo "Never-Fired Gates:"
+echo "  This gate has never fired — either nothing has triggered it yet, or it is dead code."
+[ "$GATE_VERIFY_OVERRIDE" -eq 0 ] && echo "  - Verify gate overrides"
+[ "$GATE_DIFF_WEAKENED" -eq 0 ] && echo "  - Diff tests weakened"
+[ "$GATE_DIFF_SUSPICIOUS" -eq 0 ] && echo "  - Diff suspicious"
+[ "$GATE_SECRETS_FOUND" -eq 0 ] && echo "  - Secrets found"
+[ "$GATE_BRIEF_INVALID" -eq 0 ] && echo "  - Brief invalid"
+[ "$GATE_NO_STATUS" -eq 0 ] && echo "  - No status reported dispatches"
+[ "$GATE_RETRY_CAP" -eq 0 ] && echo "  - Retry cap reached"
+[ "$GATE_BRIEF_IMPOSSIBLE" -eq 0 ] && echo "  - Brief impossible"
+[ "$GATE_GIT_STATE" -eq 0 ] && echo "  - Git state changed"
 echo ""
 
 echo "Data Integrity:"
