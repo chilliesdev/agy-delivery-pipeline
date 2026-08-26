@@ -30,7 +30,9 @@ FAKE_LIB="$HERE/lib/fake-agy.sh"
 [ -f "$RUN_DIR_SH" ]    || { echo "regression-corpus: scripts/run-dir.sh not found" >&2; exit 2; }
 [ -f "$FAKE_LIB" ]      || { echo "regression-corpus: tests/lib/fake-agy.sh not found" >&2; exit 2; }
 
+# shellcheck source=../scripts/run-dir.sh
 . "$RUN_DIR_SH"
+# shellcheck source=lib/fake-agy.sh
 . "$FAKE_LIB"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/regression-corpus.XXXXXX")"

@@ -82,8 +82,8 @@ clean_candidate() {
 
 strip_line_suffix() {
   local p="$1"
-  local i tail
-  for i in 1 2; do
+  local tail
+  for _ in 1 2; do
     case "$p" in
       *:[0-9]*)
         tail="${p##*:}"
