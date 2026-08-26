@@ -159,11 +159,17 @@ elif [ -z "\$TARGET_DIR" ]; then
 fi
 
 # 8. Verdict formatting
-V_TEXT="\${STUB_VERDICT:-\$DEFAULT_VERDICT}"
-case "\$V_TEXT" in
-  STATUS:*) ;;
-  *) V_TEXT="STATUS: \$V_TEXT" ;;
-esac
+if [ -n "\${STUB_VERDICT+x}" ]; then
+  V_TEXT="\$STUB_VERDICT"
+else
+  V_TEXT="\$DEFAULT_VERDICT"
+fi
+if [ -n "\$V_TEXT" ]; then
+  case "\$V_TEXT" in
+    STATUS:*) ;;
+    *) V_TEXT="STATUS: \$V_TEXT" ;;
+  esac
+fi
 
 # 9. Write verdict file
 CAN_WRITE=1
@@ -171,7 +177,7 @@ if [ "\$B_DENY_PLAN" -eq 1 ] && [ "\$MODE_ARG" = "plan" ]; then
   CAN_WRITE=0
 fi
 
-if [ "\$CAN_WRITE" -eq 1 ] && [ -n "\$TARGET_DIR" ] && [ -d "\$TARGET_DIR" ]; then
+if [ "\$CAN_WRITE" -eq 1 ] && [ -n "\$V_TEXT" ] && [ -n "\$TARGET_DIR" ] && [ -d "\$TARGET_DIR" ]; then
   if [ -f "\$TARGET_DIR/.agy/current" ]; then
     CUR_RUN="\$(cat "\$TARGET_DIR/.agy/current" 2>/dev/null || true)"
     if [ -n "\$CUR_RUN" ]; then
@@ -190,7 +196,11 @@ if [ "\$CAN_WRITE" -eq 1 ] && [ -n "\$TARGET_DIR" ] && [ -d "\$TARGET_DIR" ]; th
 fi
 
 # 10. Worker output
-if [ "\$OUTPUT_FORMAT" = "json" ]; then
+if [ -n "\${STUB_TRANSCRIPT_RAW:-}" ]; then
+  printf '%s\n' "\$STUB_TRANSCRIPT_RAW"
+elif [ -n "\${STUB_TRANSCRIPT:-}" ]; then
+  printf '%b' "\$STUB_TRANSCRIPT"
+elif [ "\$OUTPUT_FORMAT" = "json" ]; then
   JSON_ESCAPED="\$(printf '%s' "\$V_TEXT" | sed 's/"/\\\\"/g')"
   printf '{"response":"%s","num_turns":1,"usage":{"total_tokens":42}}\n' "\$JSON_ESCAPED"
 else
