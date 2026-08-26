@@ -621,5 +621,56 @@ case "$OUT18_ENV" in
   *) bad repo-budget-env-status "unexpected STATUS line from env var: $OUT18_ENV" ;;
 esac
 
+# --- 21. verdict_route recorded when supplied and absent when not -----------
+
+R19="$(new_repo verdict-route-test)"
+ledger_append "$R19" run=run-19-file phase=TEST tier=medium model=m backend=agy \
+  started=2026-08-24T10:00:00Z elapsed_s=5 worker_rc=0 verdict=PASSED verdict_route=file verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0
+LINE19_FILE="$(cat "$R19/.agy/ledger.jsonl" 2>/dev/null)"
+
+if printf '%s\n' "$LINE19_FILE" | grep -q '"verdict_route":"file"'; then
+  ok verdict-route-file-recorded "verdict_route=file recorded in ledger line"
+else
+  bad verdict-route-file-recorded "verdict_route=file missing in ledger: $LINE19_FILE"
+fi
+
+if [ "${LINE19_FILE:0:1}" = "{" ] && [ "${LINE19_FILE: -1}" = "}" ]; then
+  ok verdict-route-json-valid "ledger line with verdict_route is single-line JSON"
+else
+  bad verdict-route-json-valid "ledger line with verdict_route is not valid JSON: $LINE19_FILE"
+fi
+
+# Run without verdict_route produces line with no verdict_route field
+ledger_append "$R19" run=run-19-no-route phase=TEST tier=medium model=m backend=agy \
+  started=2026-08-24T10:05:00Z elapsed_s=5 worker_rc=0 verdict=PASSED verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0
+LINE19_NO_ROUTE="$(tail -1 "$R19/.agy/ledger.jsonl" 2>/dev/null)"
+
+if printf '%s\n' "$LINE19_NO_ROUTE" | grep -q '"verdict_route"'; then
+  bad verdict-route-absent-omitted "verdict_route key present in ledger when not supplied: $LINE19_NO_ROUTE"
+else
+  ok verdict-route-absent-omitted "verdict_route key omitted entirely when not supplied"
+fi
+
+# Dispatch with file route records verdict_route=file
+run_phase "$R19" --task "dispatch with verdict file" >/dev/null
+LINE19_DISP_FILE="$(tail -1 "$R19/.agy/ledger.jsonl" 2>/dev/null)"
+if printf '%s\n' "$LINE19_DISP_FILE" | grep -q '"verdict_route":"file"'; then
+  ok phase-dispatch-verdict-route-file "phase dispatch with verdict file records verdict_route=file"
+else
+  bad phase-dispatch-verdict-route-file "phase dispatch with verdict file missing verdict_route=file: $LINE19_DISP_FILE"
+fi
+
+# Dispatch without verdict file records verdict_route=print
+STUB_OUTPUT='{"conversation_id":"c-fb-route","status":"SUCCESS","response":"STATUS: PASSED | File: CHANGES.md\n","duration_seconds":1.0,"num_turns":1}' \
+  STUB_NO_VERDICT_FILE=1 run_phase "$R19" --task "dispatch with printed route" >/dev/null
+LINE19_DISP_PRINT="$(tail -1 "$R19/.agy/ledger.jsonl" 2>/dev/null)"
+if printf '%s\n' "$LINE19_DISP_PRINT" | grep -q '"verdict_route":"print"'; then
+  ok phase-dispatch-verdict-route-print "phase dispatch with printed route records verdict_route=print"
+else
+  bad phase-dispatch-verdict-route-print "phase dispatch with printed route missing verdict_route=print: $LINE19_DISP_PRINT"
+fi
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

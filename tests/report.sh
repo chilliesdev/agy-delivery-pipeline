@@ -44,11 +44,11 @@ new_repo() {
 R_COL="$(new_repo col-integrity)"
 mkdir -p "$R_COL/.agy"
 
-# Record with distinct, identifiable values in every single field of the 15-field TSV:
+# Record with distinct, identifiable values in every single field of the 17-field TSV:
 # 1:run=r-col-integ, 2:phase=CUSTOMPHASE, 3:attempt=2, 4:status=PASSED, 5:elapsed_s=42,
 # 6:verdict="STATUS: PASSED | File: x.txt", 7:verify_ran=true, 8:started=2026-08-25T11:22:33Z,
 # 9:input_tokens=111, 10:output_tokens=222, 11:thinking_tokens=333, 12:total_tokens=666,
-# 13:retries_refunded=0, 14:has_usage=1, 15:issue=888
+# 13:retries_refunded=0, 14:has_usage=1, 15:issue=888, 16:agy_status=SUCCESS, 17:verdict_route=file
 ledger_append "$R_COL" \
   run=r-col-integ \
   phase=CUSTOMPHASE \
@@ -60,12 +60,14 @@ ledger_append "$R_COL" \
   elapsed_s=42 \
   worker_rc=0 \
   verdict="STATUS: PASSED | File: x.txt" \
+  verdict_route=file \
   verify_ran=true \
   verify_rc=0 \
   status=PASSED \
   retries_spent=0 \
   retries_refunded=0 \
   issue=888 \
+  agy_status=SUCCESS \
   usage='{"input_tokens":111,"output_tokens":222,"thinking_tokens":333,"cache_read_tokens":0,"total_tokens":666}'
 
 REPORT_COL="$(bash "$REPORT_SH" --dir "$R_COL")"
@@ -457,6 +459,70 @@ check cli-non-git "${RC_NON_GIT:-0}" 4 "non-git dir exits 4"
 
 bash "$REPORT_SH" --bogus-arg >/dev/null 2>&1 || RC_BAD_ARG=$?
 check cli-bad-arg "${RC_BAD_ARG:-0}" 2 "unknown arg exits 2"
+
+
+# =============================================================================
+# 7. Worker Error and Printed Fallback Counts
+# =============================================================================
+
+R_COUNTS="$(new_repo worker-error-and-printed-fallback)"
+mkdir -p "$R_COUNTS/.agy"
+
+# Record 1: clean run with file route (verdict_route=file, agy_status=SUCCESS)
+ledger_append "$R_COUNTS" run=run-1 phase=IMPLEMENT attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:00:00Z elapsed_s=10 worker_rc=0 verdict=PASSED verdict_route=file verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 agy_status=SUCCESS
+
+# Record 2: worker error with printed route (verdict_route=print, agy_status=ERROR)
+ledger_append "$R_COUNTS" run=run-2 phase=IMPLEMENT attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:05:00Z elapsed_s=12 worker_rc=0 verdict=PASSED verdict_route=print verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 agy_status=ERROR
+
+# Record 3: worker error with file route (verdict_route=file, agy_status=ERROR)
+ledger_append "$R_COUNTS" run=run-3 phase=REVIEW attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:10:00Z elapsed_s=8 worker_rc=0 verdict=PASSED verdict_route=file verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 agy_status=ERROR
+
+# Record 4: clean worker with printed fallback route (verdict_route=print, agy_status=SUCCESS)
+ledger_append "$R_COUNTS" run=run-4 phase=QA attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:15:00Z elapsed_s=6 worker_rc=0 verdict=PASSED verdict_route=print verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 agy_status=SUCCESS
+
+REPORT_COUNTS="$(bash "$REPORT_SH" --dir "$R_COUNTS")"; RC_COUNTS=$?
+check report-counts-rc "$RC_COUNTS" 0 "report.sh exits 0 on counts fixture"
+
+if printf '%s\n' "$REPORT_COUNTS" | grep -q "Worker error dispatches:[[:space:]]*2"; then
+  ok report-worker-errors-counted "worker error dispatches counted accurately (2)"
+else
+  bad report-worker-errors-counted "worker error dispatches count unexpected: $REPORT_COUNTS"
+fi
+
+if printf '%s\n' "$REPORT_COUNTS" | grep -q "Printed fallback dispatches:[[:space:]]*2"; then
+  ok report-printed-fallbacks-counted "printed fallback dispatches counted accurately (2)"
+else
+  bad report-printed-fallbacks-counted "printed fallback dispatches count unexpected: $REPORT_COUNTS"
+fi
+
+# Zero reporting: ledger with neither worker error nor printed fallback reports zero rather than omitting
+R_ZERO="$(new_repo counts-zero)"
+mkdir -p "$R_ZERO/.agy"
+ledger_append "$R_ZERO" run=run-z phase=IMPLEMENT attempt=1 tier=m model=m backend=agy \
+  started=2026-08-25T10:00:00Z elapsed_s=5 worker_rc=0 verdict=PASSED verdict_route=file verify_ran=false status=PASSED \
+  retries_spent=0 retries_refunded=0 agy_status=SUCCESS
+
+REPORT_ZERO="$(bash "$REPORT_SH" --dir "$R_ZERO")"
+
+if printf '%s\n' "$REPORT_ZERO" | grep -q "Worker error dispatches:[[:space:]]*0"; then
+  ok report-worker-errors-zero "worker error dispatches reports 0 when none present"
+else
+  bad report-worker-errors-zero "worker error dispatches missing or not 0: $REPORT_ZERO"
+fi
+
+if printf '%s\n' "$REPORT_ZERO" | grep -q "Printed fallback dispatches:[[:space:]]*0"; then
+  ok report-printed-fallbacks-zero "printed fallback dispatches reports 0 when none present"
+else
+  bad report-printed-fallbacks-zero "printed fallback dispatches missing or not 0: $REPORT_ZERO"
+fi
 
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
