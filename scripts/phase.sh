@@ -23,6 +23,11 @@
 # exits non-zero comes back as STATUS: VERIFY_FAILED(rc=N), exit 5 — distinct
 # from WORKER_FAILED, which is the worker itself dying.
 #
+# A worker verdict of STATUS: BRIEF_IMPOSSIBLE(<what is in the way>) returns
+# exit 10. The parenthesised text names the collision between the brief's
+# requirements and constraints. This is a clean outcome: it does not consume a
+# retry, refunding the round so the retry counter is left unchanged.
+#
 # The retry counter is mechanical: each dispatch beyond the first bumps
 # R/phases/<PHASE>/retries, and past --retry-cap (default 2, matching SKILL.md)
 # phase.sh refuses to dispatch at all, returning STATUS: RETRY_CAP_REACHED(n=N),
@@ -949,6 +954,11 @@ case "$CLAIM" in
   *) CLAIM="STATUS: $CLAIM" ;;   # a verdict file that omitted the marker
 esac
 
+IS_IMPOSSIBLE=0
+case "$CLAIM" in
+  STATUS:\ BRIEF_IMPOSSIBLE*|BRIEF_IMPOSSIBLE*) IS_IMPOSSIBLE=1 ;;
+esac
+
 # The gate SKILL.md asks the orchestrator to run by hand, run here instead. It
 # is a claim the worker cannot make good on by asserting it: the check runs in
 # $DIR, through a shell so `&&` and pipelines work, and its own exit code — not
@@ -956,7 +966,7 @@ esac
 # refused: there is no work to check. Output goes to its own log and never to
 # stdout, which belongs to the STATUS line alone.
 VRC=0
-if [ -n "$VERIFY" ] && [ "$RC" -eq 0 ]; then
+if [ -n "$VERIFY" ] && [ "$RC" -eq 0 ] && [ "$IS_IMPOSSIBLE" -eq 0 ]; then
   printf -- '--- phase.sh: verify %s ---\n$ %s\n' "$PHASE" "$VERIFY" > "$VERIFY_LOG" 2>/dev/null
   # No pipe here on purpose: $? is the check's own code, not a tee's.
   ( cd "$DIR" && /bin/bash -c "$VERIFY" ) >> "$VERIFY_LOG" 2>&1
@@ -1011,8 +1021,8 @@ fi
 LINE="$LINE$INTEGRITY_FIELD$FALLBACK_FIELD$JSON_FALLBACK_FIELD$SECRETS_FIELD$GITIGNORE_FIELD"
 
 # Record the phase outcome in run.json
-FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | awk '{print $1}')"
-FINAL_VERDICT="$(printf '%s' "${CLAIM#STATUS: }" | awk '{print $1}')"
+FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | sed -e 's/[[:space:]]*|.*//')"
+FINAL_VERDICT="$(printf '%s' "${CLAIM#STATUS: }" | sed -e 's/[[:space:]]*|.*//')"
 run_dir_record_phase "$R" "$PHASE" "status=$FINAL_STATUS" "verdict=${FINAL_VERDICT:-$FINAL_STATUS}" "attempts=$((SPENT + 1))"
 
 # A round that ends clean ends the cycle, so the next one starts from zero
@@ -1046,7 +1056,7 @@ fi
 # user's ^C reaches phase.sh with the worker, phase.sh dies here and never
 # reaches this line, so the retry it wrote before dispatching stands. Only a
 # worker that returned a non-zero code to a phase.sh still running is refunded.
-if [ "$RC" -ne 0 ]; then
+if [ "$RC" -ne 0 ] || [ "$IS_IMPOSSIBLE" -eq 1 ]; then
   if [ -n "$HAD_COUNTER" ]; then
     printf '%s\n' "$SPENT" > "$RETRY_FILE" 2>/dev/null
   else
@@ -1082,7 +1092,7 @@ else
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verify_ran=false")
 fi
 
-if [ "$RC" -ne 0 ]; then
+if [ "$RC" -ne 0 ] || [ "$IS_IMPOSSIBLE" -eq 1 ]; then
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "retries_refunded=1")
 else
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "retries_refunded=0")
@@ -1116,6 +1126,7 @@ ledger_append "$DIR" "${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" 2>/dev/null || echo
 
 printf '%s\n' "$LINE" | tee "$STATUS_FILE"
 [ "$RC" -eq 0 ] || exit "$RC"
+[ "$IS_IMPOSSIBLE" -eq 0 ] || exit 10
 [ "$VRC" -eq 0 ] || exit 5
 [ "$INTEGRITY_RC" -eq 0 ] || exit "$INTEGRITY_RC"
 exit 0
