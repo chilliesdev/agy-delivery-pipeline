@@ -636,7 +636,10 @@ The pipeline enforces concrete architectural guarantees across every run:
 - **No push, no tag, no merge.** No script and no worker in this repository runs
   `git push`, creates a tag, or merges — not behind a flag, not as a default.
   The release phase inspects, prepares and proposes, printing the commands a
-  person then runs by hand.
+  person then runs by hand. In phases dispatched in edit-accepting mode, the
+  guarantee is enforced by the driver denying shell use. In the QA phase (which
+  runs with commands enabled), it rests on the brief plus a post-hoc git state
+  check (`scripts/check-git-state.sh`), which detects rather than prevents.
 - **Workers never handle credentials.** Discovery reports credential names and
   never values; secret scanning prevents credentials from entering briefs or
   diffs.

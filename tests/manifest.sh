@@ -77,6 +77,14 @@ else
   bad pipeline-not-ambient "agy-pipeline still reads as ambient"
 fi
 
+# The QA phase section of agy-pipeline must name --check-git-state.
+QA_SECTION="$(sed -n '/^### Phase 3/,/^### Phase 4/p' "$ROOT/skills/agy-pipeline/SKILL.md" 2>/dev/null)"
+if printf '%s\n' "$QA_SECTION" | grep -q -- '--check-git-state'; then
+  ok pipeline-qa-git-state "QA phase guidance names --check-git-state"
+else
+  bad pipeline-qa-git-state "QA phase guidance does not name --check-git-state"
+fi
+
 # --- commands ---------------------------------------------------------------
 
 for C in pipeline delegate preflight phase; do
