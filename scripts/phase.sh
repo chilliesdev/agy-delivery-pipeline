@@ -5,7 +5,7 @@
 #            [--dir <repo>] [--run <id|current|new>] [--task <string>]
 #            [--mode accept-edits|plan|full] [--timeout 30m]
 #            [--sandbox] [--no-preflight] [--no-brief-lint] [--no-secret-scan]
-#            [--no-diff-integrity]
+#            [--no-diff-integrity] [--check-git-state]
 #            [--allow-shell] [--verify '<command>'] [--retry-cap <n>]
 #            [--budget-tokens <n>] [--repo-budget-tokens <n>] [--max-workers <n>]
 #            [--reset-retries] [--ignore-via gitignore|exclude]
@@ -22,6 +22,9 @@
 # result into that one line. It overrides the worker: a PASSED claim whose check
 # exits non-zero comes back as STATUS: VERIFY_FAILED(rc=N), exit 5 — distinct
 # from WORKER_FAILED, which is the worker itself dying.
+#
+# --check-git-state snapshots git state (HEAD, tags, refs) before dispatch and
+# compares after return via check-git-state.sh, failing the phase on any changes.
 #
 # The retry counter is mechanical: each dispatch beyond the first bumps
 # R/phases/<PHASE>/retries, and past --retry-cap (default 2, matching SKILL.md)
@@ -170,6 +173,7 @@ SKIP_PREFLIGHT="${AGY_SKIP_PREFLIGHT:-}"
 SKIP_BRIEF_LINT="${AGY_SKIP_BRIEF_LINT:-}"
 SKIP_SECRET_SCAN="${AGY_SKIP_SECRET_SCAN:-}"
 SKIP_DIFF_INTEGRITY="${AGY_SKIP_DIFF_INTEGRITY:-}"
+CHECK_GIT_STATE="${AGY_CHECK_GIT_STATE:-}"
 ALLOW_SHELL="${AGY_ALLOW_SHELL:-}"
 VERIFY=""; RESET_RETRIES=""; IGNORE_VIA="gitignore"
 RETRY_CAP="${AGY_RETRY_CAP:-2}"
@@ -203,6 +207,7 @@ while [ $# -gt 0 ]; do
     --no-brief-lint) SKIP_BRIEF_LINT=1; shift ;;
     --no-secret-scan) SKIP_SECRET_SCAN=1; shift ;;
     --no-diff-integrity) SKIP_DIFF_INTEGRITY=1; shift ;;
+    --check-git-state) CHECK_GIT_STATE=1; shift ;;
     --allow-shell) ALLOW_SHELL=1; shift ;;
     --quiet|-q)    QUIET=1; shift ;;
     -h|--help)     sed -n '2,68p' "$0"; exit 0 ;;
@@ -820,6 +825,12 @@ if [ -z "$SKIP_DIFF_INTEGRITY" ]; then
   fi
 fi
 
+GIT_STATE_BEFORE=""
+if [ -n "$CHECK_GIT_STATE" ]; then
+  GIT_STATE_BEFORE="$PHASE_DIR/git_state_before.txt"
+  "$HERE/check-git-state.sh" snapshot --dir "$DIR" --out "$GIT_STATE_BEFORE" >/dev/null 2>&1 || true
+fi
+
 START_EPOCH=$(date +%s)
 
 MONITOR_PID=""
@@ -964,6 +975,24 @@ if [ -n "$VERIFY" ] && [ "$RC" -eq 0 ]; then
   printf -- '--- phase.sh: verify rc=%s ---\n' "$VRC" >> "$VERIFY_LOG" 2>/dev/null
 fi
 
+# Run git state check if requested
+GIT_STATE_FIELD=""
+GIT_STATE_RC=0
+GIT_STATE_STATUS=""
+
+if [ -n "$CHECK_GIT_STATE" ]; then
+  if [ -n "$GIT_STATE_BEFORE" ] && [ -f "$GIT_STATE_BEFORE" ]; then
+    GIT_STATE_OUT="$("$HERE/check-git-state.sh" compare --dir "$DIR" --before "$GIT_STATE_BEFORE" 2>/dev/null)"
+    GIT_STATE_RC=$?
+    GIT_STATE_STATUS="$(printf '%s\n' "$GIT_STATE_OUT" | sed -e 's/^STATUS:[[:space:]]*//' -e 's/[[:space:]]*|.*//')"
+    [ -z "$GIT_STATE_STATUS" ] && GIT_STATE_STATUS="GIT_STATE_UNCHECKED(empty_output)"
+    GIT_STATE_FIELD=" | GitState: $GIT_STATE_STATUS"
+  else
+    GIT_STATE_STATUS="GIT_STATE_UNCHECKED(no_snapshot)"
+    GIT_STATE_FIELD=" | GitState: $GIT_STATE_STATUS"
+  fi
+fi
+
 # Run diff integrity check over the changes the worker made
 INTEGRITY_FIELD=""
 INTEGRITY_RC=0
@@ -998,6 +1027,8 @@ if [ "$RC" -ne 0 ]; then
   LINE="STATUS: WORKER_FAILED(rc=$RC) | Phase: $PHASE | Run: $RUN_ID | Next: check the brief path and the criteria, then retry once | Log: $LOG"
 elif [ -n "$VERIFY" ] && [ "$VRC" -ne 0 ]; then
   LINE="STATUS: VERIFY_FAILED(rc=$VRC) | Phase: $PHASE | Run: $RUN_ID | Claimed: ${CLAIM:-none} | Next: read the verify log named on this line, then fix or re-brief once | Log: $LOG | VerifyLog: $VERIFY_LOG"
+elif [ -n "$CHECK_GIT_STATE" ] && [ "$GIT_STATE_RC" -ne 0 ]; then
+  LINE="STATUS: $GIT_STATE_STATUS | Phase: $PHASE | Run: $RUN_ID | Claimed: ${CLAIM:-none} | Next: git state changed during phase execution — inspect git status | Log: $LOG"
 elif [ -n "$CLAIM" ]; then
   LINE="$CLAIM | Phase: $PHASE | Run: $RUN_ID | Log: $LOG"
 else
@@ -1008,7 +1039,7 @@ fi
 if [ -n "$VERIFY" ] && [ "$VRC" -eq 0 ] && [ "$RC" -eq 0 ]; then
   LINE="$LINE | Verify: ok | VerifyLog: $VERIFY_LOG"
 fi
-LINE="$LINE$INTEGRITY_FIELD$FALLBACK_FIELD$JSON_FALLBACK_FIELD$SECRETS_FIELD$GITIGNORE_FIELD"
+LINE="$LINE$GIT_STATE_FIELD$INTEGRITY_FIELD$FALLBACK_FIELD$JSON_FALLBACK_FIELD$SECRETS_FIELD$GITIGNORE_FIELD"
 
 # Record the phase outcome in run.json
 FINAL_STATUS="$(printf '%s' "${LINE#STATUS: }" | awk '{print $1}')"
@@ -1021,7 +1052,7 @@ run_dir_record_phase "$R" "$PHASE" "status=$FINAL_STATUS" "verdict=${FINAL_VERDI
 # every phase uses for "I could not". NO_STATUS_REPORTED is not clean: it is
 # unresolved, and an unresolved round is exactly what the cap is counting.
 CLEAN=0
-if [ "$RC" -eq 0 ] && [ "$VRC" -eq 0 ] && [ "$INTEGRITY_RC" -eq 0 ] && [ -n "$CLAIM" ]; then
+if [ "$RC" -eq 0 ] && [ "$VRC" -eq 0 ] && [ "$GIT_STATE_RC" -eq 0 ] && [ "$INTEGRITY_RC" -eq 0 ] && [ -n "$CLAIM" ]; then
   WORD="$(printf '%s' "${CLAIM#STATUS: }" | awk '{print $1}' \
     | tr -d '|' | tr '[:lower:]' '[:upper:]')"
   case "$WORD" in
@@ -1082,6 +1113,10 @@ else
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "verify_ran=false")
 fi
 
+if [ -n "$CHECK_GIT_STATE" ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "git_state_ran=true" "git_state_rc=$GIT_STATE_RC")
+fi
+
 if [ "$RC" -ne 0 ]; then
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "retries_refunded=1")
 else
@@ -1117,5 +1152,6 @@ ledger_append "$DIR" "${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" 2>/dev/null || echo
 printf '%s\n' "$LINE" | tee "$STATUS_FILE"
 [ "$RC" -eq 0 ] || exit "$RC"
 [ "$VRC" -eq 0 ] || exit 5
+[ "$GIT_STATE_RC" -eq 0 ] || exit "$GIT_STATE_RC"
 [ "$INTEGRITY_RC" -eq 0 ] || exit "$INTEGRITY_RC"
 exit 0

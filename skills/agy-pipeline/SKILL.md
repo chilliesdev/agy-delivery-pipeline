@@ -722,6 +722,19 @@ or `STATUS: FAILED | File: .agy/runs/<run-id>/QA_REPORT.md` — to
 `.agy/runs/<run-id>/phases/QA/verdict`, and print that same line as the last
 line of your output. Do not write `.agy/runs/<run-id>/phases/QA/status`."*
 
+```
+${CLAUDE_PLUGIN_ROOT}/scripts/phase.sh --phase QA --run "$RUN_ID" \
+  --brief .agy/runs/$RUN_ID/phases/QA/brief.md --tier medium \
+  --no-preflight --mode full --sandbox --check-git-state
+```
+
+This phase dispatches with `--check-git-state`: this is the phase where the
+promise rests on the brief rather than on the driver refusing shell use, so the
+check is what makes the claim checkable. A QA round whose git state changed is
+not a pass whatever the verdict says; `phase.sh` reports
+`STATUS: GIT_STATE_CHANGED(...)`. The orchestrator stops, reports what moved,
+and does not advance to the next phase.
+
 This is the only phase that runs commands, so it needs `--mode full`, which turns
 off every permission prompt. Pair it with `--sandbox` for agy's terminal
 restrictions, and commit or stash first — that, not directory placement, is what
@@ -744,8 +757,12 @@ and does not write `.agy/runs/<run-id>/phases/DOCS/status`.
 > Not a script, not a worker, not behind a flag, not as a default.
 > `check-release.sh` only reads. The release worker only writes files. The
 > orchestrator prints the commands and stops. **A person runs them**, having
-> read them first. Any future change here that makes an irreversible git command
-> reachable from an unattended run is a defect, whatever it is called.
+> read them first. In phases dispatched in edit-accepting mode, the guarantee is
+> enforced by the driver denying shell use. In the QA phase (which runs commands),
+> it rests on the brief plus a post-hoc git state check (`check-git-state.sh`),
+> which detects rather than prevents. Any future change here that makes an
+> irreversible git command reachable from an unattended run is a defect, whatever
+> it is called.
 
 Three steps, and it is worth being blunt about which is which:
 
