@@ -129,7 +129,7 @@ CKSUM_SHIM="$(cksum < "$ARGV_SHIM_STD")"
 check argv-driver-shim-match "$CKSUM_DRIVER" "$CKSUM_SHIM" "driver_run and agy-run.sh produce identical argv"
 
 # Verify exact argv contents as a single complete sequence
-EXPECTED_ARGV_STD="$(printf '%s\n' "$STUB_AGY" "--output-format" "json" \
+EXPECTED_ARGV_STD="$(printf '%s\n' "$STUB_AGY" "--output-format" "stream-json" \
   "-p=Test brief content for argv comparison" "--add-dir" "$R_ARGV" \
   "--model" "gemini-3.7-flash-medium" "--print-timeout" "30m" "--mode" "accept-edits")"
 check argv-full-match "$(cat "$ARGV_DRIVER_STD")" "$EXPECTED_ARGV_STD" "complete argv matches expected sequence including binary"
@@ -140,7 +140,7 @@ STUB_ARGV_FILE="$ARGV_OPTS" AGY_BIN="$STUB_AGY" \
   driver_run --brief "$BRIEF_ARGV" --dir "$R_ARGV" --model "gemini-3.7-flash-high" \
              --mode "accept-edits" --effort "high" --sandbox --timeout "45m" --log "$LOG_ARGV" >/dev/null 2>&1
 
-EXPECTED_ARGV_OPTS="$(printf '%s\n' "$STUB_AGY" "--output-format" "json" \
+EXPECTED_ARGV_OPTS="$(printf '%s\n' "$STUB_AGY" "--output-format" "stream-json" \
   "-p=Test brief content for argv comparison" "--add-dir" "$R_ARGV" \
   "--model" "gemini-3.7-flash-high" "--print-timeout" "45m" "--mode" "accept-edits" \
   "--effort" "high" "--sandbox")"
@@ -152,7 +152,7 @@ STUB_ARGV_FILE="$ARGV_FULL" AGY_BIN="$STUB_AGY" \
   driver_run --brief "$BRIEF_ARGV" --dir "$R_ARGV" --model "gemini-3.7-flash-medium" \
              --mode "full" --timeout "30m" --log "$LOG_ARGV" >/dev/null 2>&1
 
-EXPECTED_ARGV_FULL="$(printf '%s\n' "$STUB_AGY" "--output-format" "json" \
+EXPECTED_ARGV_FULL="$(printf '%s\n' "$STUB_AGY" "--output-format" "stream-json" \
   "-p=Test brief content for argv comparison" "--add-dir" "$R_ARGV" \
   "--model" "gemini-3.7-flash-medium" "--print-timeout" "30m" \
   "--dangerously-skip-permissions")"
@@ -367,6 +367,112 @@ case "$OUT_CLI_OVERRIDE" in
   *)
     bad cli-overrides-toml-driver-status "unexpected output on CLI driver override: $OUT_CLI_OVERRIDE" ;;
 esac
+
+# --- the step stream: what a dispatch actually did ---------------------------
+#
+# json emits one result object and nothing else, so a worker's steps, their
+# timings and their per-step spend were never produced. stream-json produces all
+# three and the driver used to overwrite them with the response text. These cases
+# pin both halves: the stream survives, and the result is still read from it
+# exactly as it was read from the single-object form.
+#
+# The fixture below is the shape a real agy stream-json dispatch emits, trimmed.
+
+R_STREAM="$(new_repo stream-json)"
+RUN_STREAM="$(cat "$R_STREAM/.agy/current")"
+PHASE_STREAM="$R_STREAM/.agy/runs/$RUN_STREAM/phases/TEST"
+mkdir -p "$PHASE_STREAM"
+BRIEF_STREAM="$PHASE_STREAM/brief.md"
+printf '# Phase: TEST\nGoal: stream shape.\n' > "$BRIEF_STREAM"
+
+STUB_STREAM="$SCRATCH/stub_stream_agy"
+cat > "$STUB_STREAM" <<'STREAM_EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "models" ]; then
+  printf 'gemini-3.7-flash-medium\tGemini\n'; exit 0
+fi
+cat <<'NDJSON'
+{"event":"init","conversation_id":"c-1","init":{"model":"gemini-3.7-flash-medium","cwd":"/tmp","permission_mode":"request-review"}}
+{"event":"step_update","step_update":{"conversation_id":"c-1","step_index":1,"state":"DONE","step_type":"agent_response","duration_seconds":1.77,"usage":{"input_tokens":16847,"output_tokens":69,"thinking_tokens":6,"cache_read_tokens":0,"total_tokens":16916}}}
+{"event":"step_update","step_update":{"conversation_id":"c-1","step_index":2,"state":"DONE","step_type":"tool","tool_name":"view_file","duration_seconds":0.1,"tool_info":{"name":"view_file","parameters":{"Path":"a.txt"}}}}
+jetski: a human-facing notice that is not JSON at all
+{"event":"result","result":{"conversation_id":"c-1","status":"SUCCESS","response":"STATUS: DONE | File: CHANGES.md","duration_seconds":5.7,"num_turns":2,"usage":{"input_tokens":38823,"output_tokens":278,"thinking_tokens":35,"cache_read_tokens":12191,"total_tokens":39101}}}
+NDJSON
+exit 0
+STREAM_EOF
+chmod +x "$STUB_STREAM"
+
+LOG_STREAM="$PHASE_STREAM/log"
+AGY_BIN="$STUB_STREAM" driver_run --brief "$BRIEF_STREAM" --dir "$R_STREAM" \
+  --model gemini-3.7-flash-medium --mode accept-edits --timeout 30m \
+  --log "$LOG_STREAM" >/dev/null 2>&1
+check stream-run-rc "$?" 0 "a stream-json dispatch exits 0"
+
+if [ -s "$PHASE_STREAM/stream.ndjson" ]; then
+  ok stream-kept "the step stream is kept instead of being overwritten"
+else
+  bad stream-kept "no stream.ndjson at $PHASE_STREAM"
+fi
+
+STEP_COUNT="$(grep -c '"event":"step_update"' "$PHASE_STREAM/stream.ndjson" 2>/dev/null | tr -cd '0-9')"
+check stream-steps "$STEP_COUNT" "2" "every step line survives, not just the last"
+
+if grep -q '"duration_seconds"' "$PHASE_STREAM/stream.ndjson" 2>/dev/null \
+   && grep -q '"thinking_tokens"' "$PHASE_STREAM/stream.ndjson" 2>/dev/null; then
+  ok stream-has-trace-data "per-step timings and per-step token spend are both in the stream"
+else
+  bad stream-has-trace-data "stream is missing the timing or usage fields the trace needs"
+fi
+
+# The result object must come out identical to the single-object form, or every
+# reader downstream — phase.sh's usage, num_turns and status parsing — breaks.
+RES_STREAM="$(cat "$PHASE_STREAM/result.json" 2>/dev/null)"
+if printf '%s\n' "$RES_STREAM" | grep -q '^{"conversation_id":"c-1"'; then
+  ok stream-result-unwrapped "the result event is unwrapped to the object phase.sh already reads"
+else
+  bad stream-result-unwrapped "result.json not unwrapped: $RES_STREAM"
+fi
+if printf '%s\n' "$RES_STREAM" | grep -q '"total_tokens":39101' \
+   && printf '%s\n' "$RES_STREAM" | grep -q '"num_turns":2'; then
+  ok stream-result-fields "the run total and turn count survive the unwrapping"
+else
+  bad stream-result-fields "result fields lost: $RES_STREAM"
+fi
+
+# A non-JSON notice in the middle of the stream must not be mistaken for the result.
+if printf '%s\n' "$RES_STREAM" | grep -q 'jetski'; then
+  bad stream-ignores-noise "a human-facing notice was parsed as the result"
+else
+  ok stream-ignores-noise "non-JSON lines in the stream are stepped over, not parsed"
+fi
+
+# The log still holds the response text: the verdict is read from it.
+if grep -q 'STATUS: DONE' "$LOG_STREAM" 2>/dev/null; then
+  ok stream-log-response "the log still carries the response the verdict is read from"
+else
+  bad stream-log-response "log lost the response: $(cat "$LOG_STREAM" 2>/dev/null)"
+fi
+
+# AGY_OUTPUT_FORMAT=json restores the single-object behaviour for anyone who needs it.
+R_JSON="$(new_repo output-format-override)"
+RUN_JSON="$(cat "$R_JSON/.agy/current")"
+PHASE_JSON="$R_JSON/.agy/runs/$RUN_JSON/phases/TEST"
+mkdir -p "$PHASE_JSON"
+printf '# Phase: TEST\nGoal: override.\n' > "$PHASE_JSON/brief.md"
+ARGV_JSON="$SCRATCH/argv_json"
+STUB_ARGV_FILE="$ARGV_JSON" AGY_BIN="$STUB_AGY" AGY_OUTPUT_FORMAT=json \
+  driver_run --brief "$PHASE_JSON/brief.md" --dir "$R_JSON" --model gemini-3.7-flash-medium \
+  --mode accept-edits --timeout 30m --log "$PHASE_JSON/log" >/dev/null 2>&1
+if grep -qx 'json' "$ARGV_JSON" 2>/dev/null; then
+  ok stream-format-override "AGY_OUTPUT_FORMAT=json restores the single-object form"
+else
+  bad stream-format-override "override ignored: $(tr '\n' ' ' < "$ARGV_JSON" 2>/dev/null)"
+fi
+if [ -f "$PHASE_JSON/stream.ndjson" ]; then
+  bad stream-no-file-in-json-mode "a stream file was written in json mode, where there is no stream"
+else
+  ok stream-no-file-in-json-mode "no stream file is written in json mode — there is no stream to keep"
+fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

@@ -79,7 +79,18 @@ driver_run() {
   mkdir -p "$phase_dir"
   local result_json="$phase_dir/result.json"
 
-  local cmd=("$agy" --output-format json "-p=$(cat "$brief")" --add-dir "$dir" --model "$model" --print-timeout "$timeout")
+  # stream-json, not json. Both end with the same result object, so everything
+  # downstream reads exactly what it read before — but json emits that object and
+  # nothing else, which meant a dispatch's turns, its per-step timings and its
+  # per-step token spend were never produced at all, let alone kept. The stream
+  # carries one line per step, each with duration_seconds and its own usage block.
+  # That is the whole of the transcript and the trace, and it was being thrown away
+  # because nobody asked agy for it.
+  #
+  # AGY_OUTPUT_FORMAT=json restores the old single-blob behaviour. The parser below
+  # reads either shape, so switching back and forth is safe.
+  local out_format="${AGY_OUTPUT_FORMAT:-stream-json}"
+  local cmd=("$agy" --output-format "$out_format" "-p=$(cat "$brief")" --add-dir "$dir" --model "$model" --print-timeout "$timeout")
   case "$mode" in
     full)             cmd=("${cmd[@]+"${cmd[@]}"}" --dangerously-skip-permissions) ;;
     plan|accept-edits) cmd=("${cmd[@]+"${cmd[@]}"}" --mode "$mode") ;;
@@ -97,9 +108,36 @@ driver_run() {
 
   rm -f "$result_json"
 
-  # Deliberately narrow parser for agy's known JSON output shape, not a general JSON parser.
+  # Keep the stream before the log is replaced by the response text.
+  #
+  # This is the change that makes a dispatch reconstructable. Until now the raw
+  # output was overwritten a few lines below and the only surviving trace of a
+  # worker's fifteen steps was a paragraph of prose and one total. Everything the
+  # transcript and the waterfall need was produced, held in this variable, and
+  # dropped.
+  local stream_file="$phase_dir/stream.ndjson"
+  rm -f "$stream_file"
+  if [ "$out_format" = "stream-json" ] && [ -n "$raw_output" ]; then
+    printf '%s\n' "$raw_output" > "$stream_file" 2>/dev/null || true
+  fi
+
+  # Deliberately narrow parser for agy's known JSON output shapes, not a general
+  # JSON parser. Two shapes are accepted:
+  #   json         one object:  {"conversation_id":...,"response":...,"usage":{...}}
+  #   stream-json  many lines, the last of which wraps that same object:
+  #                {"event":"result","result":{ ...the object above... }}
+  # The stream also carries non-JSON lines — agy writes human-facing notices into
+  # the same channel — so the candidate is selected, never assumed.
   local json_candidate
-  json_candidate="$(printf '%s\n' "$raw_output" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -a '^{' | grep -a '}$' | head -1 || true)"
+  json_candidate="$(printf '%s\n' "$raw_output" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -a '^{"event":"result"' | tail -1 || true)"
+  if [ -n "$json_candidate" ]; then
+    json_candidate="$(printf '%s\n' "$json_candidate" \
+      | sed -n 's/^{"event":"result","result":\(.*\)}$/\1/p' || true)"
+  fi
+  if [ -z "$json_candidate" ]; then
+    json_candidate="$(printf '%s\n' "$raw_output" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -a '^{' | grep -a '}$' | head -1 || true)"
+  fi
 
   local extracted_response=""
   if [ -n "$json_candidate" ] && case "$json_candidate" in *'"response":'*) true ;; *) false ;; esac; then
