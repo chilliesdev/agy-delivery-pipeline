@@ -3,10 +3,20 @@
 #
 #   check-review.sh [--dir <repo>] [--run <id|current|last>] [--file <path>]
 #                   [--diff <path>] [--min-anchors <n>] [--trivial <n>]
+#                   [--anchors-out <path>]
 #
 # Reads:   <run-dir>/REVIEW_FEEDBACK.md   what the reviewer wrote
 #          <run-dir>/REVIEW_DIFF.patch    what it was given to review
-# Writes:  nothing.
+# Writes:  nothing, unless --anchors-out names a file.
+#
+# --anchors-out <path> writes the anchors themselves, one per line, as
+# `<where>\t<the line that cited it>`. The count answers "did the reviewer open
+# the change"; it cannot answer "and what did it find, where". Anything showing a
+# review to a person — a report, a summary, a dashboard — needs the second, and
+# was reduced to re-deriving it by hand from the same file this script has already
+# parsed. Opt-in through the flag, because ledger.sh calls this script for the
+# status alone and a checker that writes files as a side effect of being asked a
+# question is a checker that cannot be called safely.
 # Prints:  the STATUS line only — stdout belongs to it alone, as everywhere else.
 #
 # Exit codes, one per outcome:
@@ -58,6 +68,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DIR="$PWD"; FEEDBACK=""; PATCH=""; MIN_ANCHORS="1"; TRIVIAL="10"
 RUN_TARGET="current"
+ANCHORS_OUT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -67,6 +78,7 @@ while [ $# -gt 0 ]; do
     --diff)        PATCH="$2";       shift 2 ;;
     --min-anchors) MIN_ANCHORS="$2"; shift 2 ;;
     --trivial)     TRIVIAL="$2";     shift 2 ;;
+    --anchors-out) ANCHORS_OUT="$2";  shift 2 ;;
     -h|--help) sed -n '2,53p' "$0"; exit 0 ;;
     *) echo "check-review: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -163,6 +175,51 @@ EOF
 fi
 
 ANCHORS=$((FILELINE + CITED))
+
+# --- the anchors themselves, when asked for -------------------------------
+#
+# The count above proves the reviewer opened the change. It cannot say what was
+# found or where, which is the part a person actually reads. Same parse, written
+# out instead of tallied: for each anchor, the line of the report that cited it,
+# flattened to keep one record per line.
+if [ -n "$ANCHORS_OUT" ]; then
+  {
+    printf '# Anchors extracted from %s\n' "$FEEDBACK"
+    printf '# One per line: <where><TAB><the line of the report that cited it>\n'
+
+    grep -a -o -E '[A-Za-z0-9_][A-Za-z0-9_./@+-]*\.[A-Za-z0-9_]+:[0-9]+' "$FEEDBACK" 2>/dev/null \
+      | sort -u \
+      | while IFS= read -r A; do
+          [ -n "$A" ] || continue
+          CTX="$(grep -a -F -m 1 -- "$A" "$FEEDBACK" 2>/dev/null \
+            | tr '\t\r\n' '   ' \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/  */ /g')"
+          printf '%s\t%s\n' "$A" "$CTX"
+        done
+
+    # Paths the diff touched and the report cited without a line number. Weaker
+    # evidence than a file:line, and marked as such rather than blended in.
+    if [ -n "$PATHS" ]; then
+      while IFS= read -r P; do
+        [ -n "$P" ] || continue
+        B="$(basename "$P")"
+        if grep -a -F -q -- "$P" "$FEEDBACK" 2>/dev/null \
+           || { [ -n "$B" ] && grep -a -F -q -- "$B" "$FEEDBACK" 2>/dev/null; }; then
+          if ! grep -a -q -E "$(printf '%s' "$P" | sed 's/[].[^$\\*/]/\\&/g'):[0-9]+" "$FEEDBACK" 2>/dev/null; then
+            CTX="$(grep -a -F -m 1 -- "$B" "$FEEDBACK" 2>/dev/null \
+              | tr '\t\r\n' '   ' \
+              | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/  */ /g')"
+            printf '%s\t%s\n' "$P (no line cited)" "$CTX"
+          fi
+        fi
+      done <<EOF
+$PATHS
+EOF
+    fi
+  } > "$ANCHORS_OUT" 2>/dev/null || {
+    echo "check-review: could not write anchors to $ANCHORS_OUT" >&2
+  }
+fi
 
 # The `## Examined` list the criteria now asks for: a heading, with at least one
 # non-blank line under it that is not the next heading. Reported for context —

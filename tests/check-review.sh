@@ -294,5 +294,78 @@ check bad-arg "$CODE" 2 "exit 2 on an unknown flag"
 OUT="$(/bin/bash "$CHECK" --dir "$ROOT/nope" 2>/dev/null)"; CODE=$?
 check bad-dir "$CODE" 2 "exit 2 on a missing --dir"
 
+# --- --anchors-out: the anchors themselves, not just how many ---------------
+#
+# The count says the reviewer opened the change. It cannot say what was found or
+# where — which is the half a person reads, and the half every consumer of this
+# script was re-deriving by hand from a file already parsed here.
+
+RA="$(new_case anchors-out 40)"
+RA_ID="$(cat "$RA/.agy/current")"
+feedback "$RA" <<'EOF'
+# Review
+
+ANCHOR wordstat/cli.py:24 — argument parsing accepts a negative count.
+
+The helper in wordstat/cli.py is also called from a path the brief did not name.
+
+## Examined
+- wordstat/cli.py
+EOF
+
+AOUT="$RA/anchors.tsv"
+run "$RA" --anchors-out "$AOUT"
+check anchors-out-rc "$CODE" 0 "writing anchors does not change the verdict"
+
+if [ -f "$AOUT" ]; then
+  ok anchors-out-written "--anchors-out writes the file it names"
+else
+  bad anchors-out-written "no file at $AOUT"
+fi
+
+if grep -q '^wordstat/cli.py:24	' "$AOUT" 2>/dev/null; then
+  ok anchors-out-fileline "a file:line anchor is written with its citing line"
+else
+  bad anchors-out-fileline "file:line anchor missing: $(cat "$AOUT" 2>/dev/null)"
+fi
+
+if grep -q 'negative count' "$AOUT" 2>/dev/null; then
+  ok anchors-out-context "the anchor carries the text of the finding, not just the location"
+else
+  bad anchors-out-context "no finding text: $(cat "$AOUT" 2>/dev/null)"
+fi
+
+# A path cited with a line number must not also appear as a weaker path-only
+# anchor — that would double-count the same evidence.
+if [ "$(grep -c 'no line cited' "$AOUT" 2>/dev/null | tr -cd '0-9')" = "0" ]; then
+  ok anchors-out-no-dupe "a path already cited by line is not repeated as a path-only anchor"
+else
+  bad anchors-out-no-dupe "duplicate weak anchor: $(cat "$AOUT")"
+fi
+
+# One record per line, whatever the report's own line breaks were.
+AWRAP="$RA/wrapped.tsv"
+printf 'ANCHOR wordstat/cli.py:99 — a finding\nsplit across\nthree lines.\n' \
+  >> "$RA/.agy/runs/$RA_ID/REVIEW_FEEDBACK.md"
+run "$RA" --anchors-out "$AWRAP"
+BODY_LINES="$(grep -c -v '^#' "$AWRAP" 2>/dev/null | tr -cd '0-9')"
+ANCHOR_REFS="$(grep -c '^wordstat/cli.py:' "$AWRAP" 2>/dev/null | tr -cd '0-9')"
+check anchors-out-one-per-line "$BODY_LINES" "$ANCHOR_REFS" \
+  "every non-comment line is exactly one anchor record"
+
+# The default stays read-only: ledger.sh calls this script for the status alone.
+RB="$(new_case anchors-default 40)"
+feedback "$RB" <<'EOF'
+ANCHOR wordstat/cli.py:24 — something concrete.
+EOF
+BEFORE_B="$(find "$RB/.agy" -type f | sort)"
+run "$RB"
+AFTER_B="$(find "$RB/.agy" -type f | sort)"
+if [ "$BEFORE_B" = "$AFTER_B" ]; then
+  ok anchors-default-readonly "without --anchors-out the script still writes nothing"
+else
+  bad anchors-default-readonly "check-review wrote files when not asked to"
+fi
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
