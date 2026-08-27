@@ -8,6 +8,7 @@
 #            [--no-diff-integrity] [--check-git-state]
 #            [--allow-shell] [--verify '<command>'] [--retry-cap <n>]
 #            [--budget-tokens <n>] [--repo-budget-tokens <n>] [--max-workers <n>]
+#            [--queue]
 #            [--reset-retries] [--ignore-via gitignore|exclude]
 #
 # Reads:   R/phases/<PHASE>/verdict      the verdict the worker wrote itself
@@ -38,6 +39,14 @@
 # exit 6. A clean round clears the counter, as does --reset-retries. A round
 # that ends WORKER_FAILED or PREFLIGHT_FAILED is refunded: neither is a worker
 # failing to converge, which is the only thing the cap is there to catch.
+#
+# --queue changes what the worker cap does. Without it the cap refuses and returns
+# WORKER_CAP_EXCEEDED, which is the right answer for a caller holding one task. With
+# it the dispatch is parked in <repo>/.agy/queue instead, returning
+# STATUS: QUEUED(running=N, cap=M), exit 11 — nothing dispatched, nothing spent, and
+# the request is written down rather than dropped. scripts/queue.sh drain runs the
+# parked dispatches when slots free. There is no daemon: draining is a command
+# somebody runs.
 #
 # --budget-tokens <n> enforces a spend ceiling: before dispatching, sum
 # total_tokens across every ledger record for this run. If already at or past
@@ -169,6 +178,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/run-dir.sh"
 . "$HERE/ledger.sh"
 . "$HERE/resolve-model.sh"
+. "$HERE/resolve-phases.sh"
 
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -189,6 +199,16 @@ MAX_WORKERS="${AGY_MAX_WORKERS:-1}"
 RUN_TARGET=""
 TASK=""
 SANDBOX_ARGS=()   # array, so the flag is never word-split out of an unquoted scalar
+USE_QUEUE=0
+
+# Held before parsing, so a dispatch parked at the worker cap can be re-issued
+# exactly as it was asked for. --queue is dropped from the copy: an entry that
+# carried it would re-queue itself instead of running when the drain picks it up.
+ORIG_ARGV=()
+for _a in "$@"; do
+  [ "$_a" = "--queue" ] && continue
+  ORIG_ARGV[${#ORIG_ARGV[@]}]="$_a"
+done
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -207,6 +227,7 @@ while [ $# -gt 0 ]; do
     --repo-budget-tokens) REPO_BUDGET_TOKENS="$2"; shift 2 ;;
     --max-workers) MAX_WORKERS="$2"; shift 2 ;;
     --reset-retries) RESET_RETRIES=1; shift ;;
+    --queue) USE_QUEUE=1; shift ;;
     --ignore-via) IGNORE_VIA="$2"; shift 2 ;;
     --sandbox) SANDBOX_ARGS=("${SANDBOX_ARGS[@]+"${SANDBOX_ARGS[@]}"}" --sandbox); shift ;;
     --no-preflight) SKIP_PREFLIGHT=1; shift ;;
@@ -643,6 +664,37 @@ fi
 WORKERS_DIR="$DIR/.agy/workers"
 WORKER_RECORD_FILE="$WORKERS_DIR/${RUN_ID}_${PHASE}_$$.rec"
 RUNNING_WORKERS="$(_count_running_workers "$WORKERS_DIR")"
+if [ "$RUNNING_WORKERS" -ge "$MAX_WORKERS" ] && [ "$USE_QUEUE" -eq 1 ]; then
+  # --queue turns the cap from a refusal into a parking space. Nothing is spent
+  # either way; the difference is whether the caller has to remember the work.
+  Q_OUT="$("$HERE/queue.sh" add --dir "$DIR" --run "$RUN_ID" --phase "$PHASE" \
+    -- ${ORIG_ARGV[@]+"${ORIG_ARGV[@]}"} 2>/dev/null)"
+  Q_RC=$?
+  if [ "$Q_RC" -eq 0 ] && [ -n "$Q_OUT" ]; then
+    printf '%s\n' "$Q_OUT$GITIGNORE_FIELD" | tee "$STATUS_FILE"
+    TASK_TO_RECORD="${EXISTING_TASK:-${TASK:-}}"
+    [ -z "$TASK_TO_RECORD" ] && TASK_TO_RECORD="$(run_dir_get "$R" "task" 2>/dev/null || true)"
+    ledger_append "$DIR" \
+      "run=$RUN_ID" \
+      "phase=$PHASE" \
+      "attempt=$((SPENT + 1))" \
+      "tier=$TIER" \
+      "model=$MODEL" \
+      "backend=$DRIVER" \
+      "started=$STARTED_TS" \
+      "status=QUEUED(running=$RUNNING_WORKERS, cap=$MAX_WORKERS)" \
+      "retries_spent=$SPENT" \
+      "retries_refunded=0" \
+      "verify_ran=false" \
+      "dispatched=false" \
+      ${TASK_TO_RECORD:+"task=$TASK_TO_RECORD"} 2>/dev/null || echo "phase.sh: could not record to ledger" >&2
+    exit 11
+  fi
+  # Queueing failed. Fall through to the refusal rather than pretend it worked:
+  # a caller told QUEUED for work nothing recorded would wait forever.
+  echo "phase.sh: could not queue the dispatch; refusing at the cap instead" >&2
+fi
+
 if [ "$RUNNING_WORKERS" -ge "$MAX_WORKERS" ]; then
   W_NOUN="dispatches"
   W_VERB="are"
@@ -766,6 +818,11 @@ rm -f "$VERDICT_FILE"
 # model id can be withdrawn mid-pipeline, so Phase 0 alone is not enough.
 # AGY_SKIP_PREFLIGHT=1 or --no-preflight drops it for a tight retry loop.
 FALLBACK_FIELD=""
+# The model asked for, kept beside the model that ran. preflight may substitute a
+# fallback below, and once MODEL is overwritten the original is gone — so hold it
+# now, while the two are still known to be the same.
+MODEL_REQUESTED="$MODEL"
+FALLBACK_TAKEN=0
 if [ -z "$SKIP_PREFLIGHT" ]; then
   PREFLIGHT_LOG="$PHASE_DIR/preflight.log"
   PREFLIGHT_MODEL_FILE="$PHASE_DIR/model"
@@ -807,6 +864,7 @@ if [ -z "$SKIP_PREFLIGHT" ]; then
     if [ -n "$RESOLVED_MODEL" ] && [ "$RESOLVED_MODEL" != "$MODEL" ]; then
       FALLBACK_FIELD=" | Fallback: $RESOLVED_MODEL"
       MODEL="$RESOLVED_MODEL"
+      FALLBACK_TAKEN=1
     fi
   fi
 fi
@@ -849,23 +907,44 @@ fi
 
 START_EPOCH=$(date +%s)
 
+# Liveness on disk, not only on stderr.
+#
+# The watchdog below has always warned a human watching a terminal. The mode this
+# pipeline is built for is unattended — and an unattended run is exactly the one
+# nobody can see go quiet. The idle counter lived in this subshell's memory and
+# died with it, so nothing downstream could answer "when did this last write?":
+# not watch-run.sh, not report.sh, not anything reading the run directory.
+#
+# So the monitor now always runs and writes phases/<PHASE>/heartbeat every tick.
+# Only the *printing* is gated by --quiet and AGY_NO_PROGRESS, which is what those
+# two were ever asking for. The file is rewritten through a temporary and moved
+# into place, so a reader never catches a half-written record.
 MONITOR_PID=""
-if [ -z "${AGY_NO_PROGRESS:-}" ] && [ "$QUIET" -eq 0 ]; then
-  HB_INTERVAL="${AGY_HEARTBEAT_INTERVAL:-30}"
-  LIVENESS_INTERVAL="${AGY_LIVENESS_INTERVAL:-300}"
-  case "$LIVENESS_INTERVAL" in
-    *m) L_SEC="${LIVENESS_INTERVAL%m}"; L_MULT=60 ;;
-    *s) L_SEC="${LIVENESS_INTERVAL%s}"; L_MULT=1 ;;
-    *)  L_SEC="$LIVENESS_INTERVAL";     L_MULT=1 ;;
-  esac
-  case "$L_SEC" in
-    ''|*[!0-9]*) L_LIMIT=300 ;;
-    *) L_LIMIT=$((L_SEC * L_MULT)) ;;
-  esac
+HEARTBEAT_FILE="$PHASE_DIR/heartbeat"
+rm -f "$HEARTBEAT_FILE" "$HEARTBEAT_FILE.tmp" 2>/dev/null || true
 
+PRINT_PROGRESS=1
+if [ -n "${AGY_NO_PROGRESS:-}" ] || [ "$QUIET" -ne 0 ]; then
+  PRINT_PROGRESS=0
+fi
+
+HB_INTERVAL="${AGY_HEARTBEAT_INTERVAL:-30}"
+LIVENESS_INTERVAL="${AGY_LIVENESS_INTERVAL:-300}"
+case "$LIVENESS_INTERVAL" in
+  *m) L_SEC="${LIVENESS_INTERVAL%m}"; L_MULT=60 ;;
+  *s) L_SEC="${LIVENESS_INTERVAL%s}"; L_MULT=1 ;;
+  *)  L_SEC="$LIVENESS_INTERVAL";     L_MULT=1 ;;
+esac
+case "$L_SEC" in
+  ''|*[!0-9]*) L_LIMIT=300 ;;
+  *) L_LIMIT=$((L_SEC * L_MULT)) ;;
+esac
+
+if [ -z "${AGY_NO_HEARTBEAT_FILE:-}" ]; then
   (
     LAST_LOG_SIZE=0
     LAST_LOG_CHANGE=$START_EPOCH
+    MAX_IDLE=0
     WARNED_LIVENESS=0
     NEXT_HB=$((START_EPOCH + HB_INTERVAL))
 
@@ -886,7 +965,24 @@ if [ -z "${AGY_NO_PROGRESS:-}" ] && [ "$QUIET" -eq 0 ]; then
       fi
 
       IDLE_TIME=$((NOW - LAST_LOG_CHANGE))
-      if [ "$L_LIMIT" -gt 0 ] && [ "$IDLE_TIME" -ge "$L_LIMIT" ] && [ "$WARNED_LIVENESS" -eq 0 ]; then
+      [ "$IDLE_TIME" -gt "$MAX_IDLE" ] && MAX_IDLE="$IDLE_TIME"
+
+      {
+        printf 'state=running\n'
+        printf 'run=%s\n' "$RUN_ID"
+        printf 'phase=%s\n' "$PHASE"
+        printf 'started=%s\n' "$START_EPOCH"
+        printf 'now=%s\n' "$NOW"
+        printf 'elapsed_s=%s\n' "$((NOW - START_EPOCH))"
+        printf 'last_write=%s\n' "$LAST_LOG_CHANGE"
+        printf 'idle_s=%s\n' "$IDLE_TIME"
+        printf 'max_idle_s=%s\n' "$MAX_IDLE"
+        printf 'log_bytes=%s\n' "$CUR_SIZE"
+        printf 'liveness_limit_s=%s\n' "$L_LIMIT"
+      } > "$HEARTBEAT_FILE.tmp" 2>/dev/null \
+        && mv -f "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_FILE" 2>/dev/null || true
+
+      if [ "$PRINT_PROGRESS" -eq 1 ] && [ "$L_LIMIT" -gt 0 ] && [ "$IDLE_TIME" -ge "$L_LIMIT" ] && [ "$WARNED_LIVENESS" -eq 0 ]; then
         if [ $((L_LIMIT % 60)) -eq 0 ]; then
           L_DISP="$((L_LIMIT / 60))m"
         else
@@ -897,7 +993,7 @@ if [ -z "${AGY_NO_PROGRESS:-}" ] && [ "$QUIET" -eq 0 ]; then
         WARNED_LIVENESS=1
       fi
 
-      if [ "$NOW" -ge "$NEXT_HB" ]; then
+      if [ "$PRINT_PROGRESS" -eq 1 ] && [ "$NOW" -ge "$NEXT_HB" ]; then
         ELAPSED=$((NOW - START_EPOCH))
         LAST_FILE=""
         if [ -f "$LOG" ] && [ -s "$LOG" ]; then
@@ -937,6 +1033,40 @@ ELAPSED_S=$(( $(date +%s) - START_EPOCH ))
 if [ -n "$MONITOR_PID" ]; then
   kill "$MONITOR_PID" 2>/dev/null || true
   wait "$MONITOR_PID" 2>/dev/null || true
+fi
+
+# Freeze the heartbeat rather than delete it. A run that has closed still has a
+# last-write time, and "the worker went quiet for nine minutes and then finished"
+# is a fact worth keeping — deleting the file would answer every question about a
+# finished dispatch with silence.
+MAX_IDLE_S=""
+LAST_WRITE_S=""
+if [ -f "$HEARTBEAT_FILE" ]; then
+  MAX_IDLE_S="$(sed -n 's/^max_idle_s=\([0-9][0-9]*\)$/\1/p' "$HEARTBEAT_FILE" 2>/dev/null | tail -1)"
+  LAST_WRITE_S="$(sed -n 's/^last_write=\([0-9][0-9]*\)$/\1/p' "$HEARTBEAT_FILE" 2>/dev/null | tail -1)"
+fi
+MAX_IDLE_S="${MAX_IDLE_S:-0}"
+LAST_WRITE_S="${LAST_WRITE_S:-$START_EPOCH}"
+FINAL_LOG_BYTES=0
+if [ -f "$LOG" ]; then
+  FINAL_LOG_BYTES="$(wc -c < "$LOG" 2>/dev/null | tr -cd '0-9')"
+  FINAL_LOG_BYTES="${FINAL_LOG_BYTES:-0}"
+fi
+rm -f "$HEARTBEAT_FILE.tmp" 2>/dev/null || true
+if [ -z "${AGY_NO_HEARTBEAT_FILE:-}" ]; then
+  {
+    printf 'state=finished\n'
+    printf 'run=%s\n' "$RUN_ID"
+    printf 'phase=%s\n' "$PHASE"
+    printf 'started=%s\n' "$START_EPOCH"
+    printf 'finished=%s\n' "$(date +%s)"
+    printf 'elapsed_s=%s\n' "$ELAPSED_S"
+    printf 'last_write=%s\n' "$LAST_WRITE_S"
+    printf 'max_idle_s=%s\n' "$MAX_IDLE_S"
+    printf 'log_bytes=%s\n' "$FINAL_LOG_BYTES"
+    printf 'worker_rc=%s\n' "$RC"
+  } > "$HEARTBEAT_FILE.tmp" 2>/dev/null \
+    && mv -f "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_FILE" 2>/dev/null || true
 fi
 
 if [ "$RC" -ne 0 ] && [ "$QUIET" -eq 0 ] && [ -f "$LOG" ] && [ -s "$LOG" ]; then
@@ -1174,6 +1304,29 @@ fi
 
 if [ -n "$USAGE_OBJ" ]; then
   LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "usage=$USAGE_OBJ")
+fi
+
+# Whether agy.toml declares this phase. Advisory: an undeclared phase is dispatched
+# like any other and recorded as undeclared, so a reader can tell a phase the config
+# knows about from one it does not. DELEGATE is the ordinary undeclared case.
+if resolve_phases_declared "$DIR" "$PHASE"; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "declared=true")
+else
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "declared=false")
+fi
+
+# The longest stretch this dispatch went without writing anything. A worker that
+# stalls for nine minutes and then finishes leaves no other trace of having done so.
+if [ -n "$MAX_IDLE_S" ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "max_idle_s=$MAX_IDLE_S")
+fi
+
+# Recorded on every dispatch, not only when a substitution happened: "fallback":false
+# is the evidence that the primary was available, and a reader cannot tell that from
+# a record that simply omits the field.
+LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "fallback=$([ "$FALLBACK_TAKEN" -eq 1 ] && echo true || echo false)")
+if [ "$FALLBACK_TAKEN" -eq 1 ]; then
+  LEDGER_ARGS=("${LEDGER_ARGS[@]+"${LEDGER_ARGS[@]}"}" "model_requested=$MODEL_REQUESTED")
 fi
 
 if [ -n "$NUM_TURNS_VAL" ]; then

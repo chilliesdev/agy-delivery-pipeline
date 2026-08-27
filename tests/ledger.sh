@@ -822,5 +822,47 @@ else
   bad git-state-dispatch-fields "record unexpected: $L22"
 fi
 
+# --- 23. the fallback fields -------------------------------------------------
+#
+# The ledger recorded only the model that ran, so a preflight substitution looked
+# exactly like a first choice. "the primary was unavailable all week" is precisely
+# what a ledger is for, and it was unanswerable.
+
+R23="$(new_repo fallback-fields)"
+
+ledger_append "$R23" run=r23 phase=TEST model=gemini-3.7-flash-medium \
+  model_requested=gemini-3.7-flash-high fallback=true
+L23_FB="$(tail -1 "$R23/.agy/ledger.jsonl")"
+if printf '%s\n' "$L23_FB" | grep -q '"fallback":true' \
+   && printf '%s\n' "$L23_FB" | grep -q '"model_requested":"gemini-3.7-flash-high"' \
+   && printf '%s\n' "$L23_FB" | grep -q '"model":"gemini-3.7-flash-medium"'; then
+  ok fallback-recorded "a substitution records both the model asked for and the one that ran"
+else
+  bad fallback-recorded "fallback fields missing: $L23_FB"
+fi
+
+ledger_append "$R23" run=r23 phase=TEST model=gemini-3.7-flash-high fallback=false
+L23_NO="$(tail -1 "$R23/.agy/ledger.jsonl")"
+if printf '%s\n' "$L23_NO" | grep -q '"fallback":false'; then
+  ok fallback-false-recorded "fallback=false is written, so an available primary is evidenced rather than assumed"
+else
+  bad fallback-false-recorded "fallback=false missing: $L23_NO"
+fi
+
+# model_requested is only meaningful beside a substitution; without one it is noise.
+if printf '%s\n' "$L23_NO" | grep -q '"model_requested"'; then
+  bad fallback-no-redundant-request "model_requested written with no substitution: $L23_NO"
+else
+  ok fallback-no-redundant-request "model_requested is omitted when no substitution happened"
+fi
+
+ledger_append "$R23" run=r23 phase=TEST model=gemini-3.7-flash-high
+L23_ABSENT="$(tail -1 "$R23/.agy/ledger.jsonl")"
+if printf '%s\n' "$L23_ABSENT" | grep -q '"fallback"'; then
+  bad fallback-omitted "fallback written when not supplied: $L23_ABSENT"
+else
+  ok fallback-omitted "fallback is omitted entirely when not supplied, so old records stay readable"
+fi
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -19,6 +19,20 @@
 [driver]
 name = "agy"
 
+# The phases this repository's pipeline declares, in order.
+#
+# A repository that does not release, or does not run QA, says so by leaving the
+# phase out of this list. Nothing reading a run could previously tell "this phase
+# was skipped" from "this phase does not exist here" — both look like a missing
+# artifact. A phase a run reports that is *not* in this list is recorded as
+# undeclared: dispatched anyway, but flagged as unverifiable against this file
+# rather than folded silently into the pipeline.
+#
+# DELEGATE is deliberately absent. It is one bounded worker outside the pipeline,
+# not a phase of it, and it reads as undeclared because that is what it is.
+[pipeline]
+phases = ["DISCOVERY", "IMPLEMENT", "REVIEW", "QA", "RELEASE"]
+
 [phases.REVIEW]
 tier      = "high"
 fallbacks = ["gemini-3.7-flash-high", "gemini-3.7-flash-medium"]

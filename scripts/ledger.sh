@@ -21,6 +21,29 @@
 # for privacy; set AGY_LEDGER_TASK=plain to record literal task strings.
 # verdict_route: which route carried the verdict ("file" or "print") when known.
 #
+# declared: whether agy.toml lists this phase in [pipeline].phases. A run reporting
+# a phase the config does not declare is not necessarily wrong, but it cannot be
+# checked against the config, and "the phase was skipped" and "the phase does not
+# exist in this repository" are different facts that used to look identical. A
+# DELEGATE dispatch is the ordinary "declared":false — one worker outside the
+# pipeline rather than a phase of it. Absent on records written before the field.
+#
+# max_idle_s: the longest stretch, in seconds, that a dispatch went without writing
+# to its log. The liveness watchdog has always warned about this on stderr and then
+# forgotten it. A worker that goes quiet for nine minutes and then finishes leaves
+# no other trace, so the run reads as ordinary afterwards. Absent on records written
+# before the field existed, and on refusals, which never had a worker to watch.
+#
+# fallback / model_requested: whether the model that ran was the one asked for.
+# agy.toml may list fallbacks for a phase, and preflight substitutes one when the
+# primary is missing from the account's listing. Until now the ledger recorded only
+# the model that ran, so a substitution was indistinguishable from a first choice —
+# and "the primary was unavailable for a week" is exactly the kind of thing a
+# ledger exists to make visible. "fallback":true means a substitution happened,
+# and "model_requested" carries the id that was asked for; "model" is always the
+# one that ran. Records written before these fields existed omit both, and a
+# reader must treat absent as unknown rather than as "no fallback".
+#
 # dispatched: whether a worker was actually invoked for this record.
 # A gate that refuses before the dispatch — the brief lint, the secret scan, the
 # retry cap, either budget ceiling, the worker cap, preflight — is a real event
@@ -254,12 +277,14 @@ ledger_append() {
   local issue_val=""
   local verdict_route_val=""
   local dispatched_val="" git_state_ran_val="" git_state_rc_val=""
+  local fallback_val="" model_requested_val="" max_idle_s_val="" declared_val=""
 
   local has_elapsed=0 has_worker_rc=0 has_verdict=0 has_verify_rc=0
   local has_diff=0 has_review=0 has_attempt=0 has_retries_spent=0 has_retries_refunded=0
   local has_verify_ran=0 has_usage=0 has_num_turns=0 has_agy_status=0
   local has_issue=0 has_verdict_route=0
   local has_dispatched=0 has_git_state_ran=0 has_git_state_rc=0
+  local has_fallback=0 has_max_idle=0 has_declared=0
 
   for pair in "$@"; do
     case "$pair" in
@@ -305,6 +330,10 @@ ledger_append() {
       dispatched) dispatched_val="$v"; has_dispatched=1 ;;
       git_state_ran) git_state_ran_val="$v"; has_git_state_ran=1 ;;
       git_state_rc) git_state_rc_val="$v"; has_git_state_rc=1 ;;
+      fallback) fallback_val="$v"; has_fallback=1 ;;
+      max_idle_s) max_idle_s_val="$v"; has_max_idle=1 ;;
+      declared) declared_val="$v"; has_declared=1 ;;
+      model_requested) model_requested_val="$v" ;;
       *)
         echo "ledger: unknown key '$k'" >&2
         return 2 2>/dev/null || exit 2
@@ -337,11 +366,24 @@ ledger_append() {
     fields[${#fields[@]}]="\"issue\":$issue_val"
   fi
   [ -n "$phase_val" ] && fields[${#fields[@]}]="\"phase\":\"$(_run_dir_escape "$phase_val")\""
+  if [ $has_declared -eq 1 ]; then
+    case "$declared_val" in
+      true|TRUE|1) fields[${#fields[@]}]="\"declared\":true" ;;
+      *) fields[${#fields[@]}]="\"declared\":false" ;;
+    esac
+  fi
   if [ $has_attempt -eq 1 ]; then
     fields[${#fields[@]}]="\"attempt\":${attempt_val:-1}"
   fi
   [ -n "$tier_val" ] && fields[${#fields[@]}]="\"tier\":\"$(_run_dir_escape "$tier_val")\""
   [ -n "$model_val" ] && fields[${#fields[@]}]="\"model\":\"$(_run_dir_escape "$model_val")\""
+  [ -n "$model_requested_val" ] && fields[${#fields[@]}]="\"model_requested\":\"$(_run_dir_escape "$model_requested_val")\""
+  if [ $has_fallback -eq 1 ]; then
+    case "$fallback_val" in
+      true|TRUE|1) fields[${#fields[@]}]="\"fallback\":true" ;;
+      *) fields[${#fields[@]}]="\"fallback\":false" ;;
+    esac
+  fi
   [ -n "$backend_val" ] && fields[${#fields[@]}]="\"backend\":\"$(_run_dir_escape "$backend_val")\""
   [ -n "$started_val" ] && fields[${#fields[@]}]="\"started\":\"$(_run_dir_escape "$started_val")\""
 
@@ -350,6 +392,9 @@ ledger_append() {
   fi
   if [ $has_worker_rc -eq 1 ] && [ -n "$worker_rc_val" ]; then
     fields[${#fields[@]}]="\"worker_rc\":$worker_rc_val"
+  fi
+  if [ $has_max_idle -eq 1 ] && [ -n "$max_idle_s_val" ]; then
+    fields[${#fields[@]}]="\"max_idle_s\":$max_idle_s_val"
   fi
   if [ $has_verdict -eq 1 ] && [ -n "$verdict_val" ]; then
     fields[${#fields[@]}]="\"verdict\":\"$(_run_dir_escape "$verdict_val")\""

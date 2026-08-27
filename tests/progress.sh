@@ -450,5 +450,79 @@ fi
 check watch-bad-dir "${RC_WATCH_BAD:-0}" 2 "watch-run.sh exits 2 on invalid dir"
 
 
+# =============================================================================
+# The heartbeat file: liveness that outlives the dispatch
+#
+# The watchdog warned on stderr and forgot. An unattended run — the mode this
+# pipeline is built for — is exactly the one nobody is watching, so the idle
+# counter has to reach disk or it may as well not exist.
+# =============================================================================
+
+R_HBF="$(new_repo heartbeat-file)"
+RUN_HBF="$(cat "$R_HBF/.agy/current")"
+B_HBF="$(make_valid_brief "$R_HBF" IMPLEMENT "$RUN_HBF")"
+HB_PATH="$R_HBF/.agy/runs/$RUN_HBF/phases/IMPLEMENT/heartbeat"
+
+AGY_BIN="$STUB_AGY" STUB_PHASE=IMPLEMENT STUB_VERDICT_VAL="STATUS: DONE | File: CHANGES.md" \
+  STUB_SLEEP_SEC=2 AGY_HEARTBEAT_INTERVAL=1 \
+  "$PHASE_SH" --phase IMPLEMENT --brief "$B_HBF" --dir "$R_HBF" --no-preflight >/dev/null 2>&1
+
+if [ -f "$HB_PATH" ]; then
+  ok heartbeat-file-written "a dispatch leaves a heartbeat file behind"
+else
+  bad heartbeat-file-written "no heartbeat at $HB_PATH"
+fi
+
+HB_STATE="$(sed -n 's/^state=//p' "$HB_PATH" 2>/dev/null | tail -1)"
+check heartbeat-final-state "$HB_STATE" "finished" "the heartbeat is frozen at finished, not deleted"
+
+for K in run phase started last_write max_idle_s elapsed_s log_bytes worker_rc; do
+  if grep -q "^$K=" "$HB_PATH" 2>/dev/null; then
+    ok "heartbeat-key-$K" "the finished heartbeat carries $K"
+  else
+    bad "heartbeat-key-$K" "$K missing from $HB_PATH"
+  fi
+done
+
+# --quiet and AGY_NO_PROGRESS ask for a silent terminal. They were never asking
+# for a run that cannot be observed at all, which is what gating the file on them
+# would mean.
+R_HBQ="$(new_repo heartbeat-quiet)"
+RUN_HBQ="$(cat "$R_HBQ/.agy/current")"
+B_HBQ="$(make_valid_brief "$R_HBQ" IMPLEMENT "$RUN_HBQ")"
+HBQ_PATH="$R_HBQ/.agy/runs/$RUN_HBQ/phases/IMPLEMENT/heartbeat"
+ERR_HBQ="$SCRATCH/hbq_err.txt"
+
+AGY_BIN="$STUB_AGY" STUB_PHASE=IMPLEMENT STUB_VERDICT_VAL="STATUS: DONE | File: CHANGES.md" \
+  STUB_SLEEP_SEC=2 AGY_HEARTBEAT_INTERVAL=1 AGY_NO_PROGRESS=1 \
+  "$PHASE_SH" --phase IMPLEMENT --brief "$B_HBQ" --dir "$R_HBQ" --no-preflight \
+  >/dev/null 2>"$ERR_HBQ"
+
+if [ -f "$HBQ_PATH" ]; then
+  ok heartbeat-survives-quiet "AGY_NO_PROGRESS silences stderr without silencing the file"
+else
+  bad heartbeat-survives-quiet "no heartbeat written under AGY_NO_PROGRESS"
+fi
+if grep -qF -- "Phase: IMPLEMENT" "$ERR_HBQ" 2>/dev/null; then
+  bad heartbeat-quiet-still-silent "heartbeat printing leaked to stderr under AGY_NO_PROGRESS"
+else
+  ok heartbeat-quiet-still-silent "stderr is still silent — only the printing was ever gated"
+fi
+
+# No half-written record is ever visible: the file is moved into place.
+if [ -f "$HB_PATH.tmp" ] || [ -f "$HBQ_PATH.tmp" ]; then
+  bad heartbeat-no-temp-left "a heartbeat temporary file was left behind"
+else
+  ok heartbeat-no-temp-left "the heartbeat temporary is cleaned up"
+fi
+
+# The quiet stretch reaches the ledger, so a stall is answerable after the fact.
+L_HBF="$(tail -1 "$R_HBF/.agy/ledger.jsonl" 2>/dev/null)"
+if printf '%s\n' "$L_HBF" | grep -q '"max_idle_s":[0-9]'; then
+  ok heartbeat-ledger-max-idle "the longest quiet stretch is recorded in the ledger"
+else
+  bad heartbeat-ledger-max-idle "max_idle_s missing from the record: $L_HBF"
+fi
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

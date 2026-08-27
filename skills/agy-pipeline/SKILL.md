@@ -123,6 +123,7 @@ the single stdout line and must not read the progress channel or log tails.
 | `BUDGET_EXCEEDED(…)` | token budget for this run is spent | increase --budget-tokens to continue, or inspect spend with report.sh |
 | `REPO_BUDGET_EXCEEDED(…)` | repository token budget is spent | increase --repo-budget-tokens to continue, or inspect spend with report.sh |
 | `WORKER_CAP_EXCEEDED(…)` | concurrent worker cap reached | wait for a running dispatch to finish, or increase --max-workers to continue |
+| `QUEUED(…)` | at the worker cap with `--queue`: parked, nothing dispatched, nothing spent | run `${CLAUDE_PLUGIN_ROOT}/scripts/queue.sh drain` when a slot frees, or raise `--max-workers` |
 | `VERIFY_FAILED(rc=N)` | it claimed success; the tests disagree | read `VerifyLog:`, then fix it yourself or re-brief once |
 | `WORKER_FAILED(rc=N)` | agy died | check the brief path and the criteria, then retry once |
 | `PREFLIGHT_FAILED(…)` | setup broke mid-session | report the cause, do the work yourself |

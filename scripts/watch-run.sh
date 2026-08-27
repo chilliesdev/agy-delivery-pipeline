@@ -87,6 +87,21 @@ fi
 if [ -n "$ACTIVE_LOG" ] && [ -f "$ACTIVE_LOG" ]; then
   printf '\nActive phase: %s\n' "$ACTIVE_PHASE"
   printf 'Log:          %s\n' "$ACTIVE_LOG"
+
+  # A hung worker and a thinking worker look identical from outside. This says how
+  # long it has been quiet; it does not judge, and it never aborts anything.
+  HB="$R/phases/$ACTIVE_PHASE/heartbeat"
+  if [ -f "$HB" ]; then
+    HB_STATE="$(sed -n 's/^state=//p' "$HB" 2>/dev/null | tail -1)"
+    HB_LAST="$(sed -n 's/^last_write=\([0-9][0-9]*\)$/\1/p' "$HB" 2>/dev/null | tail -1)"
+    HB_MAX="$(sed -n 's/^max_idle_s=\([0-9][0-9]*\)$/\1/p' "$HB" 2>/dev/null | tail -1)"
+    if [ "$HB_STATE" = "running" ] && [ -n "$HB_LAST" ]; then
+      printf 'Last write:   %ss ago\n' "$(( $(date +%s) - HB_LAST ))"
+    elif [ "$HB_STATE" = "finished" ]; then
+      printf 'Last write:   dispatch closed\n'
+    fi
+    [ -n "$HB_MAX" ] && printf 'Longest gap:  %ss with no output\n' "$HB_MAX"
+  fi
   printf '\n--- tail of %s ---\n' "$ACTIVE_LOG"
   if [ "$ONCE" -eq 1 ]; then
     tail -n 20 "$ACTIVE_LOG"
