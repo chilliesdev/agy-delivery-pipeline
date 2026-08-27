@@ -913,6 +913,79 @@ else
   fi
 fi
 
+# =============================================================================
+# Gate corroboration: say what kind of claim each gate makes, and only put a
+# number where a later signal actually exists to check it against.
+#
+# The risk being managed is the same one the never-fired list was rewritten for:
+# a reader deleting a working gate on the strength of a figure nothing supports.
+# =============================================================================
+
+R_CORR="$(new_repo gate-corroboration)"
+
+# A run whose review was thin and which then failed --verify: the one correlation
+# the ledger can actually support.
+ledger_append "$R_CORR" run=corr-1 phase=REVIEW status=DONE dispatched=true \
+  review='{"anchors":0,"status":"REVIEW_THIN"}'
+ledger_append "$R_CORR" run=corr-1 phase=QA "status=VERIFY_FAILED(rc=1)" dispatched=true
+
+# A thin review in a run that went on to pass: the gate fired and nothing
+# corroborated it.
+ledger_append "$R_CORR" run=corr-2 phase=REVIEW status=DONE dispatched=true \
+  review='{"anchors":0,"status":"REVIEW_THIN"}'
+
+# A refusal, which can never be scored: the dispatch it refused does not exist.
+ledger_append "$R_CORR" run=corr-3 phase=IMPLEMENT status=BRIEF_INVALID dispatched=false
+
+OUT_CORR="$(/bin/bash "$REPORT_SH" --dir "$R_CORR" 2>/dev/null)"
+
+if printf '%s\n' "$OUT_CORR" | grep -q "Gate Corroboration:"; then
+  ok corr-section "the report carries a gate corroboration section"
+else
+  bad corr-section "no corroboration section in the report"
+fi
+
+CORR_THIN="$(printf '%s\n' "$OUT_CORR" | grep "Review thin:" || true)"
+if printf '%s\n' "$CORR_THIN" | grep -q "1 of 2 were in a run that later failed --verify"; then
+  ok corr-thin-correlation "a thin review is scored against whether its run later failed --verify"
+else
+  bad corr-thin-correlation "correlation wrong or missing: $CORR_THIN"
+fi
+
+CORR_REFUSAL="$(printf '%s\n' "$OUT_CORR" | grep "Brief invalid:" | grep "Corrobo" || \
+  printf '%s\n' "$OUT_CORR" | sed -n '/Gate Corroboration/,/^$/p' | grep "Brief invalid:" || true)"
+if printf '%s\n' "$CORR_REFUSAL" | grep -q "cannot be scored"; then
+  ok corr-refusal-unscorable "a refusal is reported as unscorable rather than as unproven"
+else
+  bad corr-refusal-unscorable "refusal not labelled: $CORR_REFUSAL"
+fi
+
+CORR_MECH="$(printf '%s\n' "$OUT_CORR" | sed -n '/Gate Corroboration/,/^$/p' | grep "Verify gate overrides:" || true)"
+if printf '%s\n' "$CORR_MECH" | grep -q "the gate is the measurement"; then
+  ok corr-mechanical "a mechanical gate is not given a precision figure"
+else
+  bad corr-mechanical "mechanical gate not labelled: $CORR_MECH"
+fi
+
+# A gate that never fired stays out of the corroboration list entirely — it
+# belongs to the never-fired list, which says something different.
+if printf '%s\n' "$OUT_CORR" | sed -n '/Gate Corroboration/,/^$/p' | grep -q "Release blocked:"; then
+  bad corr-only-fired "a gate that never fired appeared in the corroboration list"
+else
+  ok corr-only-fired "only gates that actually fired are scored"
+fi
+
+# An advisory gate with no later signal must say so rather than show a number.
+R_ADV="$(new_repo gate-advisory-nosignal)"
+ledger_append "$R_ADV" run=adv-1 phase=IMPLEMENT "status=DIFF_SUSPICIOUS(scope: src/x.ts)" dispatched=true
+OUT_ADV="$(/bin/bash "$REPORT_SH" --dir "$R_ADV" 2>/dev/null)"
+ADV_LINE="$(printf '%s\n' "$OUT_ADV" | sed -n '/Gate Corroboration/,/^$/p' | grep "Diff suspicious:" || true)"
+if printf '%s\n' "$ADV_LINE" | grep -q "no later signal is recorded"; then
+  ok corr-advisory-honest "an advisory gate with nothing to check against says so"
+else
+  bad corr-advisory-honest "advisory gate not labelled honestly: $ADV_LINE"
+fi
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
 

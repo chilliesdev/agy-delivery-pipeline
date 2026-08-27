@@ -567,40 +567,55 @@ echo ""
 # Field 1 is where the outcome is recorded: "status" for the record's own status
 # field, "review" for the Phase 2 verdict, which rides in the nested review
 # object rather than in status. Field 2 is the status prefix, field 3 the label.
+#
+# Field 4 is what kind of claim the gate makes, which decides whether asking "was
+# it right?" is even a question:
+#
+#   mechanical  the gate IS the measurement — a command exited non-zero, git moved.
+#               There is nothing to corroborate; a precision figure here would be
+#               a restatement of the fact, dressed as an assessment of it.
+#   refusal     it fired before any worker ran. Whether the dispatch would have
+#               failed is unknowable by construction: the run does not exist.
+#               A refusal gate can never be scored, and saying so is the honest
+#               answer rather than reporting it as unproven.
+#   advisory    a suspicion a later signal can corroborate. Only these can carry
+#               a number, and only where the later signal was actually recorded.
 GATE_TABLE="
-status|VERIFY_FAILED|Verify gate overrides
-status|DIFF_TESTS_WEAKENED|Diff tests weakened
-status|DIFF_SUSPICIOUS|Diff suspicious
-status|SECRETS_FOUND|Secrets found
-status|BRIEF_INVALID|Brief invalid
-status|BRIEF_IMPOSSIBLE|Brief impossible
-status|NO_STATUS_REPORTED|No status reported
-status|WORKER_FAILED|Worker failed
-status|RETRY_CAP_REACHED|Retry cap reached
-status|BUDGET_EXCEEDED|Run budget exceeded
-status|REPO_BUDGET_EXCEEDED|Repo budget exceeded
-status|WORKER_CAP_EXCEEDED|Worker cap exceeded
-status|PREFLIGHT_FAILED|Preflight failed
-status|GIT_STATE_CHANGED|Git state changed
-status|RANGE_REFUSED|Phase range refused
-status|TEST_COMMAND_NOT_RUNNABLE|Test command not runnable
-status|TEST_COMMAND_FAILED|Test command failed
-status|TEST_COMMAND_TIMEOUT|Test command timed out
-status|RELEASE_BLOCKED|Release blocked
-status|RELEASE_FAILED|Release failed
-review|REVIEW_THIN|Review thin
-review|REVIEW_ABSENT|Review absent
+status|VERIFY_FAILED|Verify gate overrides|mechanical
+status|DIFF_TESTS_WEAKENED|Diff tests weakened|advisory
+status|DIFF_SUSPICIOUS|Diff suspicious|advisory
+status|SECRETS_FOUND|Secrets found|refusal
+status|BRIEF_INVALID|Brief invalid|refusal
+status|BRIEF_IMPOSSIBLE|Brief impossible|mechanical
+status|NO_STATUS_REPORTED|No status reported|mechanical
+status|WORKER_FAILED|Worker failed|mechanical
+status|RETRY_CAP_REACHED|Retry cap reached|refusal
+status|BUDGET_EXCEEDED|Run budget exceeded|refusal
+status|REPO_BUDGET_EXCEEDED|Repo budget exceeded|refusal
+status|WORKER_CAP_EXCEEDED|Worker cap exceeded|refusal
+status|PREFLIGHT_FAILED|Preflight failed|refusal
+status|GIT_STATE_CHANGED|Git state changed|mechanical
+status|RANGE_REFUSED|Phase range refused|refusal
+status|TEST_COMMAND_NOT_RUNNABLE|Test command not runnable|mechanical
+status|TEST_COMMAND_FAILED|Test command failed|mechanical
+status|TEST_COMMAND_TIMEOUT|Test command timed out|mechanical
+status|RELEASE_BLOCKED|Release blocked|refusal
+status|RELEASE_FAILED|Release failed|mechanical
+review|REVIEW_THIN|Review thin|advisory
+review|REVIEW_ABSENT|Review absent|advisory
 "
 
 GATE_SRC=()
 GATE_KEY=()
 GATE_LABEL=()
 GATE_COUNT=()
-while IFS='|' read -r g_src g_key g_label; do
+GATE_CLASS=()
+while IFS='|' read -r g_src g_key g_label g_class; do
   [ -n "$g_key" ] || continue
   GATE_SRC[${#GATE_SRC[@]}]="$g_src"
   GATE_KEY[${#GATE_KEY[@]}]="$g_key"
   GATE_LABEL[${#GATE_LABEL[@]}]="$g_label"
+  GATE_CLASS[${#GATE_CLASS[@]}]="$g_class"
   GATE_COUNT[${#GATE_COUNT[@]}]=0
 done <<EOF
 $GATE_TABLE
@@ -649,6 +664,83 @@ while [ "$gi" -lt "$GATE_N" ]; do
   [ "${GATE_COUNT[$gi]}" -gt 0 ] && FIRED_ANY=$((FIRED_ANY + 1))
   gi=$((gi + 1))
 done
+echo ""
+
+# --- gate corroboration -----------------------------------------------------
+#
+# "How often was this gate right?" is the question a reader actually has, and for
+# most gates it is not answerable — which is itself the answer worth printing. A
+# precision column filled in for every row would be mostly invention, and a reader
+# deleting a gate on the strength of an invented number is the exact harm the
+# never-fired list was rewritten to avoid.
+#
+# One correlation the ledger does support: a review recorded REVIEW_THIN, and the
+# same run later failing --verify. That is the case check-review.sh was written
+# for, and it is the only gate here with a later signal to check against.
+
+THIN_RUNS=""
+FAILED_RUNS=""
+# shellcheck disable=SC2034 # TSV columns read to match the recorded schema
+while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev; do
+  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev
+  [ -n "$r_run" ] || continue
+  case "$r_rev" in
+    REVIEW_THIN*) THIN_RUNS="$THIN_RUNS$r_run
+" ;;
+  esac
+  case "$r_st" in
+    VERIFY_FAILED*) FAILED_RUNS="$FAILED_RUNS$r_run
+" ;;
+  esac
+done < "$VALID_TSV"
+
+THIN_TOTAL=0
+THIN_CORROBORATED=0
+if [ -n "$THIN_RUNS" ]; then
+  while IFS= read -r tr; do
+    [ -n "$tr" ] || continue
+    THIN_TOTAL=$((THIN_TOTAL + 1))
+    if printf '%s' "$FAILED_RUNS" | grep -Fqx "$tr"; then
+      THIN_CORROBORATED=$((THIN_CORROBORATED + 1))
+    fi
+  done <<EOF
+$THIN_RUNS
+EOF
+fi
+
+echo "Gate Corroboration:"
+echo "  Whether a gate was *right* is a different question from how often it fired,"
+echo "  and for most gates here it cannot be answered. Each is labelled by what kind"
+echo "  of claim it makes rather than given a number that would have to be invented."
+gi=0
+while [ "$gi" -lt "$GATE_N" ]; do
+  if [ "${GATE_COUNT[$gi]}" -gt 0 ]; then
+    case "${GATE_CLASS[$gi]}" in
+      mechanical)
+        printf '  %-32s %d fired — mechanical: the gate is the measurement, not a judgement about it\n' \
+          "${GATE_LABEL[$gi]}:" "${GATE_COUNT[$gi]}"
+        ;;
+      refusal)
+        printf '  %-32s %d fired — refused before dispatch: the run does not exist, so it cannot be scored\n' \
+          "${GATE_LABEL[$gi]}:" "${GATE_COUNT[$gi]}"
+        ;;
+      advisory)
+        if [ "${GATE_KEY[$gi]}" = "REVIEW_THIN" ] && [ "$THIN_TOTAL" -gt 0 ]; then
+          printf '  %-32s %d fired — %d of %d were in a run that later failed --verify\n' \
+            "${GATE_LABEL[$gi]}:" "${GATE_COUNT[$gi]}" "$THIN_CORROBORATED" "$THIN_TOTAL"
+        else
+          printf '  %-32s %d fired — advisory: no later signal is recorded to check it against\n' \
+            "${GATE_LABEL[$gi]}:" "${GATE_COUNT[$gi]}"
+        fi
+        ;;
+      *)
+        printf '  %-32s %d fired\n' "${GATE_LABEL[$gi]}:" "${GATE_COUNT[$gi]}"
+        ;;
+    esac
+  fi
+  gi=$((gi + 1))
+done
+[ "$FIRED_ANY" -eq 0 ] && echo "  (no gate in the filtered ledger has fired)"
 echo ""
 
 echo "Never-Fired Gates:"
