@@ -9,6 +9,7 @@
 # 7. Worker Error and Printed Fallback Counts
 # 8. Gate Firing Counts and Never-Fired Gates
 # 9. Refusals: gates that fire before any dispatch
+# 10. Machine-readable TSV output: --format tsv
 #
 #   tests/report.sh
 #
@@ -985,6 +986,169 @@ if printf '%s\n' "$ADV_LINE" | grep -q "no later signal is recorded"; then
 else
   bad corr-advisory-honest "advisory gate not labelled honestly: $ADV_LINE"
 fi
+
+
+# =============================================================================
+# 10. Machine-Readable TSV Output: --format tsv
+# =============================================================================
+
+# 10.1 Byte-identical prose output with and without --format text
+OUT_TEXT_DEFAULT="$(bash "$REPORT_SH" --dir "$R_COL")"
+OUT_TEXT_EXPLICIT="$(bash "$REPORT_SH" --dir "$R_COL" --format text)"
+check tsv-text-default-match "$OUT_TEXT_DEFAULT" "$OUT_TEXT_EXPLICIT" "text output is byte-identical with and without --format text"
+
+# 10.2 Empty ledger and absent ledger in TSV mode
+R_TSV_NO_LEDGER="$(new_repo tsv-no-ledger)"
+OUT_TSV_NO_LEDGER="$(bash "$REPORT_SH" --dir "$R_TSV_NO_LEDGER" --format tsv)"; RC_NO_LEDGER=$?
+check tsv-no-ledger-rc "$RC_NO_LEDGER" 0 "absent ledger in TSV mode exits 0"
+check tsv-no-ledger-row "$OUT_TSV_NO_LEDGER" "$(printf 'records\t0\t0\t0\t0')" "absent ledger prints record accounting row and nothing else"
+
+R_TSV_EMPTY_FILE="$(new_repo tsv-empty-file)"
+mkdir -p "$R_TSV_EMPTY_FILE/.agy"
+: > "$R_TSV_EMPTY_FILE/.agy/ledger.jsonl"
+OUT_TSV_EMPTY_FILE="$(bash "$REPORT_SH" --dir "$R_TSV_EMPTY_FILE" --format tsv)"; RC_EMPTY_FILE=$?
+check tsv-empty-file-rc "$RC_EMPTY_FILE" 0 "empty ledger file in TSV mode exits 0"
+check tsv-empty-file-row "$OUT_TSV_EMPTY_FILE" "$(printf 'records\t0\t0\t0\t0')" "empty ledger file prints record accounting row and nothing else"
+
+# 10.3 Unparseable and no-context records in TSV mode
+R_TSV_MAL="$(new_repo tsv-malformed)"
+mkdir -p "$R_TSV_MAL/.agy"
+cat > "$R_TSV_MAL/.agy/ledger.jsonl" <<'EOF'
+corrupt plain text
+{"run":"r1","status":"PASSED"}
+{"run":"r1","phase":"CUSTOM","status":"PASSED","attempt":1,"dispatched":true}
+EOF
+OUT_TSV_MAL="$(bash "$REPORT_SH" --dir "$R_TSV_MAL" --format tsv)"
+MAL_REC_LINE="$(printf '%s\n' "$OUT_TSV_MAL" | grep '^records\t')"
+check tsv-malformed-records "$MAL_REC_LINE" "$(printf 'records\t3\t1\t1\t1')" "TSV records row reports total_read, valid, no_context, unparseable"
+
+# 10.4 Section names, field count of every row, and field order
+R_TSV_SCHEMA="$(new_repo tsv-schema)"
+mkdir -p "$R_TSV_SCHEMA/.agy"
+ledger_append "$R_TSV_SCHEMA" run=r1 phase=PHASEA attempt=1 status=PASSED elapsed_s=10 dispatched=true \
+  declared=true fallback=false max_idle_s=2 verify_ran=true verify_rc=0 \
+  usage='{"input_tokens":100,"output_tokens":20,"thinking_tokens":5,"cache_read_tokens":10,"total_tokens":125}'
+ledger_append "$R_TSV_SCHEMA" run=r1 phase=PHASEB attempt=2 status='VERIFY_FAILED(rc=1)' elapsed_s=20 dispatched=true \
+  declared=true fallback=false max_idle_s=4 verify_ran=true verify_rc=1 verdict=PASSED \
+  usage='{"input_tokens":200,"output_tokens":40,"thinking_tokens":10,"cache_read_tokens":0,"total_tokens":250}'
+ledger_append "$R_TSV_SCHEMA" run=r1 phase=PHASEB status='SECRETS_FOUND(api_key)' dispatched=false attempt=1
+ledger_append "$R_TSV_SCHEMA" run=r1 phase=PHASEC attempt=1 status=PASSED dispatched=true \
+  review='{"anchors":0,"status":"REVIEW_THIN"}'
+
+OUT_SCHEMA="$(bash "$REPORT_SH" --dir "$R_TSV_SCHEMA" --format tsv)"
+SCHEMA_RC=$?
+check tsv-schema-rc "$SCHEMA_RC" 0 "TSV schema fixture exits 0"
+
+# Verify section order and field counts
+SECTION_NAMES="$(printf '%s\n' "$OUT_SCHEMA" | awk -F'\t' '{print $1}' | awk '!seen[$0]++')"
+EXPECTED_SECTIONS="$(printf 'records\nabsent\nphase\nretry\nelapsed\ntokens\ngate\ngate_never\nverify')"
+check tsv-section-order "$SECTION_NAMES" "$EXPECTED_SECTIONS" "TSV sections appear in exact canonical order"
+
+FIELD_COUNT_ERRORS=0
+while read -r sec nf; do
+  [ -n "$sec" ] || continue
+  case "$sec" in
+    records)    [ "$nf" -eq 5 ] || FIELD_COUNT_ERRORS=$((FIELD_COUNT_ERRORS + 1)) ;;
+    absent)     [ "$nf" -eq 3 ] || FIELD_COUNT_ERRORS=$((FIELD_COUNT_ERRORS + 1)) ;;
+    phase)      [ "$nf" -eq 7 ] || FIELD_COUNT_ERRORS=$((FIELD_COUNT_ERRORS + 1)) ;;
+    retry)      [ "$nf" -eq 7 ] || FIELD_COUNT_ERRORS=$((FIELD_COUNT_ERRORS + 1)) ;;
+    elapsed)    [ "$nf" -eq 6 ] || FIELD_COUNT_ERRORS=$((FIELD_COUNT_ERRORS + 1)) ;;
+    tokens)     [ "$nf" -eq 8 ] || FIELD_COUNT_ERRORS=$((FIELD_COUNT_ERRORS + 1)) ;;
+    gate)       [ "$nf" -eq 4 ] || FIELD_COUNT_ERRORS=$((FIELD_COUNT_ERRORS + 1)) ;;
+    gate_never) [ "$nf" -eq 2 ] || FIELD_COUNT_ERRORS=$((FIELD_COUNT_ERRORS + 1)) ;;
+    verify)     [ "$nf" -eq 5 ] || FIELD_COUNT_ERRORS=$((FIELD_COUNT_ERRORS + 1)) ;;
+    *)          FIELD_COUNT_ERRORS=$((FIELD_COUNT_ERRORS + 1)) ;;
+  esac
+done <<EOF
+$(printf '%s\n' "$OUT_SCHEMA" | awk -F'\t' '{ print $1, NF }')
+EOF
+check tsv-field-counts "$FIELD_COUNT_ERRORS" "0" "every TSV row has the exact expected field count"
+
+# 10.5 Unknown renders as dash (-) and measured zero renders as 0 in same run
+R_TSV_DASH_ZERO="$(new_repo tsv-dash-zero)"
+mkdir -p "$R_TSV_DASH_ZERO/.agy"
+# Phase MEASURED: token thinking=0 and cache_read=0 are measured zeros, elapsed=15
+ledger_append "$R_TSV_DASH_ZERO" run=r-dz phase=MEASURED attempt=1 status=PASSED elapsed_s=15 dispatched=true \
+  usage='{"input_tokens":100,"output_tokens":50,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":150}'
+# Phase UNKNOWN: usage absent, elapsed_s absent
+ledger_append "$R_TSV_DASH_ZERO" run=r-dz phase=UNKNOWN attempt=1 status=PASSED dispatched=true
+# Phase REFUSED_ONLY: 0 dispatches, pass rate must be -
+ledger_append "$R_TSV_DASH_ZERO" run=r-dz phase=REFUSED_ONLY status=BRIEF_INVALID dispatched=false attempt=1
+
+OUT_DZ="$(bash "$REPORT_SH" --dir "$R_TSV_DASH_ZERO" --format tsv)"
+TOK_MEASURED="$(printf '%s\n' "$OUT_DZ" | grep '^tokens\tMEASURED\t')"
+TOK_UNKNOWN="$(printf '%s\n' "$OUT_DZ" | grep '^tokens\tUNKNOWN\t')"
+EL_MEASURED="$(printf '%s\n' "$OUT_DZ" | grep '^elapsed\tMEASURED\t')"
+EL_UNKNOWN="$(printf '%s\n' "$OUT_DZ" | grep '^elapsed\tUNKNOWN\t')"
+PH_REFUSED="$(printf '%s\n' "$OUT_DZ" | grep '^phase\tREFUSED_ONLY\t')"
+
+check tsv-tok-measured "$TOK_MEASURED" "$(printf 'tokens\tMEASURED\t100\t50\t0\t150\t0\t0')" "measured zero tokens render as 0"
+check tsv-tok-unknown "$TOK_UNKNOWN" "$(printf 'tokens\tUNKNOWN\t-\t-\t-\t-\t-\t1')" "unknown tokens render as dash with unknown records counted"
+check tsv-el-measured "$EL_MEASURED" "$(printf 'elapsed\tMEASURED\t15\t15\t15\t0')" "measured elapsed renders min/p50/max with 0 untimed"
+check tsv-el-unknown "$EL_UNKNOWN" "$(printf 'elapsed\tUNKNOWN\t-\t-\t-\t1')" "unknown elapsed renders as dash with untimed count"
+check tsv-ph-refused "$PH_REFUSED" "$(printf 'phase\tREFUSED_ONLY\t0\t0\t0\t1\t-')" "0 dispatches phase renders pass_rate as dash"
+
+# 10.6 Late-added fields raise absent counts rather than reporting zeros
+R_TSV_OLD="$(new_repo tsv-old-records)"
+mkdir -p "$R_TSV_OLD/.agy"
+# 2 records predating late-added fields (no dispatched, no max_idle_s, no fallback, no declared, no usage)
+ledger_append "$R_TSV_OLD" run=old1 phase=LEGACY attempt=1 status=PASSED started=2026-08-25T10:00:00Z
+ledger_append "$R_TSV_OLD" run=old2 phase=LEGACY attempt=1 status=PASSED started=2026-08-25T10:05:00Z
+# 1 modern record with all fields
+ledger_append "$R_TSV_OLD" run=modern phase=LEGACY attempt=1 status=PASSED started=2026-08-25T10:10:00Z \
+  dispatched=true max_idle_s=5 fallback=false declared=true \
+  usage='{"input_tokens":100,"output_tokens":50,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":150}'
+
+OUT_OLD="$(bash "$REPORT_SH" --dir "$R_TSV_OLD" --format tsv)"
+ABS_DISP="$(printf '%s\n' "$OUT_OLD" | grep '^absent\tdispatched\t')"
+ABS_IDLE="$(printf '%s\n' "$OUT_OLD" | grep '^absent\tmax_idle_s\t')"
+ABS_FALL="$(printf '%s\n' "$OUT_OLD" | grep '^absent\tfallback\t')"
+ABS_DECL="$(printf '%s\n' "$OUT_OLD" | grep '^absent\tdeclared\t')"
+ABS_USAG="$(printf '%s\n' "$OUT_OLD" | grep '^absent\tusage\t')"
+
+check tsv-abs-disp "$ABS_DISP" "$(printf 'absent\tdispatched\t2')" "absent dispatched counted for vintage records"
+check tsv-abs-idle "$ABS_IDLE" "$(printf 'absent\tmax_idle_s\t2')" "absent max_idle_s counted for vintage records"
+check tsv-abs-fall "$ABS_FALL" "$(printf 'absent\tfallback\t2')" "absent fallback counted for vintage records"
+check tsv-abs-decl "$ABS_DECL" "$(printf 'absent\tdeclared\t2')" "absent declared counted for vintage records"
+check tsv-abs-usag "$ABS_USAG" "$(printf 'absent\tusage\t2')" "absent usage counted for vintage records"
+
+# 10.7 Refusals excluded from dispatches and pass rate
+R_TSV_REF="$(new_repo tsv-refusal-rate)"
+mkdir -p "$R_TSV_REF/.agy"
+ledger_append "$R_TSV_REF" run=r-r1 phase=PHASE1 status=PASSED dispatched=true attempt=1 \
+  usage='{"input_tokens":500,"output_tokens":100,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":600}'
+ledger_append "$R_TSV_REF" run=r-r2 phase=PHASE1 status=WORKER_FAILED dispatched=true attempt=1 \
+  usage='{"input_tokens":200,"output_tokens":50,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":250}'
+ledger_append "$R_TSV_REF" run=r-r3 phase=PHASE1 status=BRIEF_INVALID dispatched=false attempt=1
+ledger_append "$R_TSV_REF" run=r-r4 phase=PHASE1 status=SECRETS_FOUND dispatched=false attempt=1
+
+OUT_REF="$(bash "$REPORT_SH" --dir "$R_TSV_REF" --format tsv)"
+PH_REF_ROW="$(printf '%s\n' "$OUT_REF" | grep '^phase\tPHASE1\t')"
+check tsv-phase-ref-row "$PH_REF_ROW" "$(printf 'phase\tPHASE1\t2\t1\t1\t2\t0.50')" "refusals excluded from dispatches and pass rate in TSV"
+
+# 10.8 Filters narrow TSV rows
+R_TSV_FILT="$(new_repo tsv-filt)"
+mkdir -p "$R_TSV_FILT/.agy"
+ledger_append "$R_TSV_FILT" run=run-a phase=ALPHA attempt=1 status=PASSED dispatched=true started=2026-08-25T08:00:00Z
+ledger_append "$R_TSV_FILT" run=run-b phase=BETA attempt=1 status=PASSED dispatched=true started=2026-08-25T12:00:00Z
+
+OUT_FILT_PH="$(bash "$REPORT_SH" --dir "$R_TSV_FILT" --format tsv --phase ALPHA)"
+if printf '%s\n' "$OUT_FILT_PH" | grep -q '^phase\tALPHA\t' && ! printf '%s\n' "$OUT_FILT_PH" | grep -q '^phase\tBETA\t'; then
+  ok tsv-filt-phase "--phase narrows TSV phase rows"
+else
+  bad tsv-filt-phase "--phase filter failed in TSV mode: $OUT_FILT_PH"
+fi
+
+OUT_FILT_RN="$(bash "$REPORT_SH" --dir "$R_TSV_FILT" --format tsv --run run-b)"
+if printf '%s\n' "$OUT_FILT_RN" | grep -q '^phase\tBETA\t' && ! printf '%s\n' "$OUT_FILT_RN" | grep -q '^phase\tALPHA\t'; then
+  ok tsv-filt-run "--run narrows TSV phase rows"
+else
+  bad tsv-filt-run "--run filter failed in TSV mode: $OUT_FILT_RN"
+fi
+
+# 10.9 CLI error handling for invalid format
+bash "$REPORT_SH" --dir "$R_TSV_FILT" --format xml >/dev/null 2>&1 || RC_BAD_FMT=$?
+check tsv-bad-format-rc "${RC_BAD_FMT:-0}" 2 "--format with unknown format exits 2"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

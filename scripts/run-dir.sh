@@ -414,6 +414,42 @@ run_dir_new() {
   printf '%s\n' "$run_id" > "$dir/.agy/current"
   printf '%s\n' "$run_id" > "$dir/.agy/last"
 
+  # Best-effort fleet registration (issue #84).
+  # Appends the repository's absolute path to the registry the first time a
+  # run is created there. This append is best-effort and must never fail the
+  # run: if the registry cannot be created or written (e.g. read-only home,
+  # permission denied, path is a directory), warn on stderr and carry on.
+  # A delegation run must not fail because a bookkeeping file was unwritable.
+  if [ "${AGY_FLEET_REGISTER:-}" != "0" ]; then
+    local reg_file
+    reg_file="${AGY_FLEET:-${XDG_CONFIG_HOME:-$HOME/.config}/agy/fleet}"
+    local already_reg=0
+    if [ -f "$reg_file" ]; then
+      local rline
+      while IFS= read -r rline || [ -n "$rline" ]; do
+        local rtrimmed="${rline#"${rline%%[! ]*}"}"
+        case "$rtrimmed" in
+          '#'*|'') continue ;;
+        esac
+        rtrimmed="${rtrimmed%"${rtrimmed##*[! ]}"}"
+        if [ "$rtrimmed" = "$dir" ]; then
+          already_reg=1
+          break
+        fi
+      done < "$reg_file" 2>/dev/null || true
+    fi
+    if [ $already_reg -eq 0 ]; then
+      local reg_dir
+      reg_dir="$(dirname "$reg_file")"
+      if [ ! -d "$reg_dir" ]; then
+        mkdir -p "$reg_dir" 2>/dev/null || true
+      fi
+      if ! printf '%s\n' "$dir" >> "$reg_file" 2>/dev/null; then
+        echo "run-dir: warning: could not write to registry: $reg_file" >&2
+      fi
+    fi
+  fi
+
   printf '%s\n' "$run_id"
   return 0
 }

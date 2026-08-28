@@ -26,6 +26,8 @@ VENDORED="$HERE/../criteria"
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/resolve-criteria.XXXXXX")" && pwd)"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 
+export AGY_FLEET="$ROOT/fleet"
+
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS + 1)); printf '%-32s ok   %s\n' "$1" "$2"; }
 bad() { FAIL=$((FAIL + 1)); printf '%-32s FAIL %s\n' "$1" "$2"; }

@@ -2,7 +2,7 @@
 # Resolve model and tier binding from agy.toml configuration.
 #
 #   resolve-model.sh [--tier <low|medium|high|raw-id>] [--phase <NAME>]
-#                    [--dir <repo>] [--fallbacks]
+#                    [--dir <repo>] [--fallbacks] [--explain]
 #
 # Resolution order (first hit wins):
 #   1. <repo>/.claude/agy.toml     the project's own configuration
@@ -15,8 +15,8 @@
 #   high   -> gemini-3.7-flash-high
 #
 # Prints:
-#   STDOUT: Resolved model id (or fallback list if --fallbacks) — one line
-#   STDERR: Which config file and entry decided the resolution
+#   STDOUT: Resolved model id (or fallback list if --fallbacks, or TSV rows if --explain)
+#   STDERR: Which config file and entry decided the resolution (suppressed with --explain)
 #
 # Exit codes:
 #   0  model resolved
@@ -212,11 +212,95 @@ resolve_config_path() {
   return 1
 }
 
+_resolve_model_explain_phase() {
+  local p="$1"
+  local parsed="$2"
+  local config_file="$3"
+  local want_fallbacks="$4"
+
+  local declared="false"
+  local tier=""
+  local tier_source="builtin"
+
+  if [ -n "$parsed" ]; then
+    local pt
+    pt="$(_resolve_model_get_val "phases.${p}.tier" "$parsed")"
+    if [ -n "$pt" ]; then
+      declared="true"
+      tier="$pt"
+      tier_source="$config_file"
+    fi
+  fi
+
+  if [ -z "$tier" ]; then
+    declared="false"
+    tier_source="builtin"
+    case "$p" in
+      DISCOVERY) tier="low" ;;
+      REVIEW)    tier="high" ;;
+      *)         tier="medium" ;;
+    esac
+  fi
+
+  local model=""
+  local model_source="builtin"
+
+  if [ -n "$parsed" ]; then
+    local lv
+    lv="$(_resolve_model_get_val "tiers.${tier}" "$parsed")"
+    if [ -n "$lv" ]; then
+      model="$lv"
+      model_source="$config_file"
+    fi
+  fi
+
+  if [ -z "$model" ]; then
+    case "$tier" in
+      low)    model="gemini-3.7-flash-low";    model_source="builtin" ;;
+      medium) model="gemini-3.7-flash-medium"; model_source="builtin" ;;
+      high)   model="gemini-3.7-flash-high";   model_source="builtin" ;;
+      *-*|*.*|*:*|*[0-9]*) model="$tier";      model_source="builtin" ;;
+      *)
+        echo "resolve-model: unknown tier '$tier' for phase $p" >&2
+        return 2
+        ;;
+    esac
+  fi
+
+  if [ "$want_fallbacks" -eq 1 ]; then
+    local fb=""
+    if [ -n "$parsed" ]; then
+      fb="$(_resolve_model_get_val "phases.${p}.fallbacks" "$parsed")"
+    fi
+    local fb_field="-"
+    if [ -n "$fb" ]; then
+      local save_ifs="$IFS"
+      IFS=' '
+      local item
+      local joined=""
+      for item in $fb; do
+        if [ -z "$joined" ]; then
+          joined="$item"
+        else
+          joined="$joined,$item"
+        fi
+      done
+      IFS="$save_ifs"
+      fb_field="$joined"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$tier" "$model" "$declared" "$tier_source" "$model_source" "$fb_field"
+  else
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$tier" "$model" "$declared" "$tier_source" "$model_source"
+  fi
+  return 0
+}
+
 resolve_model() {
   local tier=""
   local phase=""
   local dir="$PWD"
   local want_fallbacks=0
+  local want_explain=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -224,6 +308,7 @@ resolve_model() {
       --phase)     phase="$2"; shift 2 ;;
       --dir)       dir="$2"; shift 2 ;;
       --fallbacks) want_fallbacks=1; shift ;;
+      --explain)   want_explain=1; shift ;;
       -h|--help)   sed -n '2,20p' "$0"; return 0 2>/dev/null || exit 0 ;;
       -*)          echo "resolve-model: unknown arg $1" >&2; return 2 2>/dev/null || exit 2 ;;
       *)           echo "resolve-model: unexpected arg $1" >&2; return 2 2>/dev/null || exit 2 ;;
@@ -244,6 +329,31 @@ resolve_model() {
     fi
   else
     config_file=""
+  fi
+
+  if [ "$want_explain" -eq 1 ]; then
+    if [ -n "$phase" ]; then
+      _resolve_model_explain_phase "$phase" "$parsed" "$config_file" "$want_fallbacks" || return $?
+    else
+      local phases_val=""
+      if [ -n "$parsed" ]; then
+        phases_val="$(_resolve_model_get_val "pipeline.phases" "$parsed")"
+      fi
+
+      local plist=""
+      if [ -n "$phases_val" ]; then
+        plist="$phases_val"
+      else
+        plist="DISCOVERY IMPLEMENT REVIEW QA RELEASE"
+      fi
+
+      local p
+      for p in $plist; do
+        _resolve_model_explain_phase "$p" "$parsed" "$config_file" "$want_fallbacks" || return $?
+      done
+      _resolve_model_explain_phase "DELEGATE" "$parsed" "$config_file" "$want_fallbacks" || return $?
+    fi
+    return 0 2>/dev/null || exit 0
   fi
 
   if [ "$want_fallbacks" -eq 1 ]; then

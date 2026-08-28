@@ -23,6 +23,8 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/check-test-command.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 
+export AGY_FLEET="$ROOT/fleet"
+
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS + 1)); printf '%-30s ok   %s\n' "$1" "$2"; }
 bad() { FAIL=$((FAIL + 1)); printf '%-30s FAIL %s\n' "$1" "$2"; }

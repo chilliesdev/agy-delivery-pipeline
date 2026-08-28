@@ -21,6 +21,8 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/phase-status.XXXXXX")"
 trap 'chmod +x "$HERE/../scripts/check-git-state.sh" 2>/dev/null || true; rm -rf "$ROOT"' EXIT INT TERM
 
+export AGY_FLEET="$ROOT/fleet"
+
 # The stub agy: cwd is the repo agy-run.sh cd'd into. Behaviour comes from the
 # STUB_* environment. `agy models` is answered first and on its own terms — it is
 # preflight.sh's call, not the worker's, so STUB_RC and STUB_TRANSCRIPT must not

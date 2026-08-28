@@ -29,6 +29,8 @@ SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/fake-agy-test.XXXXXX")"
 SCRATCH="$(cd "$SCRATCH" && pwd)"
 trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 
+export AGY_FLEET="$SCRATCH/fleet"
+
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS + 1)); printf '%-35s ok   %s\n' "$1" "$2"; }
 bad()  { FAIL=$((FAIL + 1)); printf '%-35s FAIL %s\n' "$1" "$2"; }

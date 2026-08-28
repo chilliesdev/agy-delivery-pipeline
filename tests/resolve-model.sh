@@ -13,6 +13,7 @@ PREFLIGHT="$HERE/../scripts/preflight.sh"
 PHASE_SH="$HERE/../scripts/phase.sh"
 RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 VENDORED_CONFIG="$HERE/../agy.toml"
+VENDORED_ABS="$(cd "$(dirname "$VENDORED_CONFIG")" && pwd)/$(basename "$VENDORED_CONFIG")"
 
 [ -f "$RESOLVE" ] || { echo "resolve-model-test: resolve-model.sh not found next door" >&2; exit 2; }
 [ -f "$PREFLIGHT" ] || { echo "resolve-model-test: preflight.sh not found next door" >&2; exit 2; }
@@ -25,6 +26,8 @@ VENDORED_CONFIG="$HERE/../agy.toml"
 
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/resolve-model.XXXXXX")" && pwd)"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
+
+export AGY_FLEET="$ROOT/fleet"
 
 # Stub agy CLI for preflight & phase tests
 STUB="$ROOT/agy"
@@ -306,6 +309,177 @@ check no-config-high "$OUT8_H" "gemini-3.7-flash-high" "high resolves to gemini-
 
 OUT8_RAW="$(/bin/bash "$RESOLVE" --tier claude-opus-4-6-thinking --dir "$R8" 2>/dev/null)"
 check no-config-raw "$OUT8_RAW" "claude-opus-4-6-thinking" "raw model id resolves without custom config"
+
+# --- 9. --explain declared vs undeclared/inherited tier -------------------
+
+R9="$(new_repo explain-declared-vs-inherited)"
+
+# 9a. Declared phase REVIEW: declared=true, tier=high, source is agy.toml
+OUT9_REV="$(/bin/bash "$RESOLVE" --explain --phase REVIEW --dir "$R9")"; RC9_REV=$?
+check explain-review-rc "$RC9_REV" 0 "--explain REVIEW exits 0"
+check explain-review-tsv "$OUT9_REV" "REVIEW	high	gemini-3.7-flash-high	true	$VENDORED_ABS	$VENDORED_ABS" "REVIEW row matches declared format"
+
+# 9b. Declared phase DISCOVERY: declared=true, tier=low, source is agy.toml
+OUT9_DISC="$(/bin/bash "$RESOLVE" --explain --phase DISCOVERY --dir "$R9")"; RC9_DISC=$?
+check explain-disc-rc "$RC9_DISC" 0 "--explain DISCOVERY exits 0"
+check explain-disc-tsv "$OUT9_DISC" "DISCOVERY	low	gemini-3.7-flash-low	true	$VENDORED_ABS	$VENDORED_ABS" "DISCOVERY row matches declared format"
+
+# 9c. Undeclared phase IMPLEMENT: declared=false, tier=medium, tier_source=builtin, model_source=agy.toml
+OUT9_IMP="$(/bin/bash "$RESOLVE" --explain --phase IMPLEMENT --dir "$R9")"; RC9_IMP=$?
+check explain-imp-rc "$RC9_IMP" 0 "--explain IMPLEMENT exits 0"
+check explain-imp-tsv "$OUT9_IMP" "IMPLEMENT	medium	gemini-3.7-flash-medium	false	builtin	$VENDORED_ABS" "IMPLEMENT row reflects inherited built-in tier"
+
+# 9d. Undeclared phase QA: declared=false, tier=medium, tier_source=builtin
+OUT9_QA="$(/bin/bash "$RESOLVE" --explain --phase QA --dir "$R9")"; RC9_QA=$?
+check explain-qa-rc "$RC9_QA" 0 "--explain QA exits 0"
+check explain-qa-tsv "$OUT9_QA" "QA	medium	gemini-3.7-flash-medium	false	builtin	$VENDORED_ABS" "QA row reflects inherited built-in tier"
+
+# 9e. Delegation phase DELEGATE: declared=false, tier=medium, tier_source=builtin
+OUT9_DEL="$(/bin/bash "$RESOLVE" --explain --phase DELEGATE --dir "$R9")"; RC9_DEL=$?
+check explain-del-rc "$RC9_DEL" 0 "--explain DELEGATE exits 0"
+check explain-del-tsv "$OUT9_DEL" "DELEGATE	medium	gemini-3.7-flash-medium	false	builtin	$VENDORED_ABS" "DELEGATE row reflects medium default"
+
+# 9f. Field count & stderr suppression on success
+FIELD_COUNT9="$(printf '%s\n' "$OUT9_REV" | awk -F'\t' '{print NF}')"
+check explain-field-count "$FIELD_COUNT9" 6 "--explain row has exactly 6 tab-separated fields"
+
+STDERR9="$(/bin/bash "$RESOLVE" --explain --phase REVIEW --dir "$R9" 2>&1 >/dev/null)"
+check explain-stderr-empty "$STDERR9" "" "--explain produces nothing on stderr on success"
+
+# --- 10. Candidate config resolution order under --explain ----------------
+
+R10="$(new_repo candidate-resolution-order)"
+mkdir -p "$R10/.claude"
+
+# Setup both .claude/agy.toml and agy.toml
+cat > "$R10/.claude/agy.toml" <<'EOF'
+[phases.REVIEW]
+tier = "medium"
+
+[tiers]
+medium = "custom-claude-medium"
+EOF
+
+cat > "$R10/agy.toml" <<'EOF'
+[phases.REVIEW]
+tier = "low"
+
+[tiers]
+low = "custom-root-low"
+EOF
+
+R10_CLAUDE_ABS="$(cd "$R10/.claude" && pwd)/agy.toml"
+R10_ROOT_ABS="$(cd "$R10" && pwd)/agy.toml"
+
+# 10a. .claude/agy.toml wins over agy.toml and vendored
+OUT10_A="$(/bin/bash "$RESOLVE" --explain --phase REVIEW --dir "$R10")"
+check explain-cand-claude-wins "$OUT10_A" "REVIEW	medium	custom-claude-medium	true	$R10_CLAUDE_ABS	$R10_CLAUDE_ABS" ".claude/agy.toml wins when present"
+
+# 10b. agy.toml wins when .claude/agy.toml is removed
+rm -f "$R10/.claude/agy.toml"
+OUT10_B="$(/bin/bash "$RESOLVE" --explain --phase REVIEW --dir "$R10")"
+check explain-cand-root-wins "$OUT10_B" "REVIEW	low	custom-root-low	true	$R10_ROOT_ABS	$R10_ROOT_ABS" "repo root agy.toml wins when .claude config absent"
+
+# 10c. Vendored agy.toml wins when repo configs are removed
+rm -f "$R10/agy.toml"
+OUT10_C="$(/bin/bash "$RESOLVE" --explain --phase REVIEW --dir "$R10")"
+check explain-cand-vendored-wins "$OUT10_C" "REVIEW	high	gemini-3.7-flash-high	true	$VENDORED_ABS	$VENDORED_ABS" "vendored agy.toml wins when repo configs absent"
+
+# --- 11. No-phase form emits pipeline phases in order + DELEGATE last -----
+
+R11="$(new_repo custom-pipeline-order)"
+cat > "$R11/agy.toml" <<'EOF'
+[pipeline]
+phases = ["QA", "DISCOVERY", "RELEASE"]
+
+[phases.RELEASE]
+tier = "high"
+EOF
+R11_ABS="$(cd "$R11" && pwd)/agy.toml"
+
+OUT11="$(/bin/bash "$RESOLVE" --explain --dir "$R11")"; RC11=$?
+check explain-no-phase-rc "$RC11" 0 "--explain without --phase exits 0"
+
+LINE_COUNT11="$(printf '%s\n' "$OUT11" | grep -c '^' || true)"
+check explain-no-phase-line-count "$LINE_COUNT11" 4 "--explain outputs 3 declared phases + 1 DELEGATE row"
+
+LINE11_1="$(printf '%s\n' "$OUT11" | sed -n '1p')"
+LINE11_2="$(printf '%s\n' "$OUT11" | sed -n '2p')"
+LINE11_3="$(printf '%s\n' "$OUT11" | sed -n '3p')"
+LINE11_4="$(printf '%s\n' "$OUT11" | sed -n '4p')"
+
+check explain-no-phase-l1 "$LINE11_1" "QA	medium	gemini-3.7-flash-medium	false	builtin	builtin" "line 1 is QA in declared order"
+check explain-no-phase-l2 "$LINE11_2" "DISCOVERY	low	gemini-3.7-flash-low	false	builtin	builtin" "line 2 is DISCOVERY in declared order"
+check explain-no-phase-l3 "$LINE11_3" "RELEASE	high	gemini-3.7-flash-high	true	$R11_ABS	builtin" "line 3 is RELEASE with declared tier"
+check explain-no-phase-l4 "$LINE11_4" "DELEGATE	medium	gemini-3.7-flash-medium	false	builtin	builtin" "line 4 is DELEGATE bounded worker last"
+
+# Default vendored config no-phase output
+OUT11_DEF="$(/bin/bash "$RESOLVE" --explain --dir "$R9")"
+LINE_COUNT11_DEF="$(printf '%s\n' "$OUT11_DEF" | grep -c '^' || true)"
+check explain-def-line-count "$LINE_COUNT11_DEF" 6 "default config emits 5 pipeline phases + 1 DELEGATE"
+
+# --- 12. Composing --explain with --fallbacks -----------------------------
+
+# 12a. Phase with fallbacks configured (REVIEW in vendored)
+OUT12_FB="$(/bin/bash "$RESOLVE" --explain --fallbacks --phase REVIEW --dir "$R9")"; RC12_FB=$?
+check explain-fb-rc "$RC12_FB" 0 "--explain --fallbacks exits 0"
+check explain-fb-tsv "$OUT12_FB" "REVIEW	high	gemini-3.7-flash-high	true	$VENDORED_ABS	$VENDORED_ABS	gemini-3.7-flash-high,gemini-3.7-flash-medium" "REVIEW row includes 7th comma-joined fallback field"
+
+FIELD_COUNT12="$(printf '%s\n' "$OUT12_FB" | awk -F'\t' '{print NF}')"
+check explain-fb-field-count "$FIELD_COUNT12" 7 "--explain --fallbacks row has 7 fields"
+
+# 12b. Phase without fallbacks configured emits '-'
+OUT12_NOFB="$(/bin/bash "$RESOLVE" --explain --fallbacks --phase IMPLEMENT --dir "$R9")"
+check explain-nofb-tsv "$OUT12_NOFB" "IMPLEMENT	medium	gemini-3.7-flash-medium	false	builtin	$VENDORED_ABS	-" "IMPLEMENT row emits '-' for absent fallbacks"
+
+# --- 13. Repository with no config at all falls through to built-ins ------
+
+# Run a copy of resolve-model in isolated directory where no agy.toml exists next door or above
+ISOLATED_DIR="$ROOT/isolated/bin"
+mkdir -p "$ISOLATED_DIR"
+cp "$RESOLVE" "$ISOLATED_DIR/resolve-model.sh"
+R13="$(new_repo isolated-no-config)"
+
+OUT13="$(/bin/bash "$ISOLATED_DIR/resolve-model.sh" --explain --phase REVIEW --dir "$R13")"; RC13=$?
+check explain-no-config-rc "$RC13" 0 "isolated resolve-model exits 0"
+check explain-no-config-tsv "$OUT13" "REVIEW	high	gemini-3.7-flash-high	false	builtin	builtin" "no config resolves builtin tier and builtin model"
+
+OUT13_ALL="$(/bin/bash "$ISOLATED_DIR/resolve-model.sh" --explain --dir "$R13")"
+LINE_COUNT13="$(printf '%s\n' "$OUT13_ALL" | grep -c '^' || true)"
+check explain-no-config-line-count "$LINE_COUNT13" 6 "isolated resolve-model emits all default phases + DELEGATE"
+
+# --- 14. Malformed config refused under --explain --------------------------
+
+R14="$(new_repo malformed-explain)"
+cat > "$R14/agy.toml" <<'EOF'
+[tiers]
+high = "gemini-3.7-flash-high" # inline comment
+EOF
+
+OUT14="$(/bin/bash "$RESOLVE" --explain --dir "$R14" 2>&1 >/dev/null)"; RC14=$?
+check explain-malformed-rc "$RC14" 2 "malformed config exits 2 under --explain"
+case "$OUT14" in
+  *"malformed config"*) ok explain-malformed-msg "stderr contains malformed config message" ;;
+  *) bad explain-malformed-msg "stderr missing malformed message: $OUT14" ;;
+esac
+
+STDOUT14="$(/bin/bash "$RESOLVE" --explain --dir "$R14" 2>/dev/null)"
+check explain-malformed-stdout-empty "$STDOUT14" "" "no stdout emitted on malformed config"
+
+# --- 15. Unknown tier configured for phase under --explain ----------------
+
+R15="$(new_repo unknown-tier-explain)"
+cat > "$R15/agy.toml" <<'EOF'
+[phases.REVIEW]
+tier = "unregistered_tier"
+EOF
+
+OUT15="$(/bin/bash "$RESOLVE" --explain --phase REVIEW --dir "$R15" 2>&1 >/dev/null)"; RC15=$?
+check explain-unknown-tier-rc "$RC15" 2 "unknown tier in phase exits 2 under --explain"
+case "$OUT15" in
+  *"unknown tier 'unregistered_tier'"*) ok explain-unknown-tier-msg "stderr names unknown tier" ;;
+  *) bad explain-unknown-tier-msg "stderr missing unknown tier message: $OUT15" ;;
+esac
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

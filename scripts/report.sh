@@ -3,6 +3,7 @@
 #
 #   report.sh [--dir <repo>] [--since <date>] [--phase <NAME>] [--run <id>]
 #             [--price-in <usd-per-mtok>] [--price-out <usd-per-mtok>]
+#             [--format text|tsv]
 #
 # Reads:   <repo>/.agy/ledger.jsonl
 # Prints:  plain-text summary report of dispatch outcomes, retries, verify overrides,
@@ -34,6 +35,7 @@ FILTER_PHASE=""
 FILTER_RUN=""
 PRICE_IN=""
 PRICE_OUT=""
+FORMAT="text"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,6 +45,12 @@ while [ $# -gt 0 ]; do
     --run) FILTER_RUN="$2"; shift 2 ;;
     --price-in) PRICE_IN="$2"; shift 2 ;;
     --price-out) PRICE_OUT="$2"; shift 2 ;;
+    --format)
+      case "${2:-}" in
+        text|tsv) FORMAT="$2"; shift 2 ;;
+        *) echo "report: unknown format '${2:-}' (want text|tsv)" >&2; exit 2 ;;
+      esac
+      ;;
     -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "report: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -59,6 +67,10 @@ git -C "$DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
 LEDGER_FILE="$DIR/.agy/ledger.jsonl"
 
 if [ ! -f "$LEDGER_FILE" ] || [ ! -s "$LEDGER_FILE" ]; then
+  if [ "$FORMAT" = "tsv" ]; then
+    printf 'records\t0\t0\t0\t0\n'
+    exit 0
+  fi
   echo "Run Ledger Report"
   echo "================="
   echo "Ledger is empty or absent at $LEDGER_FILE"
@@ -205,6 +217,10 @@ while IFS= read -r line || [ -n "$line" ]; do
   r_agy_status="$(_extract_str agy_status "$trimmed_top")"
   r_verdict_route="$(_extract_str verdict_route "$trimmed_top")"
   r_dispatched="$(_extract_bool dispatched "$trimmed_top")"
+  r_max_idle="$(_extract_num max_idle_s "$trimmed_top")"
+  r_fallback="$(_extract_bool fallback "$trimmed_top")"
+  r_declared="$(_extract_bool declared "$trimmed_top")"
+  r_verify_rc="$(_extract_num verify_rc "$trimmed_top")"
   # The Phase 2 review verdict rides in the nested review object rather than in
   # status, so it has to be read before the nested objects are stripped above.
   r_review_status="$(_extract_nested review status "$trimmed")"
@@ -219,15 +235,18 @@ while IFS= read -r line || [ -n "$line" ]; do
     r_out="$(_extract_nested usage output_tokens "$trimmed")"
     r_thk="$(_extract_nested usage thinking_tokens "$trimmed")"
     r_tot="$(_extract_nested usage total_tokens "$trimmed")"
+    r_crd="$(_extract_nested usage cache_read_tokens "$trimmed")"
     r_inp="${r_inp:-0}"
     r_out="${r_out:-0}"
     r_thk="${r_thk:-0}"
     r_tot="${r_tot:-0}"
+    r_crd="${r_crd:-0}"
   else
     r_inp="0"
     r_out="0"
     r_thk="0"
     r_tot="0"
+    r_crd="0"
   fi
 
   # A well-formed line carrying no dispatch context is not corrupt. issue.sh
@@ -255,11 +274,12 @@ while IFS= read -r line || [ -n "$line" ]; do
   _tsv_write_row \
     "$r_run" "$r_phase" "$r_attempt" "$r_status" "$r_elapsed" "$r_verdict" "$r_verify_ran" "$r_started" \
     "$r_inp" "$r_out" "$r_thk" "$r_tot" "${r_refunded:-0}" "$has_usage" "$r_issue" "$r_agy_status" "$r_verdict_route" \
-    "$r_dispatched" "$r_review_status" >> "$VALID_TSV"
+    "$r_dispatched" "$r_review_status" "$r_crd" "$r_max_idle" "$r_fallback" "$r_declared" "$r_verify_rc" >> "$VALID_TSV"
 done < "$LEDGER_FILE"
 
 TOTAL_VALID="$(grep -c . "$VALID_TSV" 2>/dev/null || true)"
 TOTAL_VALID="${TOTAL_VALID:-0}"
+PHASES="$(awk -F'\t' '{print $2}' "$VALID_TSV" 2>/dev/null | sort -u)"
 
 # A record marked "dispatched":false is a gate that refused before any worker
 # ran. It cost no model call, carries no usage and no elapsed time, and must be
@@ -269,14 +289,335 @@ TOTAL_VALID="${TOTAL_VALID:-0}"
 DISPATCH_COUNT=0
 REFUSAL_COUNT=0
 UNMARKED_COUNT=0
-while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev; do
-  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev
+while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
   case "$r_disp" in
     false) REFUSAL_COUNT=$((REFUSAL_COUNT + 1)) ;;
     true)  DISPATCH_COUNT=$((DISPATCH_COUNT + 1)) ;;
     *)     UNMARKED_COUNT=$((UNMARKED_COUNT + 1)) ;;
   esac
 done < "$VALID_TSV"
+
+# Every gate this report can count, in one table, so the firing counts and the
+# never-fired list cannot disagree about what a gate is. Two lists kept by hand
+# is how a gate gets counted and then quietly left out of the list that says it
+# never fired — or the reverse.
+#
+# Field 1 is where the outcome is recorded: "status" for the record's own status
+# field, "review" for the Phase 2 verdict, which rides in the nested review
+# object rather than in status. Field 2 is the status prefix, field 3 the label.
+#
+# Field 4 is what kind of claim the gate makes, which decides whether asking "was
+# it right?" is even a question:
+#
+#   mechanical  the gate IS the measurement — a command exited non-zero, git moved.
+#               There is nothing to corroborate; a precision figure here would be
+#               a restatement of the fact, dressed as an assessment of it.
+#   refusal     it fired before any worker ran. Whether the dispatch would have
+#               failed is unknowable by construction: the run does not exist.
+#               A refusal gate can never be scored, and saying so is the honest
+#               answer rather than reporting it as unproven.
+#   advisory    a suspicion a later signal can corroborate. Only these can carry
+#               a number, and only where the later signal was actually recorded.
+GATE_TABLE="
+status|VERIFY_FAILED|Verify gate overrides|mechanical
+status|DIFF_TESTS_WEAKENED|Diff tests weakened|advisory
+status|DIFF_SUSPICIOUS|Diff suspicious|advisory
+status|SECRETS_FOUND|Secrets found|refusal
+status|BRIEF_INVALID|Brief invalid|refusal
+status|BRIEF_IMPOSSIBLE|Brief impossible|mechanical
+status|NO_STATUS_REPORTED|No status reported|mechanical
+status|WORKER_FAILED|Worker failed|mechanical
+status|RETRY_CAP_REACHED|Retry cap reached|refusal
+status|BUDGET_EXCEEDED|Run budget exceeded|refusal
+status|REPO_BUDGET_EXCEEDED|Repo budget exceeded|refusal
+status|WORKER_CAP_EXCEEDED|Worker cap exceeded|refusal
+status|PREFLIGHT_FAILED|Preflight failed|refusal
+status|GIT_STATE_CHANGED|Git state changed|mechanical
+status|RANGE_REFUSED|Phase range refused|refusal
+status|TEST_COMMAND_NOT_RUNNABLE|Test command not runnable|mechanical
+status|TEST_COMMAND_FAILED|Test command failed|mechanical
+status|TEST_COMMAND_TIMEOUT|Test command timed out|mechanical
+status|RELEASE_BLOCKED|Release blocked|refusal
+status|RELEASE_FAILED|Release failed|mechanical
+review|REVIEW_THIN|Review thin|advisory
+review|REVIEW_ABSENT|Review absent|advisory
+"
+
+GATE_SRC=()
+GATE_KEY=()
+GATE_LABEL=()
+GATE_COUNT=()
+GATE_CLASS=()
+while IFS='|' read -r g_src g_key g_label g_class; do
+  [ -n "$g_key" ] || continue
+  GATE_SRC[${#GATE_SRC[@]}]="$g_src"
+  GATE_KEY[${#GATE_KEY[@]}]="$g_key"
+  GATE_LABEL[${#GATE_LABEL[@]}]="$g_label"
+  GATE_CLASS[${#GATE_CLASS[@]}]="$g_class"
+  GATE_COUNT[${#GATE_COUNT[@]}]=0
+done <<EOF
+$GATE_TABLE
+EOF
+GATE_N=${#GATE_KEY[@]}
+
+WORKER_ERROR_COUNT=0
+PRINTED_VERDICT_COUNT=0
+
+# shellcheck disable=SC2034 # TSV columns read to match the recorded schema
+while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
+  gi=0
+  while [ "$gi" -lt "$GATE_N" ]; do
+    g_key="${GATE_KEY[$gi]}"
+    if [ "${GATE_SRC[$gi]}" = "review" ]; then
+      g_field="$r_rev"
+    else
+      g_field="$r_st"
+    fi
+    # Prefix rather than glob: a status carries its reason in parentheses
+    # (BRIEF_INVALID(missing-verdict-path)), and the reason is not the gate.
+    if [ "${g_field:0:${#g_key}}" = "$g_key" ]; then
+      GATE_COUNT[$gi]=$(( ${GATE_COUNT[$gi]} + 1 ))
+    fi
+    gi=$((gi + 1))
+  done
+  case "$r_agy_st" in
+    ERROR*|error*|Error*) WORKER_ERROR_COUNT=$((WORKER_ERROR_COUNT + 1)) ;;
+  esac
+  case "$r_vd_rt" in
+    print*|fallback*) PRINTED_VERDICT_COUNT=$((PRINTED_VERDICT_COUNT + 1)) ;;
+  esac
+done < "$VALID_TSV"
+
+# --- gate corroboration -----------------------------------------------------
+#
+# "How often was this gate right?" is the question a reader actually has, and for
+# most gates it is not answerable — which is itself the answer worth printing. A
+# precision column filled in for every row would be mostly invention, and a reader
+# deleting a gate on the strength of an invented number is the exact harm the
+# never-fired list was rewritten to avoid.
+#
+# One correlation the ledger does support: a review recorded REVIEW_THIN, and the
+# same run later failing --verify. That is the case check-review.sh was written
+# for, and it is the only gate here with a later signal to check against.
+
+THIN_RUNS=""
+FAILED_RUNS=""
+# shellcheck disable=SC2034 # TSV columns read to match the recorded schema
+while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
+  [ -n "$r_run" ] || continue
+  case "$r_rev" in
+    REVIEW_THIN*) THIN_RUNS="$THIN_RUNS$r_run
+" ;;
+  esac
+  case "$r_st" in
+    VERIFY_FAILED*) FAILED_RUNS="$FAILED_RUNS$r_run
+" ;;
+  esac
+done < "$VALID_TSV"
+
+THIN_TOTAL=0
+THIN_CORROBORATED=0
+if [ -n "$THIN_RUNS" ]; then
+  while IFS= read -r tr; do
+    [ -n "$tr" ] || continue
+    THIN_TOTAL=$((THIN_TOTAL + 1))
+    if printf '%s' "$FAILED_RUNS" | grep -Fqx "$tr"; then
+      THIN_CORROBORATED=$((THIN_CORROBORATED + 1))
+    fi
+  done <<EOF
+$THIN_RUNS
+EOF
+fi
+
+if [ "$FORMAT" = "tsv" ]; then
+  # 1. records
+  printf 'records\t%d\t%d\t%d\t%d\n' "$TOTAL_READ" "$TOTAL_VALID" "$NO_CONTEXT_COUNT" "$SKIPPED_COUNT"
+
+  # 2. absent
+  ABS_DISPATCHED=0
+  ABS_MAX_IDLE=0
+  ABS_FALLBACK=0
+  ABS_DECLARED=0
+  ABS_USAGE=0
+
+  while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+    _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
+    [ -z "$r_disp" ] && ABS_DISPATCHED=$((ABS_DISPATCHED + 1))
+    [ -z "$r_max_idle" ] && ABS_MAX_IDLE=$((ABS_MAX_IDLE + 1))
+    [ -z "$r_fallback" ] && ABS_FALLBACK=$((ABS_FALLBACK + 1))
+    [ -z "$r_declared" ] && ABS_DECLARED=$((ABS_DECLARED + 1))
+    [ "${r_has_u:-0}" -ne 1 ] && ABS_USAGE=$((ABS_USAGE + 1))
+  done < "$VALID_TSV"
+
+  printf 'absent\tdispatched\t%d\n' "$ABS_DISPATCHED"
+  printf 'absent\tmax_idle_s\t%d\n' "$ABS_MAX_IDLE"
+  printf 'absent\tfallback\t%d\n' "$ABS_FALLBACK"
+  printf 'absent\tdeclared\t%d\n' "$ABS_DECLARED"
+  printf 'absent\tusage\t%d\n' "$ABS_USAGE"
+
+  # 3. phase
+  for ph in $PHASES; do
+    P_TOTAL=0
+    P_PASS=0
+    P_REFUSED=0
+    # shellcheck disable=SC2034 # TSV columns read to match the recorded schema
+    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
+      [ "$r_ph" = "$ph" ] || continue
+      if [ "$r_disp" = "false" ]; then
+        P_REFUSED=$((P_REFUSED + 1))
+        continue
+      fi
+      P_TOTAL=$((P_TOTAL + 1))
+      case "$r_st" in
+        PASSED*|DONE*|READY*|PREPARED*|OK*) P_PASS=$((P_PASS + 1)) ;;
+      esac
+    done < "$VALID_TSV"
+
+    P_FAIL=$((P_TOTAL - P_PASS))
+    if [ "$P_TOTAL" -gt 0 ]; then
+      P_RATE="$(awk -v pass="$P_PASS" -v tot="$P_TOTAL" 'BEGIN { printf "%.2f\n", pass / tot }')"
+    else
+      P_RATE="-"
+    fi
+    printf 'phase\t%s\t%d\t%d\t%d\t%d\t%s\n' "$ph" "$P_TOTAL" "$P_PASS" "$P_FAIL" "$P_REFUSED" "$P_RATE"
+  done
+
+  # 4. retry
+  for ph in $PHASES; do
+    R_ATT1=0
+    R_ATT2=0
+    R_ATT3P=0
+    R_CAP_HIT=0
+    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
+      [ "$r_ph" = "$ph" ] || continue
+      case "$r_st" in
+        RETRY_CAP_REACHED*) R_CAP_HIT=$((R_CAP_HIT + 1)) ;;
+      esac
+      case "$r_st" in
+        PASSED*|DONE*|READY*|PREPARED*|OK*)
+          if [ "$r_att" = "1" ] || [ -z "$r_att" ]; then
+            R_ATT1=$((R_ATT1 + 1))
+          elif [ "$r_att" = "2" ]; then
+            R_ATT2=$((R_ATT2 + 1))
+          elif [ -n "$r_att" ] && [ "$r_att" -ge 3 ] 2>/dev/null; then
+            R_ATT3P=$((R_ATT3P + 1))
+          fi
+          ;;
+      esac
+    done < "$VALID_TSV"
+    R_CONV=$((R_ATT1 + R_ATT2 + R_ATT3P))
+    printf 'retry\t%s\t%d\t%d\t%d\t%d\t%d\n' "$ph" "$R_ATT1" "$R_ATT2" "$R_ATT3P" "$R_CONV" "$R_CAP_HIT"
+  done
+
+  # 5. elapsed
+  for ph in $PHASES; do
+    ELAPSED_LIST="$(awk -F'\t' -v p="$ph" '$2 == p && $5 ~ /^[0-9]+$/ { print $5 }' "$VALID_TSV" | sort -n)"
+    EL_COUNT="$(printf '%s\n' "$ELAPSED_LIST" | grep -c . || true)"
+    EL_COUNT="${EL_COUNT:-0}"
+    PH_RECORD_COUNT="$(awk -F'\t' -v p="$ph" '$2 == p' "$VALID_TSV" | grep -c . || true)"
+    PH_RECORD_COUNT="${PH_RECORD_COUNT:-0}"
+    UNTIMED=$((PH_RECORD_COUNT - EL_COUNT))
+    if [ "$EL_COUNT" -gt 0 ]; then
+      EL_MIN="$(printf '%s\n' "$ELAPSED_LIST" | head -1)"
+      EL_MAX="$(printf '%s\n' "$ELAPSED_LIST" | tail -1)"
+      MID_IDX=$(( (EL_COUNT + 1) / 2 ))
+      EL_MEDIAN="$(printf '%s\n' "$ELAPSED_LIST" | sed -n "${MID_IDX}p")"
+      printf 'elapsed\t%s\t%s\t%s\t%s\t%d\n' "$ph" "$EL_MIN" "$EL_MEDIAN" "$EL_MAX" "$UNTIMED"
+    else
+      printf 'elapsed\t%s\t-\t-\t-\t%d\n' "$ph" "$UNTIMED"
+    fi
+  done
+
+  # 6. tokens
+  for ph in $PHASES; do
+    P_INP=0; P_OUT=0; P_THK=0; P_TOT=0; P_CRD=0
+    P_MEASURED=0
+    P_UNKNOWN_USAGE=0
+    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
+      [ "$r_ph" = "$ph" ] || continue
+      r_has_u="${r_has_u:-0}"
+      if [ "$r_has_u" -eq 1 ]; then
+        P_MEASURED=$((P_MEASURED + 1))
+        P_INP=$((P_INP + r_inp))
+        P_OUT=$((P_OUT + r_out))
+        P_THK=$((P_THK + r_thk))
+        P_TOT=$((P_TOT + r_tot))
+        P_CRD=$((P_CRD + r_crd))
+      else
+        P_UNKNOWN_USAGE=$((P_UNKNOWN_USAGE + 1))
+      fi
+    done < "$VALID_TSV"
+
+    if [ "$P_MEASURED" -gt 0 ]; then
+      printf 'tokens\t%s\t%d\t%d\t%d\t%d\t%d\t%d\n' "$ph" "$P_INP" "$P_OUT" "$P_THK" "$P_TOT" "$P_CRD" "$P_UNKNOWN_USAGE"
+    else
+      printf 'tokens\t%s\t-\t-\t-\t-\t-\t%d\n' "$ph" "$P_UNKNOWN_USAGE"
+    fi
+  done
+
+  # 7. gate
+  gi=0
+  while [ "$gi" -lt "$GATE_N" ]; do
+    if [ "${GATE_COUNT[$gi]}" -gt 0 ]; then
+      case "${GATE_CLASS[$gi]}" in
+        mechanical)
+          corr="mechanical: the gate is the measurement, not a judgement about it"
+          ;;
+        refusal)
+          corr="refused before dispatch: the run does not exist, so it cannot be scored"
+          ;;
+        advisory)
+          if [ "${GATE_KEY[$gi]}" = "REVIEW_THIN" ] && [ "$THIN_TOTAL" -gt 0 ]; then
+            corr="$THIN_CORROBORATED of $THIN_TOTAL were in a run that later failed --verify"
+          else
+            corr="advisory: no later signal is recorded to check it against"
+          fi
+          ;;
+        *)
+          corr="-"
+          ;;
+      esac
+      printf 'gate\t%s\t%d\t%s\n' "${GATE_KEY[$gi]}" "${GATE_COUNT[$gi]}" "$corr"
+    fi
+    gi=$((gi + 1))
+  done
+
+  # 8. gate_never
+  gi=0
+  while [ "$gi" -lt "$GATE_N" ]; do
+    if [ "${GATE_COUNT[$gi]}" -eq 0 ]; then
+      printf 'gate_never\t%s\n' "${GATE_KEY[$gi]}"
+    fi
+    gi=$((gi + 1))
+  done
+
+  # 9. verify
+  for ph in $PHASES; do
+    V_RAN=0
+    V_PASS=0
+    V_OVERRIDE=0
+    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
+      [ "$r_ph" = "$ph" ] || continue
+      if [ "$r_vr" = "true" ] || [ "${r_st:0:13}" = "VERIFY_FAILED" ]; then
+        V_RAN=$((V_RAN + 1))
+        case "$r_st" in
+          VERIFY_FAILED*) V_OVERRIDE=$((V_OVERRIDE + 1)) ;;
+          *) V_PASS=$((V_PASS + 1)) ;;
+        esac
+      fi
+    done < "$VALID_TSV"
+    printf 'verify\t%s\t%d\t%d\t%d\n' "$ph" "$V_RAN" "$V_PASS" "$V_OVERRIDE"
+  done
+
+  exit 0
+fi
 
 echo "Run Ledger Report"
 echo "================="
@@ -298,14 +639,13 @@ fi
 echo "Dispatches and Pass Rates by Phase:"
 echo "  Refusals are excluded from the rate: a gate that fired before the dispatch"
 echo "  is not a worker that failed, and counting it as one understates the worker."
-PHASES="$(awk -F'\t' '{print $2}' "$VALID_TSV" 2>/dev/null | sort -u)"
 for ph in $PHASES; do
   P_LINES="$(awk -F'\t' -v p="$ph" '$2 == p' "$VALID_TSV")"
   P_TOTAL=0
   P_PASS=0
   P_REFUSED=0
-  while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev; do
-    _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev
+  while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+    _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
     if [ "$r_disp" = "false" ]; then
       P_REFUSED=$((P_REFUSED + 1))
       continue
@@ -337,8 +677,8 @@ ROUND_2=0
 ROUND_3_PLUS=0
 CAP_REACHED=0
 
-while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev; do
-  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev
+while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
   case "$r_st" in
     RETRY_CAP_REACHED*) CAP_REACHED=$((CAP_REACHED + 1)) ;;
   esac
@@ -400,8 +740,8 @@ if [ -n "$PRICE_IN" ] || [ -n "$PRICE_OUT" ]; then
   P_OUT_MICRO="$(_parse_price_to_micro "${PRICE_OUT:-0}")"
 fi
 
-while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev; do
-  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev
+while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
   r_has_u="${r_has_u:-0}"
   [ "$r_has_u" -eq 1 ] || continue
 
@@ -437,8 +777,8 @@ if [ "$MEASURED_COUNT" -eq 0 ]; then
 else
   for ph in $PHASES; do
     P_INP=0; P_OUT=0; P_THK=0; P_TOT=0
-    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev; do
-      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev
+    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
       [ "$r_ph" = "$ph" ] || continue
       r_has_u="${r_has_u:-0}"
       [ "$r_has_u" -eq 1 ] || continue
@@ -510,8 +850,9 @@ else
     R_PASS=0
     R_TOK=0
     R_DISPATCHED=0
-    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev; do
-      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev
+    # shellcheck disable=SC2034 # TSV columns read to match the recorded schema
+    while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc; do
+      _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev r_crd r_max_idle r_fallback r_declared r_verify_rc
       [ "$r_run" = "$r" ] || continue
       [ "$r_disp" = "false" ] && continue
       R_DISPATCHED=$((R_DISPATCHED + 1))
@@ -559,98 +900,6 @@ else
 fi
 echo ""
 
-# Every gate this report can count, in one table, so the firing counts and the
-# never-fired list cannot disagree about what a gate is. Two lists kept by hand
-# is how a gate gets counted and then quietly left out of the list that says it
-# never fired — or the reverse.
-#
-# Field 1 is where the outcome is recorded: "status" for the record's own status
-# field, "review" for the Phase 2 verdict, which rides in the nested review
-# object rather than in status. Field 2 is the status prefix, field 3 the label.
-#
-# Field 4 is what kind of claim the gate makes, which decides whether asking "was
-# it right?" is even a question:
-#
-#   mechanical  the gate IS the measurement — a command exited non-zero, git moved.
-#               There is nothing to corroborate; a precision figure here would be
-#               a restatement of the fact, dressed as an assessment of it.
-#   refusal     it fired before any worker ran. Whether the dispatch would have
-#               failed is unknowable by construction: the run does not exist.
-#               A refusal gate can never be scored, and saying so is the honest
-#               answer rather than reporting it as unproven.
-#   advisory    a suspicion a later signal can corroborate. Only these can carry
-#               a number, and only where the later signal was actually recorded.
-GATE_TABLE="
-status|VERIFY_FAILED|Verify gate overrides|mechanical
-status|DIFF_TESTS_WEAKENED|Diff tests weakened|advisory
-status|DIFF_SUSPICIOUS|Diff suspicious|advisory
-status|SECRETS_FOUND|Secrets found|refusal
-status|BRIEF_INVALID|Brief invalid|refusal
-status|BRIEF_IMPOSSIBLE|Brief impossible|mechanical
-status|NO_STATUS_REPORTED|No status reported|mechanical
-status|WORKER_FAILED|Worker failed|mechanical
-status|RETRY_CAP_REACHED|Retry cap reached|refusal
-status|BUDGET_EXCEEDED|Run budget exceeded|refusal
-status|REPO_BUDGET_EXCEEDED|Repo budget exceeded|refusal
-status|WORKER_CAP_EXCEEDED|Worker cap exceeded|refusal
-status|PREFLIGHT_FAILED|Preflight failed|refusal
-status|GIT_STATE_CHANGED|Git state changed|mechanical
-status|RANGE_REFUSED|Phase range refused|refusal
-status|TEST_COMMAND_NOT_RUNNABLE|Test command not runnable|mechanical
-status|TEST_COMMAND_FAILED|Test command failed|mechanical
-status|TEST_COMMAND_TIMEOUT|Test command timed out|mechanical
-status|RELEASE_BLOCKED|Release blocked|refusal
-status|RELEASE_FAILED|Release failed|mechanical
-review|REVIEW_THIN|Review thin|advisory
-review|REVIEW_ABSENT|Review absent|advisory
-"
-
-GATE_SRC=()
-GATE_KEY=()
-GATE_LABEL=()
-GATE_COUNT=()
-GATE_CLASS=()
-while IFS='|' read -r g_src g_key g_label g_class; do
-  [ -n "$g_key" ] || continue
-  GATE_SRC[${#GATE_SRC[@]}]="$g_src"
-  GATE_KEY[${#GATE_KEY[@]}]="$g_key"
-  GATE_LABEL[${#GATE_LABEL[@]}]="$g_label"
-  GATE_CLASS[${#GATE_CLASS[@]}]="$g_class"
-  GATE_COUNT[${#GATE_COUNT[@]}]=0
-done <<EOF
-$GATE_TABLE
-EOF
-GATE_N=${#GATE_KEY[@]}
-
-WORKER_ERROR_COUNT=0
-PRINTED_VERDICT_COUNT=0
-
-# shellcheck disable=SC2034 # TSV columns read to match the recorded schema
-while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev; do
-  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev
-  gi=0
-  while [ "$gi" -lt "$GATE_N" ]; do
-    g_key="${GATE_KEY[$gi]}"
-    if [ "${GATE_SRC[$gi]}" = "review" ]; then
-      g_field="$r_rev"
-    else
-      g_field="$r_st"
-    fi
-    # Prefix rather than glob: a status carries its reason in parentheses
-    # (BRIEF_INVALID(missing-verdict-path)), and the reason is not the gate.
-    if [ "${g_field:0:${#g_key}}" = "$g_key" ]; then
-      GATE_COUNT[$gi]=$(( ${GATE_COUNT[$gi]} + 1 ))
-    fi
-    gi=$((gi + 1))
-  done
-  case "$r_agy_st" in
-    ERROR*|error*|Error*) WORKER_ERROR_COUNT=$((WORKER_ERROR_COUNT + 1)) ;;
-  esac
-  case "$r_vd_rt" in
-    print*|fallback*) PRINTED_VERDICT_COUNT=$((PRINTED_VERDICT_COUNT + 1)) ;;
-  esac
-done < "$VALID_TSV"
-
 echo "Gate and Verification Outcomes:"
 printf '  Worker error dispatches:        %d (worker recorded ERROR status)\n' "$WORKER_ERROR_COUNT"
 printf '  Printed fallback dispatches:    %d (verdict read from printed fallback route rather than file)\n' "$PRINTED_VERDICT_COUNT"
@@ -665,48 +914,6 @@ while [ "$gi" -lt "$GATE_N" ]; do
   gi=$((gi + 1))
 done
 echo ""
-
-# --- gate corroboration -----------------------------------------------------
-#
-# "How often was this gate right?" is the question a reader actually has, and for
-# most gates it is not answerable — which is itself the answer worth printing. A
-# precision column filled in for every row would be mostly invention, and a reader
-# deleting a gate on the strength of an invented number is the exact harm the
-# never-fired list was rewritten to avoid.
-#
-# One correlation the ledger does support: a review recorded REVIEW_THIN, and the
-# same run later failing --verify. That is the case check-review.sh was written
-# for, and it is the only gate here with a later signal to check against.
-
-THIN_RUNS=""
-FAILED_RUNS=""
-# shellcheck disable=SC2034 # TSV columns read to match the recorded schema
-while IFS=$'\t' read -r r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev; do
-  _tsv_restore r_run r_ph r_att r_st r_el r_vd r_vr r_st_ts r_inp r_out r_thk r_tot r_ref r_has_u r_iss r_agy_st r_vd_rt r_disp r_rev
-  [ -n "$r_run" ] || continue
-  case "$r_rev" in
-    REVIEW_THIN*) THIN_RUNS="$THIN_RUNS$r_run
-" ;;
-  esac
-  case "$r_st" in
-    VERIFY_FAILED*) FAILED_RUNS="$FAILED_RUNS$r_run
-" ;;
-  esac
-done < "$VALID_TSV"
-
-THIN_TOTAL=0
-THIN_CORROBORATED=0
-if [ -n "$THIN_RUNS" ]; then
-  while IFS= read -r tr; do
-    [ -n "$tr" ] || continue
-    THIN_TOTAL=$((THIN_TOTAL + 1))
-    if printf '%s' "$FAILED_RUNS" | grep -Fqx "$tr"; then
-      THIN_CORROBORATED=$((THIN_CORROBORATED + 1))
-    fi
-  done <<EOF
-$THIN_RUNS
-EOF
-fi
 
 echo "Gate Corroboration:"
 echo "  Whether a gate was *right* is a different question from how often it fired,"

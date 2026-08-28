@@ -43,6 +43,12 @@ PASS_COUNT=0
 FAIL_COUNT=0
 FAILED_NAMES=""
 
+SUITE_FLEET=""
+cleanup() {
+  [ -n "$SUITE_FLEET" ] && rm -f "$SUITE_FLEET"
+}
+trap cleanup EXIT INT TERM
+
 for S in "${SUITES[@]}"; do
   TARGET="$S"
   if [ ! -f "$TARGET" ] && [ -f "$ROOT/$S" ]; then
@@ -59,8 +65,11 @@ for S in "${SUITES[@]}"; do
     "$ROOT"/*) DISPLAY_NAME="${TARGET#$ROOT/}" ;;
   esac
 
-  OUT="$(bash "$TARGET" 2>&1)"
+  SUITE_FLEET="$(mktemp "${TMPDIR:-/tmp}/run-tests-fleet.XXXXXX")"
+  OUT="$(AGY_FLEET="$SUITE_FLEET" bash "$TARGET" 2>&1)"
   CODE=$?
+  rm -f "$SUITE_FLEET"
+  SUITE_FLEET=""
 
   if [ $CODE -eq 0 ]; then
     PASS_COUNT=$((PASS_COUNT + 1))

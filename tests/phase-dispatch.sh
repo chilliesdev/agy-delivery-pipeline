@@ -23,6 +23,8 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/phase-dispatch.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 
+export AGY_FLEET="$ROOT/fleet"
+
 # The stub agy: writes the verdict phase.sh expects and dumps its own argv, one
 # argument per line, to $STUB_ARGV (absolute — agy-run.sh cd's into the repo).
 # `agy models` returns before the argv dump, so preflight.sh's call never

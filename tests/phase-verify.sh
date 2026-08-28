@@ -23,6 +23,8 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/phase-verify.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 
+export AGY_FLEET="$ROOT/fleet"
+
 # The stub agy: answers `models` for preflight, otherwise writes the verdict
 # named by STUB_VERDICT, touches $STUB_RAN so a refused dispatch is provable,
 # and exits STUB_RC. The `models` answer has its own knobs — STUB_MODELS_RC to

@@ -31,6 +31,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+export AGY_FLEET="$SCRATCH/fleet"
+
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS + 1)); printf '%-34s ok   %s\n' "$1" "$2"; }
 bad() { FAIL=$((FAIL + 1)); printf '%-34s FAIL %s\n' "$1" "$2"; }
