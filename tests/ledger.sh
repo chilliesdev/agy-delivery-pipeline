@@ -28,6 +28,8 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ledger-test.XXXXXX")" && pwd)"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 
+export AGY_FLEET="$ROOT/fleet"
+
 # The stub agy: answers `models` for preflight, otherwise writes the verdict
 # named by STUB_VERDICT and exits STUB_RC.
 STUB="$ROOT/agy"

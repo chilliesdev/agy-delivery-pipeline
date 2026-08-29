@@ -19,6 +19,12 @@ RUN_DIR_SCRIPT="$HERE/../scripts/run-dir.sh"
 ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/run-dir-test.XXXXXX")" && pwd)"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 
+# Ensure all tests default to throwaway paths under ROOT rather than developer's home
+export AGY_FLEET="$ROOT/default-fleet"
+export XDG_CONFIG_HOME="$ROOT/xdg"
+export HOME="$ROOT/home"
+mkdir -p "$ROOT/home" "$ROOT/xdg"
+
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS + 1)); printf '%-34s ok   %s\n' "$1" "$2"; }
 bad() { FAIL=$((FAIL + 1)); printf '%-34s FAIL %s\n' "$1" "$2"; }
@@ -254,5 +260,112 @@ UNKNOWN_OUT="$(run_dir_get "$DIR_WT_META" "nonexistent_key" 2>/dev/null)"; CODE=
 check get-unknown-key-rc "$CODE" 1 "run_dir_get unknown key exits 1"
 check get-unknown-key-out "$UNKNOWN_OUT" "" "run_dir_get unknown key produces no output"
 
+# --- 15. self-registration in fleet registry -------------------------------
+
+# Fresh registry is created and holds the repository's absolute path
+R_REG1="$(new_repo reg-fresh)"
+FLEET_REG1="$ROOT/reg-fresh-fleet/fleet"
+AGY_FLEET="$FLEET_REG1" run_dir_new --dir "$R_REG1" --task "reg task 1" >/dev/null
+[ -f "$FLEET_REG1" ] && ok reg-fresh-created "registry file created" || bad reg-fresh-created "registry file not created"
+REG1_CONTENT="$(cat "$FLEET_REG1" 2>/dev/null)"
+check reg-fresh-content "$REG1_CONTENT" "$R_REG1" "registry holds repository absolute path"
+
+# A second run in the same repository does not append a second copy
+AGY_FLEET="$FLEET_REG1" run_dir_new --dir "$R_REG1" --task "reg task 2" >/dev/null
+REG1_COUNT="$(grep -c -F "$R_REG1" "$FLEET_REG1" 2>/dev/null || echo 0)"
+check reg-dedup-same-repo "$REG1_COUNT" "1" "second run in same repo does not duplicate entry"
+
+# An existing registry with comment lines and blank lines keeps them, in order
+FLEET_COMMENTS="$ROOT/comments-fleet/fleet"
+mkdir -p "$(dirname "$FLEET_COMMENTS")"
+cat > "$FLEET_COMMENTS" << 'EOF'
+# Header comment
+/existing/repo/a
+
+# Middle comment
+/existing/repo/b
+EOF
+
+R_REG_COMM="$(new_repo reg-comments)"
+AGY_FLEET="$FLEET_COMMENTS" run_dir_new --dir "$R_REG_COMM" --task "reg with comments" >/dev/null
+
+WANT_COMMENTS="# Header comment
+/existing/repo/a
+
+# Middle comment
+/existing/repo/b
+$R_REG_COMM"
+
+GOT_COMMENTS="$(cat "$FLEET_COMMENTS" 2>/dev/null)"
+check reg-preserves-comments "$GOT_COMMENTS" "$WANT_COMMENTS" "existing registry preserves comments and blank lines in order"
+
+# Two different repositories both appear
+FLEET_MULTI="$ROOT/multi-fleet/fleet"
+R_MULTI_A="$(new_repo multi-a)"
+R_MULTI_B="$(new_repo multi-b)"
+
+AGY_FLEET="$FLEET_MULTI" run_dir_new --dir "$R_MULTI_A" --task "multi a" >/dev/null
+AGY_FLEET="$FLEET_MULTI" run_dir_new --dir "$R_MULTI_B" --task "multi b" >/dev/null
+
+WANT_MULTI="$R_MULTI_A
+$R_MULTI_B"
+GOT_MULTI="$(cat "$FLEET_MULTI" 2>/dev/null)"
+check reg-two-repos-appear "$GOT_MULTI" "$WANT_MULTI" "two different repositories both appear in registry"
+
+# The opt-out variable suppresses the append entirely
+FLEET_OPTOUT="$ROOT/optout-fleet/fleet"
+R_OPTOUT="$(new_repo reg-optout)"
+
+AGY_FLEET="$FLEET_OPTOUT" AGY_FLEET_REGISTER=0 run_dir_new --dir "$R_OPTOUT" --task "optout task" >/dev/null
+[ ! -e "$FLEET_OPTOUT" ] && ok reg-optout-fresh "opt-out suppresses creating registry file" || bad reg-optout-fresh "registry file was created despite opt-out"
+
+mkdir -p "$(dirname "$FLEET_OPTOUT")"
+printf '/existing/repo\n' > "$FLEET_OPTOUT"
+AGY_FLEET="$FLEET_OPTOUT" AGY_FLEET_REGISTER=0 run_dir_new --dir "$R_OPTOUT" --task "optout task 2" >/dev/null
+GOT_OPTOUT_EXISTING="$(cat "$FLEET_OPTOUT" 2>/dev/null)"
+check reg-optout-existing "$GOT_OPTOUT_EXISTING" "/existing/repo" "opt-out does not append to existing registry"
+
+# An unwritable registry target leaves run_dir_new printing a run id and exiting 0
+R_UNWRITABLE="$(new_repo reg-unwritable)"
+FLEET_UNWRITABLE="$ROOT/unwritable-target/fleet"
+mkdir -p "$(dirname "$FLEET_UNWRITABLE")"
+touch "$FLEET_UNWRITABLE"
+chmod 400 "$FLEET_UNWRITABLE" 2>/dev/null || true
+
+STDOUT_FILE="$ROOT/stdout.tmp"
+STDERR_FILE="$ROOT/stderr.tmp"
+CODE=0
+AGY_FLEET="$FLEET_UNWRITABLE" run_dir_new --dir "$R_UNWRITABLE" --task "unwritable test" >"$STDOUT_FILE" 2>"$STDERR_FILE" || CODE=$?
+
+check reg-unwritable-rc "$CODE" 0 "run_dir_new exits 0 when registry is unwritable"
+
+UNWRITABLE_RUN_ID="$(cat "$STDOUT_FILE" 2>/dev/null | tr -d '\r\n')"
+UNWRITABLE_ID_FMT=bad
+case "$UNWRITABLE_RUN_ID" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9]Z-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]) UNWRITABLE_ID_FMT=ok ;;
+esac
+check reg-unwritable-stdout "$UNWRITABLE_ID_FMT" "ok" "stdout contains only valid run id"
+
+STDERR_OUT="$(cat "$STDERR_FILE" 2>/dev/null)"
+if [ -n "$STDERR_OUT" ]; then
+  ok reg-unwritable-stderr "warning emitted to standard error"
+else
+  bad reg-unwritable-stderr "warning not emitted to standard error"
+fi
+chmod 600 "$FLEET_UNWRITABLE" 2>/dev/null || true
+
+# XDG_CONFIG_HOME fallback when AGY_FLEET is unset
+R_XDG="$(new_repo reg-xdg)"
+XDG_TMP="$ROOT/xdg-fallback"
+(
+  unset AGY_FLEET
+  export XDG_CONFIG_HOME="$XDG_TMP"
+  run_dir_new --dir "$R_XDG" --task "xdg fallback task" >/dev/null
+)
+XDG_FLEET_FILE="$XDG_TMP/agy/fleet"
+[ -f "$XDG_FLEET_FILE" ] && ok reg-xdg-fallback-created "registry created at XDG_CONFIG_HOME/agy/fleet" || bad reg-xdg-fallback-created "XDG registry not created"
+check reg-xdg-fallback-content "$(cat "$XDG_FLEET_FILE" 2>/dev/null)" "$R_XDG" "XDG registry contains repository path"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
+

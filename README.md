@@ -324,6 +324,93 @@ table, then tails the active phase log (`tail -f`, or a one-shot snapshot with
 `--once`). This is only possible because state is run-scoped: there is a stable
 directory path under `.agy/runs/<run-id>/` to point at.
 
+## The control center
+
+A local browser dashboard for inspecting live runs, logs, diffs, metrics, and
+fleet status across every registered repository:
+
+```
+scripts/serve.sh [--port 7749] [--repo <path>]... [--registry <file>]
+                 [--scan <dir>] [--no-open]
+                 [--default-view fleet|repo|run] [--default-tab overview|transcript|trace|diff|brief|fleet]
+                 [--show-dollars] [--price-per-mtok <n>]
+```
+
+Realistic invocation:
+
+```
+scripts/serve.sh --scan ~/projects --port 7749 --default-view fleet
+```
+
+It opens `http://127.0.0.1:7749/` in your browser (pass `--no-open` to suppress),
+streaming live run progress, phase transcripts, diffs, and aggregate fleet state
+over server-sent events.
+
+### The Node requirement
+
+**The control center is an operator tool, not a pipeline surface.** It requires
+Node 20 or newer.
+
+The pipeline itself must keep working on a machine with no Node installed. The
+launcher `scripts/serve.sh` is the only place in the repository where that
+requirement exists. No other script in this repository requires Node. If `node`
+is missing on `PATH` or reports a major version below 20, `scripts/serve.sh`
+prints an explanatory error to stderr and exits with code 4 without starting the
+server.
+
+### Finding repositories
+
+The control center discovers repositories through a registry file. It reads
+registry sources in order, combining all existing files and preserving first-seen
+order:
+
+1. `$AGY_FLEET` if set (when set, no other file is read)
+2. `${XDG_CONFIG_HOME:-$HOME/.config}/agy/fleet`
+3. `$HOME/.agy/fleet` (legacy read-only location)
+
+Passing `--registry <file>` replaces the whole list. Passing `--repo <path>`
+(repeatable) adds explicit repositories, and `--scan <dir>` adds every immediate
+child directory of `<dir>` that is a git work tree containing a `.agy/`
+directory.
+
+**Nobody maintains a list by hand.** `scripts/run-dir.sh` automatically appends
+the repository's absolute path to the write-target registry the first time a run
+is created there. Setting `AGY_FLEET_REGISTER=0` disables registration.
+
+If a registered repository path no longer exists, is not a git worktree, or has
+no `.agy/` directory, the control center marks it unreachable (`missing`,
+`not-a-git-worktree`, or `no-agy-dir`) but **shows it rather than dropping it**.
+A broken path is surfaced to the operator so stale registrations or missing
+worktrees are visible instead of silently disappearing.
+
+### What the page will not do
+
+**The control center is read-only by construction.** It binds the loopback
+address (`127.0.0.1`) only, never a wildcard interface. No route dispatches a
+worker, writes into a watched repository, edits `agy.toml`, or touches git state.
+The operator controls (`TAKE OVER`, `RAISE CAP`, `EDIT BRIEF`) render the
+command as copyable text for a human to run, never executing anything
+autonomously. Spend is never summed across repositories, because each repository
+bills separately and cross-repo token totals are meaningless across different
+accounts and models. Dollars appear only when the operator supplies a rate (via
+`--price-per-mtok` or query parameter `?price=`); without one, the UI shows
+tokens and says nothing about money. Any absent or unmeasured field renders as
+unknown (`—`) rather than as a false zero.
+
+### Relationship to existing tools
+
+The control center supersedes `scripts/fleet.sh` and `scripts/watch-run.sh` for
+interactive multi-repo observability, but both remain useful:
+
+- `scripts/watch-run.sh` remains the right tool for headless terminal sessions,
+  remote SSH shells without port forwarding, or when you want a single
+  lightweight `tail -f` attached to the current run in a split terminal.
+- `scripts/fleet.sh` remains the right tool for quick command-line summaries and
+  terminal-only rollups without starting a long-running web process.
+- `scripts/serve.sh` is the right tool when you want unified live monitoring,
+  full worker transcripts, diff views, brief inspection, and fleet metrics across
+  multiple active repositories at once.
+
 ## Refusal guidance: the Next field
 
 Every refusal status line now carries a trailing `| Next: …` sentence stating

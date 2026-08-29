@@ -20,6 +20,8 @@ RUN_DIR_SH="$HERE/../scripts/run-dir.sh"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/issue-test.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 
+export AGY_FLEET="$ROOT/fleet"
+
 # issue.sh defaults --dir to $PWD, and a case that omits it silently appends a
 # record to *this* repository's ledger — one per suite run, forever. That is not
 # a stray file: it is the ledger the reports are read from, and this suite was

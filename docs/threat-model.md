@@ -6,7 +6,7 @@ vectors, and architectural guarantees of `agy-delivery-pipeline`.
 ## Why this repository needs a threat model
 
 Most developer tools and wrappers do not require a dedicated threat model.
-This one does because it operates at the intersection of three high-risk
+This one does because it operates at the intersection of four high-risk
 behaviours:
 
 1. **Unrestricted execution.** Phase 3 (QA) executes with permission checks
@@ -19,6 +19,9 @@ behaviours:
 3. **Transmission of repository state to third-party models.** Briefs,
    captured diffs (`REVIEW_DIFF.patch`), and repository files are sent over
    the network to an external model API (Gemini).
+4. **Multi-repository HTTP surface.** The control center serves full brief
+   text, diffs, logs, and composed issue comments from every registered
+   repository at once over a local HTTP interface.
 
 Individually, these mechanisms are standard patterns for AI agent tooling.
 Together, they form a specific security posture. A posture that is not written
@@ -149,6 +152,78 @@ the pipeline, potentially leading to local file alteration, environment
 tampering, or credential exfiltration. This blast radius is **not bounded**
 by software controls when running on an untrusted repository.
 
+## The blast radius of the control center
+
+The control center (`scripts/serve.sh`) materially moves the trust boundary.
+Until now, the tooling read one repository, in one terminal, for as long as a
+person watched it. The control center serves full brief text, diffs, logs, and
+composed comments from every registered repository at once, over HTTP, for as
+long as the process runs.
+
+### Localhost binding and network exposure
+
+The HTTP server binds explicitly to the loopback interface (`127.0.0.1`), never
+the wildcard interface (`0.0.0.0`) and never a bare `listen(port)`.
+
+Binding the wildcard interface would expose the service to the local area
+network or public internet. Because the control center has no authentication
+mechanism, a wildcard bind would expose source code diffs, prompts, logs, and
+issue summaries across all registered repositories to anyone capable of reaching
+the host's IP address.
+
+### Read-only by construction
+
+The server is read-only by construction rather than by convention. A server with
+write routes and ten repositories registered is a remote execution surface, and
+the "print, never post" rule is what keeps it from becoming one.
+
+- No HTTP route dispatches a worker, edits repository files, modifies `agy.toml`,
+  or touches git state.
+- Operator actions (`TAKE OVER`, `RAISE CAP`, `EDIT BRIEF`) render the command
+  as copyable text for a human to run, never executing anything autonomously.
+- Subprocesses spawned by the server are restricted to read-only helpers
+  (`scripts/report.sh`, `scripts/run-summary.sh`, `scripts/resolve-model.sh`, and
+  read-only `git` query subcommands), invoked with fixed argument arrays rather
+  than shell strings (`shell: false`), with no untrusted input interpolated into
+  commands.
+- Artifact endpoints enforce strict path confinement, rejecting any path that
+  traverses outside the run directory.
+
+### What an attacker gets and does not get
+
+An attacker on the local machine (or with network reachability if the port is
+improperly forwarded) who can connect to the control center port gets:
+
+- **What they get:** Read access to all data served over the API — brief texts,
+  full worker logs, diffs, branch names, commit hashes, ledger records, and
+  composed issue comments across every registered repository on the host machine.
+- **What they do not get:** Remote command execution or write access. An attacker
+  cannot dispatch workers, edit configuration, stage or commit code, push
+  branches, or trigger actions on third-party services.
+
+### The registry as an input vector
+
+The repository registry is a list of filesystem paths read from `$AGY_FLEET`,
+`${XDG_CONFIG_HOME:-$HOME/.config}/agy/fleet`, or `$HOME/.agy/fleet`.
+
+The registry is an input: a path written into it decides what the server reads.
+If an attacker or untrusted process writes an arbitrary directory path into the
+registry file, the server will attempt to inspect and read it. Path confinement
+on artifact endpoints ensures that reads remain confined within valid run
+directories.
+
+### Untrusted content rendered as text
+
+Content served to the page — task strings, briefs, logs, diffs, and issue
+comments — comes from disk and from GitHub issue text that the model was already
+told is untrusted.
+
+The server serves all artifact files byte-for-byte with `Content-Type: text/plain; charset=utf-8`,
+`Content-Disposition: inline`, and `X-Content-Type-Options: nosniff`. The
+frontend renders worker output and issue text as plain text rather than
+interpreting it as markup, preventing cross-site scripting (XSS) from malicious
+issue payloads or worker transcripts.
+
 ## What the design already gets right, and why
 
 The following properties are architectural guarantees enforced by the tooling:
@@ -174,6 +249,14 @@ The following properties are architectural guarantees enforced by the tooling:
 - **Ledger privacy.** `scripts/ledger.sh` hashes task strings by default (first
   12 characters of `git hash-object`), ensuring `.agy/ledger.jsonl` is safe to
   share even when run directories contain sensitive context.
+- **Control center localhost isolation.** `scripts/serve.sh` binds `127.0.0.1`
+  explicitly, preventing exposure over local networks.
+- **Read-only control center.** The web server contains no write routes, spawns
+  only read-only helpers via argument arrays without shell interpolation, and
+  renders operator actions as text rather than executing them.
+- **Plain-text artifact serving.** Artifact endpoints serve raw text with
+  `X-Content-Type-Options: nosniff` and text MIME types, avoiding HTML/markup
+  injection from untrusted issue or worker output.
 
 ## What is not covered
 
@@ -195,3 +278,10 @@ This is the explicit list of what the pipeline does not protect against:
 - **Pre-existing checked-in secrets.** Secrets already checked into the
   repository that are read during discovery but not modified in the diff are
   not caught by pre-dispatch scanning.
+- **Local access to the control center port.** Any process or local user on the
+  machine that can connect to `127.0.0.1:<port>` can read all briefs, diffs,
+  logs, and ledger metadata across all registered repositories without
+  authentication.
+- **Unauthorized registry modification.** A local process modifying registry
+  files (`~/.config/agy/fleet` or `$AGY_FLEET`) controls which repository paths
+  the control center inspects and exposes over its local HTTP endpoints.

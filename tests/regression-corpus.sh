@@ -39,6 +39,8 @@ ROOT="$(mktemp -d "${TMPDIR:-/tmp}/regression-corpus.XXXXXX")"
 ROOT="$(cd "$ROOT" && pwd)"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 
+export AGY_FLEET="$ROOT/fleet"
+
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS + 1)); printf '%-36s ok   %s\n' "$1" "$2"; }
 bad()   { FAIL=$((FAIL + 1)); printf '%-36s FAIL %s\n' "$1" "$2"; }

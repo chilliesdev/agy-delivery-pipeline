@@ -16,6 +16,8 @@ PHASE_SH="$HERE/../scripts/phase.sh"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/phase-exclude.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 
+export AGY_FLEET="$ROOT/fleet"
+
 STUB="$ROOT/agy"
 cat > "$STUB" <<'STUB_EOF'
 #!/usr/bin/env bash

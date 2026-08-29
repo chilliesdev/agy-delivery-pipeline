@@ -1,0 +1,98 @@
+/* AGY Control Center — app.css */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+:root {
+  --color-page: #0e1116;
+  --color-chrome: #11161d;
+  --color-rule: #232c36;
+  --color-text: #e6edf3;
+  --color-muted: #5d6b79;
+  --color-idle: #4a5765;
+  --color-dim: #8b98a5;
+  --color-secondary: #cbd5e0;
+  --color-heading: #f0f6fc;
+
+  --color-accent: #38bdf8;
+  --color-green: #4ade80;
+  --color-red: #f87171;
+  --color-amber: #fbbf24;
+  --color-violet: #a78bfa;
+  --color-refuse: #94a3b8;
+  --color-clean: #5eead4;
+
+  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-page);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  min-width: 1440px;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: #7dd3fc;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-page);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a343f;
+  border-radius: 6px;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+}
+
+@keyframes sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.sans {
+  font-family: var(--font-sans);
+}
+
+.pulse-anim {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.sweep-anim {
+  animation: sweep 1.8s linear infinite;
+}

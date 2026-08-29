@@ -31,6 +31,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+export AGY_FLEET="$SCRATCH/fleet"
+
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS + 1)); printf '%-34s ok   %s\n' "$1" "$2"; }
 bad() { FAIL=$((FAIL + 1)); printf '%-34s FAIL %s\n' "$1" "$2"; }
@@ -222,11 +224,11 @@ B3="$(make_brief "$R3" IMPLEMENT "$RUN3")"
 /bin/bash "$QUEUE_SH" add --dir "$R3" --run "$RUN3" --phase IMPLEMENT -- \
   --phase IMPLEMENT --brief "$B3" --dir "$R3" --run "$RUN3" --no-preflight >/dev/null 2>&1
 
-COUNT_BEFORE="$(ls -1 "$R3/.agy/queue" 2>/dev/null | grep -c .)"
+COUNT_BEFORE="$(find "$R3/.agy/queue" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
 check add-one-entry "$COUNT_BEFORE" "1" "queue add parks exactly one entry"
 
 AGY_BIN="$STUB_AGY" /bin/bash "$QUEUE_SH" drain --dir "$R3" >/dev/null 2>&1
-COUNT_AFTER="$(ls -1 "$R3/.agy/queue" 2>/dev/null | grep -c .)"
+COUNT_AFTER="$(find "$R3/.agy/queue" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
 check drain-removes-entry "$COUNT_AFTER" "0" "the entry is gone after draining, so it cannot run twice"
 
 DISPATCH_COUNT="$(grep -c '"dispatched":true' "$R3/.agy/ledger.jsonl" 2>/dev/null | tr -cd '0-9')"
@@ -266,7 +268,7 @@ fi
 E_NAME="$(basename "$ENTRY_FILE")"
 /bin/bash "$QUEUE_SH" remove --dir "$R4" --entry "$E_NAME" >/dev/null 2>&1
 check remove-entry "$?" 0 "an entry can be removed"
-check remove-gone "$(ls -1 "$R4/.agy/queue" 2>/dev/null | grep -c .)" "0" "the removed entry is gone"
+check remove-gone "$(find "$R4/.agy/queue" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')" "0" "the removed entry is gone"
 
 /bin/bash "$QUEUE_SH" remove --dir "$R4" --entry "no-such-entry" >/dev/null 2>&1
 check remove-missing "$?" 3 "removing an entry that is not there exits 3"
