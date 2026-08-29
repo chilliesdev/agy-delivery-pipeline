@@ -1019,7 +1019,7 @@ corrupt plain text
 {"run":"r1","phase":"CUSTOM","status":"PASSED","attempt":1,"dispatched":true}
 EOF
 OUT_TSV_MAL="$(bash "$REPORT_SH" --dir "$R_TSV_MAL" --format tsv)"
-MAL_REC_LINE="$(printf '%s\n' "$OUT_TSV_MAL" | grep '^records\t')"
+MAL_REC_LINE="$(printf '%s\n' "$OUT_TSV_MAL" | grep $'^records\t')"
 check tsv-malformed-records "$MAL_REC_LINE" "$(printf 'records\t3\t1\t1\t1')" "TSV records row reports total_read, valid, no_context, unparseable"
 
 # 10.4 Section names, field count of every row, and field order
@@ -1076,11 +1076,11 @@ ledger_append "$R_TSV_DASH_ZERO" run=r-dz phase=UNKNOWN attempt=1 status=PASSED 
 ledger_append "$R_TSV_DASH_ZERO" run=r-dz phase=REFUSED_ONLY status=BRIEF_INVALID dispatched=false attempt=1
 
 OUT_DZ="$(bash "$REPORT_SH" --dir "$R_TSV_DASH_ZERO" --format tsv)"
-TOK_MEASURED="$(printf '%s\n' "$OUT_DZ" | grep '^tokens\tMEASURED\t')"
-TOK_UNKNOWN="$(printf '%s\n' "$OUT_DZ" | grep '^tokens\tUNKNOWN\t')"
-EL_MEASURED="$(printf '%s\n' "$OUT_DZ" | grep '^elapsed\tMEASURED\t')"
-EL_UNKNOWN="$(printf '%s\n' "$OUT_DZ" | grep '^elapsed\tUNKNOWN\t')"
-PH_REFUSED="$(printf '%s\n' "$OUT_DZ" | grep '^phase\tREFUSED_ONLY\t')"
+TOK_MEASURED="$(printf '%s\n' "$OUT_DZ" | grep $'^tokens\tMEASURED\t')"
+TOK_UNKNOWN="$(printf '%s\n' "$OUT_DZ" | grep $'^tokens\tUNKNOWN\t')"
+EL_MEASURED="$(printf '%s\n' "$OUT_DZ" | grep $'^elapsed\tMEASURED\t')"
+EL_UNKNOWN="$(printf '%s\n' "$OUT_DZ" | grep $'^elapsed\tUNKNOWN\t')"
+PH_REFUSED="$(printf '%s\n' "$OUT_DZ" | grep $'^phase\tREFUSED_ONLY\t')"
 
 check tsv-tok-measured "$TOK_MEASURED" "$(printf 'tokens\tMEASURED\t100\t50\t0\t150\t0\t0')" "measured zero tokens render as 0"
 check tsv-tok-unknown "$TOK_UNKNOWN" "$(printf 'tokens\tUNKNOWN\t-\t-\t-\t-\t-\t1')" "unknown tokens render as dash with unknown records counted"
@@ -1100,11 +1100,11 @@ ledger_append "$R_TSV_OLD" run=modern phase=LEGACY attempt=1 status=PASSED start
   usage='{"input_tokens":100,"output_tokens":50,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":150}'
 
 OUT_OLD="$(bash "$REPORT_SH" --dir "$R_TSV_OLD" --format tsv)"
-ABS_DISP="$(printf '%s\n' "$OUT_OLD" | grep '^absent\tdispatched\t')"
-ABS_IDLE="$(printf '%s\n' "$OUT_OLD" | grep '^absent\tmax_idle_s\t')"
-ABS_FALL="$(printf '%s\n' "$OUT_OLD" | grep '^absent\tfallback\t')"
-ABS_DECL="$(printf '%s\n' "$OUT_OLD" | grep '^absent\tdeclared\t')"
-ABS_USAG="$(printf '%s\n' "$OUT_OLD" | grep '^absent\tusage\t')"
+ABS_DISP="$(printf '%s\n' "$OUT_OLD" | grep $'^absent\tdispatched\t')"
+ABS_IDLE="$(printf '%s\n' "$OUT_OLD" | grep $'^absent\tmax_idle_s\t')"
+ABS_FALL="$(printf '%s\n' "$OUT_OLD" | grep $'^absent\tfallback\t')"
+ABS_DECL="$(printf '%s\n' "$OUT_OLD" | grep $'^absent\tdeclared\t')"
+ABS_USAG="$(printf '%s\n' "$OUT_OLD" | grep $'^absent\tusage\t')"
 
 check tsv-abs-disp "$ABS_DISP" "$(printf 'absent\tdispatched\t2')" "absent dispatched counted for vintage records"
 check tsv-abs-idle "$ABS_IDLE" "$(printf 'absent\tmax_idle_s\t2')" "absent max_idle_s counted for vintage records"
@@ -1123,7 +1123,7 @@ ledger_append "$R_TSV_REF" run=r-r3 phase=PHASE1 status=BRIEF_INVALID dispatched
 ledger_append "$R_TSV_REF" run=r-r4 phase=PHASE1 status=SECRETS_FOUND dispatched=false attempt=1
 
 OUT_REF="$(bash "$REPORT_SH" --dir "$R_TSV_REF" --format tsv)"
-PH_REF_ROW="$(printf '%s\n' "$OUT_REF" | grep '^phase\tPHASE1\t')"
+PH_REF_ROW="$(printf '%s\n' "$OUT_REF" | grep $'^phase\tPHASE1\t')"
 check tsv-phase-ref-row "$PH_REF_ROW" "$(printf 'phase\tPHASE1\t2\t1\t1\t2\t0.50')" "refusals excluded from dispatches and pass rate in TSV"
 
 # 10.8 Filters narrow TSV rows
@@ -1133,14 +1133,14 @@ ledger_append "$R_TSV_FILT" run=run-a phase=ALPHA attempt=1 status=PASSED dispat
 ledger_append "$R_TSV_FILT" run=run-b phase=BETA attempt=1 status=PASSED dispatched=true started=2026-08-25T12:00:00Z
 
 OUT_FILT_PH="$(bash "$REPORT_SH" --dir "$R_TSV_FILT" --format tsv --phase ALPHA)"
-if printf '%s\n' "$OUT_FILT_PH" | grep -q '^phase\tALPHA\t' && ! printf '%s\n' "$OUT_FILT_PH" | grep -q '^phase\tBETA\t'; then
+if printf '%s\n' "$OUT_FILT_PH" | grep -q $'^phase\tALPHA\t' && ! printf '%s\n' "$OUT_FILT_PH" | grep -q $'^phase\tBETA\t'; then
   ok tsv-filt-phase "--phase narrows TSV phase rows"
 else
   bad tsv-filt-phase "--phase filter failed in TSV mode: $OUT_FILT_PH"
 fi
 
 OUT_FILT_RN="$(bash "$REPORT_SH" --dir "$R_TSV_FILT" --format tsv --run run-b)"
-if printf '%s\n' "$OUT_FILT_RN" | grep -q '^phase\tBETA\t' && ! printf '%s\n' "$OUT_FILT_RN" | grep -q '^phase\tALPHA\t'; then
+if printf '%s\n' "$OUT_FILT_RN" | grep -q $'^phase\tBETA\t' && ! printf '%s\n' "$OUT_FILT_RN" | grep -q $'^phase\tALPHA\t'; then
   ok tsv-filt-run "--run narrows TSV phase rows"
 else
   bad tsv-filt-run "--run filter failed in TSV mode: $OUT_FILT_RN"
